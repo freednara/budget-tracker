@@ -6,7 +6,7 @@
  */
 'use strict';
 
-import * as signals from './core/signals.js';
+import * as signals from '../core/signals.js';
 import {
   getMonthTx,
   calcTotals,
@@ -16,7 +16,7 @@ import {
   getUnassigned,
   getDailyAllowance,
   getSpendingPace
-} from './features/financial/calculations.js';
+} from '../features/financial/calculations.js';
 import {
   fmtCur,
   parseMonthKey,
@@ -25,27 +25,27 @@ import {
   getTodayStr,
   sumByType,
   toCents
-} from './core/utils.js';
-import { html, render, nothing, unsafeSVG, styleMap } from './core/lit-helpers.js';
-import { getCatInfo } from './core/categories.js';
+} from '../core/utils.js';
+import { html, render, nothing, unsafeSVG, styleMap } from '../core/lit-helpers.js';
+import { getCatInfo } from '../core/categories.js';
 import {
   isRolloverEnabled,
   getEffectiveBudget,
   calculateMonthRollovers
-} from './features/financial/rollover.js';
-import DOM from './core/dom-cache.js';
+} from '../features/financial/rollover.js';
+import DOM from '../core/dom-cache.js';
 
 // Reactive component imports
-import { mountSummaryCards } from './components/summary-cards.js';
-import { mountEnvelopeBudget } from './components/envelope-budget.js';
-import { mountBudgetGauge } from './components/budget-gauge.js';
-import { mountDailyAllowance } from './components/daily-allowance.js';
-import { mountDebtSummary } from './components/debt-summary.js';
-import { mountDebtList } from './components/debt-list.js';
-import { mountSavingsGoals } from './components/savings-goals.js';
-import { mountCalendar } from './components/calendar.js';
-import { mountCharts } from './components/charts.js';
-import { mountTransactions } from './components/transactions.js';
+import { mountSummaryCards } from '../components/summary-cards.js';
+import { mountEnvelopeBudget } from '../components/envelope-budget.js';
+import { mountBudgetGauge } from '../components/budget-gauge.js';
+import { mountDailyAllowance } from '../components/daily-allowance.js';
+import { mountDebtSummary } from '../components/debt-summary.js';
+import { mountDebtList } from '../components/debt-list.js';
+import { mountSavingsGoals } from '../components/savings-goals.js';
+import { mountCalendar } from '../components/calendar.js';
+import { mountCharts } from '../components/charts.js';
+import { mountTransactions } from '../components/transactions.js';
 
 // ==========================================
 // SVG HELPERS

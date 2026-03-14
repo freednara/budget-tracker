@@ -30,7 +30,7 @@ import {
   renderYearOverYearComparison,
   renderCategoryTrendsChart,
   updateTrendingSummary
-} from '../../analytics.js';
+} from '../../orchestration/analytics.js';
 import { setTheme } from '../../features/personalization/theme.js';
 import { dismissAlert } from '../../features/personalization/alerts.js';
 import { CONFIG, CURRENCY_MAP } from '../../core/config.js';

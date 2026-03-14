@@ -6,10 +6,10 @@
  */
 'use strict';
 
-import { dataSdk } from './data/data-manager.js';
-import { emit, Events } from './core/event-bus.js';
-import { showToast } from './ui/core/ui.js';
-import type { TransactionType } from '../types/index.js';
+import { dataSdk } from '../data/data-manager.js';
+import { emit, Events } from '../core/event-bus.js';
+import { showToast } from '../ui/core/ui.js';
+import type { TransactionType } from '../../types/index.js';
 
 // ==========================================
 // TYPES

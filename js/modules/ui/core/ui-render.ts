@@ -18,7 +18,7 @@ import { emit, Events } from '../../core/event-bus.js';
 import { monthLabel, esc, toCents, toDollars } from '../../core/utils.js';
 import { renderTrendChart, renderDonutChart, renderBarChart } from '../charts/chart-renderers.js';
 import { getMonthTx, getMonthExpByCat } from '../../features/financial/calculations.js';
-import { calcCategoryTrends } from '../../analytics.js';
+import { calcCategoryTrends } from '../../orchestration/analytics.js';
 import { getMonthBadge } from '../widgets/calendar.js';
 import type { Transaction, CustomCategory, TransactionType } from '../../../types/index.js';
 

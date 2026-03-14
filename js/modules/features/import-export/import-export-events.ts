@@ -21,7 +21,7 @@ import {
   MAX_IMPORT_TRANSACTIONS
 } from './import-export.js';
 import { setTheme } from '../personalization/theme.js';
-import { hideBackupReminder } from '../../backup-reminder.js';
+import { hideBackupReminder } from '../../orchestration/backup-reminder.js';
 import { awardAchievement } from '../gamification/achievements.js';
 import { emit, Events } from '../../core/event-bus.js';
 import { getTodayStr, esc, parseAmount, downloadBlob } from '../../core/utils.js';

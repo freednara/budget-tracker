@@ -15,7 +15,7 @@ import { dataSdk } from './data/data-manager.js';
 import { showToast, openModal } from './ui/core/ui.js';
 import { swipeManager } from './ui/interactions/swipe-manager.js';
 import DOM from './core/dom-cache.js';
-import { filterTransactions, shouldUseWorker } from './worker-manager.js';
+import { filterTransactions, shouldUseWorker } from './orchestration/worker-manager.js';
 import { VirtualScroller } from './ui/widgets/virtual-scroller.js';
 import { html, render, nothing, styleMap, type LitTemplate } from './core/lit-helpers.js';
 import { transactionRowTemplate, renderTransactionRowIntoContainer } from './transactions/transaction-row.js';

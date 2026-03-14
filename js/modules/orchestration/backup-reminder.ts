@@ -7,10 +7,10 @@
  */
 'use strict';
 
-import { SK, lsGet } from './core/state.js';
-import * as signals from './core/signals.js';
-import DOM from './core/dom-cache.js';
-import type { Transaction } from '../types/index.js';
+import { SK, lsGet } from '../core/state.js';
+import * as signals from '../core/signals.js';
+import DOM from '../core/dom-cache.js';
+import type { Transaction } from '../../types/index.js';
 
 // ==========================================
 // MODULE STATE

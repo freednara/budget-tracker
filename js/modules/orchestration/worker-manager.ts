@@ -6,7 +6,7 @@
  */
 'use strict';
 
-import type { Transaction, TransactionFilters } from '../types/index.js';
+import type { Transaction, TransactionFilters } from '../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
@@ -109,7 +109,7 @@ function getWorker(): Worker | null {
   if (!workerInstance && isWorkerSupported()) {
     try {
       workerInstance = new Worker(
-        new URL('../workers/filter-worker.ts', import.meta.url),
+        new URL('../../workers/filter-worker.ts', import.meta.url),
         { type: 'module' }
       );
 

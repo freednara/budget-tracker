@@ -8,10 +8,10 @@
  */
 'use strict';
 
-import * as signals from './core/signals.js';
-import { parseLocalDate, getMonthKey, getPrevMonthKey, toCents } from './core/utils.js';
-import { html, render, nothing, unsafeSVG, styleMap, type LitTemplate } from './core/lit-helpers.js';
-import { getCatInfo } from './core/categories.js';
+import * as signals from '../core/signals.js';
+import { parseLocalDate, getMonthKey, getPrevMonthKey, toCents } from '../core/utils.js';
+import { html, render, nothing, unsafeSVG, styleMap, type LitTemplate } from '../core/lit-helpers.js';
+import { getCatInfo } from '../core/categories.js';
 import {
   getMonthTx,
   getYearStats,
@@ -19,8 +19,8 @@ import {
   getMonthExpByCat,
   formatMonthDisplay,
   compareYearsMonthly
-} from './features/financial/calculations.js';
-import DOM from './core/dom-cache.js';
+} from '../features/financial/calculations.js';
+import DOM from '../core/dom-cache.js';
 import type {
   Transaction,
   CurrencyFormatter,
@@ -35,7 +35,7 @@ import type {
   CategoryTrendChange,
   AllTimeStats,
   YearStats
-} from '../types/index.js';
+} from '../../types/index.js';
 
 // ==========================================
 // CALLBACKS (set by app.js to avoid circular deps)

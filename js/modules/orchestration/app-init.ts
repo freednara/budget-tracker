@@ -6,10 +6,10 @@
  */
 'use strict';
 
-import { generateId, parseLocalDate } from './core/utils.js';
-import { EXPENSE_CATS, INCOME_CATS } from './core/categories.js';
-import * as signals from './core/signals.js';
-import type { Transaction, CustomCategory } from '../types/index.js';
+import { generateId, parseLocalDate } from '../core/utils.js';
+import { EXPENSE_CATS, INCOME_CATS } from '../core/categories.js';
+import * as signals from '../core/signals.js';
+import type { Transaction, CustomCategory } from '../../types/index.js';
 
 // ==========================================
 // TYPES

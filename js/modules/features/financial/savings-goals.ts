@@ -10,7 +10,7 @@ import * as signals from '../../core/signals.js';
 import { modal, data } from '../../core/state-actions.js';
 import { parseLocalDate } from '../../core/utils.js';
 import { openModal, showToast } from '../../ui/core/ui.js';
-import { updateSummary } from '../../dashboard.js';
+import { updateSummary } from '../../orchestration/dashboard.js';
 import DOM from '../../core/dom-cache.js';
 import { html, render, nothing, type LitTemplate } from '../../core/lit-helpers.js';
 import type { SavingsGoal, SavingsContribution } from '../../../types/index.js';

@@ -8,8 +8,8 @@
  */
 'use strict';
 
-import { on, Events } from './core/event-bus.js';
-import { renderScheduler } from './core/render-scheduler.js';
+import { on, Events } from '../core/event-bus.js';
+import { renderScheduler } from '../core/render-scheduler.js';
 
 // ==========================================
 // TYPE DEFINITIONS

@@ -57,7 +57,7 @@ import {
 import {
   shouldUseWorker,
   getWorkerStatus
-} from './js/modules/worker-manager.js';
+} from './js/modules/orchestration/worker-manager.js';
 // Note: filterTransactions from worker-manager.js available for async filtering of large datasets
 // PIN UI handlers (crypto functions used internally)
 import {
@@ -100,7 +100,7 @@ import {
 import {
   setAnalyticsFmtCurFn,
   calcCategoryTrends
-} from './js/modules/analytics.js';
+} from './js/modules/orchestration/analytics.js';
 // Note: renderAnalytics, renderYearComparisonChart, renderCategoryTrendsChart,
 // updateTrendingSummary, setAnalyticsCurrentPeriod used by modal-events.js
 // Note: Most chart render functions are internal to analytics.js
@@ -109,7 +109,7 @@ import {
   renderEnvelope,
   renderBudgetGauge,
   initDashboard
-} from './js/modules/dashboard.js';
+} from './js/modules/orchestration/dashboard.js';
 // Note: animateValue, updateDailyAllowance, updateTodayBudget, updateMonthlyPace are internal to dashboard.js
 // initDashboard() sets up reactive components that auto-update when signals change
 import { mountModals } from './js/modules/components/mount-modals.js';
@@ -117,7 +117,7 @@ import { mountModals } from './js/modules/components/mount-modals.js';
 // Import/export functions now used by import-export-events.js module
 // Note: validateTransaction is internal to import-export.js
 import { on, emit, Events } from './js/modules/core/event-bus.js';
-import { checkBackupReminder } from './js/modules/backup-reminder.js';
+import { checkBackupReminder } from './js/modules/orchestration/backup-reminder.js';
 // Note: hideBackupReminder used by import-export-events.js
 // showCelebration used internally by achievements.js
 import { renderStreak } from './js/modules/features/gamification/streak-tracker.js';
@@ -201,9 +201,9 @@ import {
 } from './js/modules/ui/core/empty-state.js';
 import type { Transaction, Theme, TransactionType, CustomCategory, CurrencySettings, RolloverSettings, AlertPrefs, StreakData } from './js/types/index.js';
 // Phase 1 refactoring: Extracted modules
-import { loadSampleData } from './js/modules/sample-data.js';
+import { loadSampleData } from './js/modules/orchestration/sample-data.js';
 import { renderMonthComparison, setAnalyticsUiFmtCur } from './js/modules/ui/charts/analytics-ui.js';
-import { deduplicateTransactions, validateTransactionsOnLoad } from './js/modules/app-init.js';
+import { deduplicateTransactions, validateTransactionsOnLoad } from './js/modules/orchestration/app-init.js';
 import { renderScheduler } from './js/modules/render-scheduler.js';
 import {
   renderMonthNav,
@@ -216,7 +216,7 @@ import {
   setSwitchMainTabFn as setUiRenderSwitchMainTabFn,
   setRenderTransactionsFn
 } from './js/modules/ui/core/ui-render.js';
-import { initAppEvents } from './js/modules/app-events.js';
+import { initAppEvents } from './js/modules/orchestration/app-events.js';
 import { initStorageEvents } from './js/modules/ui/interactions/storage-events.js';
 
 // ==========================================
