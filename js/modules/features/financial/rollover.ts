@@ -11,8 +11,10 @@
 
 import { SK, lsGet, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
-import { getPrevMonthKey, toCents, toDollars } from '../../core/utils.js';
-import { getMonthExpByCat } from './calculations.js';
+import { getPrevMonthKey, toCents, toDollars, getMonthKey } from '../../core/utils.js';
+import { calculateMonthlyTotalsWithCacheSync } from '../../core/monthly-totals-cache.js';
+import { on, emit } from '../../core/event-bus.js';
+import { FeatureEvents, type FeatureResponse } from '../../core/feature-event-interface.js';
 import type {
   RolloverSettings,
   RolloverSummary,
@@ -156,53 +158,51 @@ export function getRolloverSettings(): RolloverSettings {
 /**
  * Calculate rollover amount from previous month for a category
  * Uses cents-based math to avoid floating-point errors
+ * FIXED: Now accumulates across multiple months using cached totals for efficiency
  *
  * @returns Rollover amount in dollars (positive = surplus, negative = overspent)
  */
 export function calculateRollover(categoryId: string, monthKey: string): number {
   if (!isCategoryRolloverEnabled(categoryId)) return 0;
 
-  const prevMonthKey = getPrevMonthKey(monthKey);
-
-  // Get previous month's allocation
-  const prevAlloc = signals.monthlyAlloc.value[prevMonthKey]?.[categoryId];
-  if (prevAlloc === undefined || prevAlloc === null) return 0;
-
-  // Get previous month's spending (already returns dollars)
-  const prevSpent = getMonthExpByCat(categoryId, prevMonthKey);
-
-  // Calculate unspent (using cents to avoid floating-point errors)
-  const allocCents = toCents(prevAlloc);
-  const spentCents = toCents(prevSpent);
-  const unspentCents = allocCents - spentCents;
-  const unspent = toDollars(unspentCents);
-
   const settings = getRolloverSettings();
+  
+  // Find all relevant months chronologically
+  const allMonthsWithAlloc = Object.keys(signals.monthlyAlloc.value).sort();
+  const startMonth = allMonthsWithAlloc.find(mk => 
+    signals.monthlyAlloc.value[mk]?.[categoryId] !== undefined
+  );
+  
+  if (!startMonth || startMonth >= monthKey) return 0;
 
-  // Handle negative balances based on settings
-  if (unspent < 0) {
-    switch (settings.negativeHandling) {
-      case 'zero':
-        return 0;  // Forgive overspending
-      case 'ignore':
-        return 0;  // Don't carry negative
-      case 'carry':
-        // Carry forward negative (reduces next month's budget)
-        break;
+  let accumulatedCents = 0;
+  
+  for (const mk of allMonthsWithAlloc) {
+    if (mk < startMonth) continue;
+    if (mk >= monthKey) break;
+
+    const monthAlloc = signals.monthlyAlloc.value[mk]?.[categoryId] || 0;
+    const allocCents = toCents(monthAlloc);
+    
+    // OPTIMIZED: Use cached totals instead of manual calculation
+    const totals = calculateMonthlyTotalsWithCacheSync(mk);
+    const monthSpentCents = toCents((totals.categoryTotals || {})[categoryId] || 0);
+    
+    accumulatedCents += (allocCents - monthSpentCents);
+    
+    // Handle negative balances based on settings  
+    if (accumulatedCents < 0 && settings.negativeHandling === 'zero') {
+      accumulatedCents = 0;
     }
   }
 
-  // Apply max rollover cap if set
+  // Apply max rollover cap
   if (settings.maxRollover !== null && settings.maxRollover !== undefined) {
-    if (unspent > 0 && unspent > settings.maxRollover) {
-      return settings.maxRollover;
-    }
-    if (unspent < 0 && Math.abs(unspent) > settings.maxRollover) {
-      return -settings.maxRollover;
-    }
+    const maxCents = toCents(settings.maxRollover);
+    accumulatedCents = Math.max(-maxCents, Math.min(accumulatedCents, maxCents));
   }
 
-  return unspent;
+  return toDollars(accumulatedCents);
 }
 
 /**
@@ -295,6 +295,24 @@ export function initRollover(): void {
   // Load settings from localStorage
   const savedSettings = lsGet(SK.ROLLOVER_SETTINGS, null) as RolloverSettings | null;
   signals.rolloverSettings.value = savedSettings || { ...DEFAULT_ROLLOVER_SETTINGS };
+
+  // Register Feature Event Listeners
+  on(FeatureEvents.REQUEST_ROLLOVER_SETTINGS, (data?: { responseEvent?: string }) => {
+    const responseEvent = data?.responseEvent || `${FeatureEvents.REQUEST_ROLLOVER_SETTINGS}:response`;
+    const response: FeatureResponse<RolloverSettings> = {
+      type: FeatureEvents.REQUEST_ROLLOVER_SETTINGS,
+      result: getRolloverSettings()
+    };
+    emit(responseEvent, response);
+  });
+
+  on(FeatureEvents.UPDATE_ROLLOVER_SETTINGS, (settings: RolloverSettings) => {
+    if (settings.enabled !== undefined) setRolloverEnabled(settings.enabled);
+    if (settings.mode) setRolloverMode(settings.mode);
+    if (settings.categories) setRolloverCategories(settings.categories);
+    if (settings.maxRollover !== undefined) setMaxRollover(settings.maxRollover);
+    if (settings.negativeHandling) setNegativeHandling(settings.negativeHandling);
+  });
 }
 
 // ==========================================
@@ -358,7 +376,8 @@ export function calculateRolloverPure(
         // Carry forward negative (reduces next month's budget)
         break;
       case 'ignore':
-        return 0;
+        // Let the negative amount pass through unchanged (don't interfere)
+        break;
     }
   }
 

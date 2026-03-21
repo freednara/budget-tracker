@@ -4,6 +4,12 @@
  * Efficient rendering for large lists using DOM recycling and viewport-based rendering.
  * Only renders visible items plus a buffer zone for smooth scrolling.
  *
+ * Key improvements:
+ * - Optimized render cycle with differential updates
+ * - Safe swipe manager integration with state reset
+ * - Dynamic row height calculation for variable content
+ * - Performance tracking and memory management
+ *
  * @module virtual-scroller
  */
 
@@ -18,6 +24,8 @@ export interface VirtualScrollerOptions {
   bufferSize?: number;
   rowClass?: string;
   enableSwipe?: boolean;
+  trackRowHeights?: boolean; // Enable dynamic height tracking
+  maxPoolSize?: number; // Limit row pool size for memory management
 }
 
 export type RowRenderer<T> = (rowEl: HTMLElement, item: T, index: number) => void;
@@ -31,7 +39,15 @@ interface VirtualScrollerStats {
   renderedCount: number;
   poolSize: number;
   estimatedHeight: number;
+  averageRowHeight: number;
   scrollTop: number;
+  renderCacheHits: number;
+}
+
+interface SwipeState {
+  revealed: boolean;
+  direction: 'left' | 'right' | null;
+  animating: boolean;
 }
 
 // ==========================================
@@ -48,6 +64,8 @@ export class VirtualScroller<T = unknown> {
   private bufferSize: number;
   private rowClass: string;
   private enableSwipe: boolean;
+  private trackRowHeights: boolean;
+  private maxPoolSize: number;
 
   // State
   private containerEl: HTMLElement | null = null;
@@ -63,13 +81,21 @@ export class VirtualScroller<T = unknown> {
   private spacerBottom: HTMLDivElement | null = null;
   private rowContainer: HTMLDivElement | null = null;
 
-  // Row recycling pool
+  // Row recycling pool with size limit
   private rowPool: HTMLDivElement[] = [];
   private activeRows: Map<number, HTMLDivElement> = new Map();
 
-  // Height cache for variable height rows
+  // Height tracking for variable content
   private heightCache: Map<number, number> = new Map();
   private totalHeightEstimate: number = 0;
+  private measuredRowCount: number = 0;
+  private totalMeasuredHeight: number = 0;
+
+  // Swipe state tracking
+  private swipeStates: Map<HTMLElement, SwipeState> = new Map();
+
+  // Performance tracking
+  private renderCacheHits: number = 0;
 
   // Throttling
   private scrollRAF: number | null = null;
@@ -83,6 +109,8 @@ export class VirtualScroller<T = unknown> {
     this.bufferSize = options.bufferSize || 10;
     this.rowClass = options.rowClass || 'vs-row';
     this.enableSwipe = options.enableSwipe !== false;
+    this.trackRowHeights = options.trackRowHeights !== false;
+    this.maxPoolSize = options.maxPoolSize || 50;
 
     // Bind handlers
     this._onScroll = this._onScroll.bind(this);
@@ -120,19 +148,41 @@ export class VirtualScroller<T = unknown> {
   }
 
   /**
-   * Clean up existing content and swipe handlers
+   * Clean up existing content and swipe handlers safely
    */
   private _cleanupExistingContent(): void {
-    // Detach swipe handlers from existing content
+    // Detach swipe handlers from existing content with state cleanup
     this.containerEl!.querySelectorAll<HTMLElement>('.swipe-container').forEach(container => {
+      this._resetSwipeState(container);
       swipeManager.detach(container);
     });
+
+    // Clear swipe state tracking
+    this.swipeStates.clear();
 
     // Clear active rows
     this.activeRows.forEach((rowEl) => {
       this._recycleRow(rowEl, true);
     });
     this.activeRows.clear();
+  }
+
+  /**
+   * Reset swipe state for an element
+   */
+  private _resetSwipeState(container: HTMLElement): void {
+    const swipeState = this.swipeStates.get(container);
+    if (swipeState?.animating) {
+      // Force complete any ongoing animations
+      container.classList.remove('revealed-left', 'revealed-right');
+      const content = container.querySelector<HTMLElement>('.swipe-content');
+      if (content) {
+        content.style.transform = '';
+        content.style.transition = '';
+        content.classList.remove('swiping', 'spring-back');
+      }
+    }
+    this.swipeStates.delete(container);
   }
 
   /**
@@ -176,10 +226,25 @@ export class VirtualScroller<T = unknown> {
   }
 
   /**
-   * Calculate total height estimate
+   * Calculate total height estimate using dynamic average when available
    */
   private _calculateHeightEstimate(): void {
-    this.totalHeightEstimate = this.items.length * this.rowHeight;
+    const averageHeight = this.getAverageRowHeight();
+    this.totalHeightEstimate = this.items.length * averageHeight;
+  }
+
+  /**
+   * Get average row height based on measured heights
+   */
+  private getAverageRowHeight(): number {
+    if (this.measuredRowCount === 0) {
+      return this.rowHeight; // Fallback to estimated height
+    }
+    
+    const average = this.totalMeasuredHeight / this.measuredRowCount;
+    // Smooth the transition between estimate and measured
+    const confidence = Math.min(this.measuredRowCount / 20, 1); // Full confidence after 20 measurements
+    return this.rowHeight * (1 - confidence) + average * confidence;
   }
 
   /**
@@ -195,10 +260,10 @@ export class VirtualScroller<T = unknown> {
       const scrollDelta = Math.abs(scrollTop - this.lastScrollTop);
 
       // Only update if scrolled more than half a row
-      if (scrollDelta > this.rowHeight / 2) {
+      if (scrollDelta > this.getAverageRowHeight() / 2) {
         this.lastScrollTop = scrollTop;
         this._updateVisibleRange();
-        this._render();
+        this._renderOptimized();
       }
     });
   }
@@ -208,7 +273,7 @@ export class VirtualScroller<T = unknown> {
    */
   private _onResize(): void {
     this._updateVisibleRange();
-    this._render();
+    this._renderOptimized();
   }
 
   /**
@@ -217,22 +282,24 @@ export class VirtualScroller<T = unknown> {
   private _updateVisibleRange(): void {
     const scrollTop = this.scrollContainer!.scrollTop;
     const viewportHeight = this.scrollContainer!.clientHeight;
+    const averageHeight = this.getAverageRowHeight();
 
     // Calculate visible range with buffer
-    const firstVisible = Math.floor(scrollTop / this.rowHeight);
-    const visibleCount = Math.ceil(viewportHeight / this.rowHeight);
+    const firstVisible = Math.floor(scrollTop / averageHeight);
+    const visibleCount = Math.ceil(viewportHeight / averageHeight);
 
     this.visibleStart = Math.max(0, firstVisible - this.bufferSize);
     this.visibleEnd = Math.min(this.items.length, firstVisible + visibleCount + this.bufferSize);
   }
 
   /**
-   * Render visible rows
+   * Optimized render that only updates changed rows
    */
-  private _render(): void {
+  private _renderOptimized(): void {
     // Update spacer heights
-    const startOffset = this.visibleStart * this.rowHeight;
-    const endOffset = Math.max(0, this.totalHeightEstimate - (this.visibleEnd * this.rowHeight));
+    const averageHeight = this.getAverageRowHeight();
+    const startOffset = this.visibleStart * averageHeight;
+    const endOffset = Math.max(0, this.totalHeightEstimate - (this.visibleEnd * averageHeight));
 
     this.spacerTop!.style.height = `${startOffset}px`;
     this.spacerBottom!.style.height = `${endOffset}px`;
@@ -245,34 +312,76 @@ export class VirtualScroller<T = unknown> {
       neededIndices.add(i);
     }
 
-    // Recycle rows that are no longer visible
+    // Identify rows to recycle (no longer visible)
+    const toRecycle: number[] = [];
+    const toKeep: number[] = [];
+    
     currentIndices.forEach(index => {
       if (!neededIndices.has(index)) {
-        const rowEl = this.activeRows.get(index);
-        if (rowEl) {
-          this._recycleRow(rowEl);
-        }
-        this.activeRows.delete(index);
+        toRecycle.push(index);
+      } else {
+        toKeep.push(index);
+        this.renderCacheHits++;
       }
     });
 
-    // Render new rows
+    // Identify new rows needed
+    const toCreate: number[] = [];
     neededIndices.forEach(index => {
-      if (!this.activeRows.has(index)) {
-        const rowEl = this._getOrCreateRow();
-        this._renderRow(rowEl, index);
-        this.activeRows.set(index, rowEl);
+      if (!currentIndices.has(index)) {
+        toCreate.push(index);
       }
     });
 
-    // Sort rows in DOM order (important for screen readers)
+    // Recycle rows that are no longer visible
+    toRecycle.forEach(index => {
+      const rowEl = this.activeRows.get(index);
+      if (rowEl) {
+        this._recycleRow(rowEl);
+      }
+      this.activeRows.delete(index);
+    });
+
+    // Render new rows only
+    toCreate.forEach(index => {
+      const rowEl = this._getOrCreateRow();
+      this._renderRow(rowEl, index);
+      this.activeRows.set(index, rowEl);
+    });
+
+    // Only re-order DOM if we have new rows (optimization)
+    if (toCreate.length > 0) {
+      this._reorderRows();
+    }
+  }
+
+  /**
+   * Re-order rows in DOM for proper accessibility and screen reader support
+   */
+  private _reorderRows(): void {
+    // Get all active row indices and sort them
     const sortedIndices = Array.from(this.activeRows.keys()).sort((a, b) => a - b);
+    
+    // Create document fragment for efficient DOM manipulation
+    const fragment = document.createDocumentFragment();
+    
     sortedIndices.forEach(index => {
       const rowEl = this.activeRows.get(index);
       if (rowEl) {
-        this.rowContainer!.appendChild(rowEl);
+        fragment.appendChild(rowEl);
       }
     });
+    
+    // Replace all rows at once
+    this.rowContainer!.innerHTML = '';
+    this.rowContainer!.appendChild(fragment);
+  }
+
+  /**
+   * Fallback render method for compatibility
+   */
+  private _render(): void {
+    this._renderOptimized();
   }
 
   /**
@@ -295,8 +404,8 @@ export class VirtualScroller<T = unknown> {
     const item = this.items[index];
     if (!item) return;
 
-    // Clear existing content
-    rowEl.innerHTML = '';
+    // Clear existing content and reset any swipe state
+    this._clearRowContent(rowEl);
 
     // Call the render function
     if (this.rowRenderer) {
@@ -311,35 +420,80 @@ export class VirtualScroller<T = unknown> {
     if (this.enableSwipe) {
       const swipeContainer = rowEl.querySelector<HTMLElement>('.swipe-container');
       if (swipeContainer) {
+        // Initialize swipe state
+        this.swipeStates.set(swipeContainer, {
+          revealed: false,
+          direction: null,
+          animating: false
+        });
         swipeManager.attach(swipeContainer);
       }
     }
 
-    // Cache measured height if different from estimate
-    // (done after next frame to ensure layout is complete)
-    requestAnimationFrame(() => {
-      const measuredHeight = rowEl.offsetHeight;
-      if (measuredHeight && measuredHeight !== this.rowHeight) {
-        this.heightCache.set(index, measuredHeight);
-      }
-    });
+    // Cache measured height if tracking is enabled
+    if (this.trackRowHeights) {
+      requestAnimationFrame(() => {
+        const measuredHeight = rowEl.offsetHeight;
+        if (measuredHeight && measuredHeight > 0) {
+          const previousHeight = this.heightCache.get(index);
+          
+          // Update cache and running average
+          this.heightCache.set(index, measuredHeight);
+          
+          if (previousHeight === undefined) {
+            // New measurement
+            this.measuredRowCount++;
+            this.totalMeasuredHeight += measuredHeight;
+          } else if (previousHeight !== measuredHeight) {
+            // Updated measurement
+            this.totalMeasuredHeight = this.totalMeasuredHeight - previousHeight + measuredHeight;
+          }
+          
+          // Recalculate total height estimate if we have significant new data
+          if (this.measuredRowCount % 10 === 0) {
+            this._calculateHeightEstimate();
+          }
+        }
+      });
+    }
   }
 
   /**
-   * Recycle a row back to the pool
+   * Clear row content and reset any associated state
+   */
+  private _clearRowContent(rowEl: HTMLDivElement): void {
+    // Find any swipe containers and clean up their state
+    const swipeContainers = rowEl.querySelectorAll<HTMLElement>('.swipe-container');
+    swipeContainers.forEach(container => {
+      this._resetSwipeState(container);
+    });
+
+    // Clear HTML content
+    rowEl.innerHTML = '';
+  }
+
+  /**
+   * Recycle a row back to the pool with safe swipe cleanup
    */
   private _recycleRow(rowEl: HTMLDivElement, skipSwipeCleanup: boolean = false): void {
     if (!skipSwipeCleanup && this.enableSwipe) {
-      // Detach swipe handlers
+      // Safe swipe state cleanup
       const swipeContainer = rowEl.querySelector<HTMLElement>('.swipe-container');
       if (swipeContainer) {
-        swipeManager.detach(swipeContainer);
-        // Reset swipe state
-        swipeContainer.classList.remove('revealed-left', 'revealed-right');
-        const content = swipeContainer.querySelector<HTMLElement>('.swipe-content');
-        if (content) {
-          content.style.transform = '';
-          content.classList.remove('swiping', 'spring-back');
+        const swipeState = this.swipeStates.get(swipeContainer);
+        
+        // If actively swiping, wait for animation to complete
+        if (swipeState?.animating) {
+          // Force complete the animation
+          swipeContainer.style.transition = 'none';
+          requestAnimationFrame(() => {
+            this._resetSwipeState(swipeContainer);
+            swipeManager.detach(swipeContainer);
+            swipeContainer.style.transition = '';
+          });
+        } else {
+          this._resetSwipeState(swipeContainer);
+          swipeManager.detach(swipeContainer);
         }
       }
     }
@@ -352,8 +506,11 @@ export class VirtualScroller<T = unknown> {
     // Clear content
     rowEl.innerHTML = '';
 
-    // Add to pool
-    this.rowPool.push(rowEl);
+    // Add to pool with size limit
+    if (this.rowPool.length < this.maxPoolSize) {
+      this.rowPool.push(rowEl);
+    }
+    // If pool is full, let the element be garbage collected
   }
 
   /**
@@ -365,7 +522,13 @@ export class VirtualScroller<T = unknown> {
       : 0;
 
     this.items = items;
+    
+    // Reset height cache for new data
     this.heightCache.clear();
+    this.measuredRowCount = 0;
+    this.totalMeasuredHeight = 0;
+    this.renderCacheHits = 0;
+    
     this._calculateHeightEstimate();
 
     // Recycle all current rows
@@ -373,20 +536,21 @@ export class VirtualScroller<T = unknown> {
       this._recycleRow(rowEl);
     });
     this.activeRows.clear();
+    this.swipeStates.clear();
 
     if (preservePosition && items.length > 0) {
       // Restore approximate scroll position
       requestAnimationFrame(() => {
         this.scrollContainer!.scrollTop = previousScrollRatio * this.totalHeightEstimate;
         this._updateVisibleRange();
-        this._render();
+        this._renderOptimized();
       });
     } else {
       // Reset to top
       this.scrollContainer!.scrollTop = 0;
       this.visibleStart = 0;
       this._updateVisibleRange();
-      this._render();
+      this._renderOptimized();
     }
   }
 
@@ -394,16 +558,17 @@ export class VirtualScroller<T = unknown> {
    * Scroll to a specific item index
    */
   scrollToIndex(index: number, position: ScrollPosition = 'start'): void {
-    const targetOffset = index * this.rowHeight;
+    const averageHeight = this.getAverageRowHeight();
+    const targetOffset = index * averageHeight;
     const viewportHeight = this.scrollContainer!.clientHeight;
 
     let scrollTop: number;
     switch (position) {
       case 'center':
-        scrollTop = targetOffset - (viewportHeight / 2) + (this.rowHeight / 2);
+        scrollTop = targetOffset - (viewportHeight / 2) + (averageHeight / 2);
         break;
       case 'end':
-        scrollTop = targetOffset - viewportHeight + this.rowHeight;
+        scrollTop = targetOffset - viewportHeight + averageHeight;
         break;
       default: // 'start'
         scrollTop = targetOffset;
@@ -466,12 +631,18 @@ export class VirtualScroller<T = unknown> {
       this.scrollContainer.removeEventListener('scroll', this._onScroll);
     }
 
+    // Clean up all swipe states
+    this.swipeStates.clear();
+
     // Recycle all rows
     this.activeRows.forEach((rowEl) => {
       this._recycleRow(rowEl);
     });
     this.activeRows.clear();
     this.rowPool = [];
+
+    // Clear height cache
+    this.heightCache.clear();
 
     // Clear container
     if (this.containerEl) {
@@ -487,7 +658,6 @@ export class VirtualScroller<T = unknown> {
     this.rowContainer = null;
     this.items = [];
     this.rowRenderer = null;
-    this.heightCache.clear();
   }
 
   /**
@@ -508,7 +678,9 @@ export class VirtualScroller<T = unknown> {
       renderedCount: this.activeRows.size,
       poolSize: this.rowPool.length,
       estimatedHeight: this.totalHeightEstimate,
-      scrollTop: this.scrollContainer?.scrollTop || 0
+      averageRowHeight: this.getAverageRowHeight(),
+      scrollTop: this.scrollContainer?.scrollTop || 0,
+      renderCacheHits: this.renderCacheHits
     };
   }
 }

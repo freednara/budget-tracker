@@ -2,23 +2,22 @@
 
 > Professional-grade personal finance management with uncompromising privacy
 
-[![Version](https://img.shields.io/badge/version-2.5.0-blue.svg)](https://github.com/yourusername/budget-tracker)
+[![Version](https://img.shields.io/badge/version-2.6.2-blue.svg)](https://github.com/yourusername/budget-tracker)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![PWA](https://img.shields.io/badge/PWA-Ready-purple.svg)](https://web.dev/progressive-web-apps/)
-[![WCAG 2.1](https://img.shields.io/badge/WCAG-2.1%20AA-orange.svg)](https://www.w3.org/WAI/WCAG21/quickref/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-100%25-blue.svg)](https://www.typescriptlang.org/)
 
 ## 🌟 Why Budget Tracker Elite?
 
-**Your finances should be yours alone.** Unlike mainstream budget apps that harvest your data, Budget Tracker Elite keeps everything on your device. No cloud. No tracking. No subscriptions. Just powerful budgeting that respects your privacy.
+**Your finances should be yours alone.** Budget Tracker Elite is a privacy-first, local-first financial management tool. No cloud, no tracking, no subscriptions. Just powerful budgeting that respects your privacy.
 
-### Key Features
-
-- 🔒 **Privacy First** - All data stored locally, no cloud sync required
-- 💸 **No Subscription** - One-time purchase or free self-hosted
-- 📱 **Works Offline** - Full functionality without internet
-- 🎯 **100+ Features** - Everything YNAB has, nothing you don't need
-- 🎮 **Gamified** - Achievements, badges, and streaks
-- 🌙 **Dark Mode** - Beautiful themes with system detection
+### Modernization Highlights
+- 🟦 **100% TypeScript** - Robust type safety and developer experience
+- 🏗️ **Modular Architecture** - Clean, decoupled service-oriented design
+- ⚡ **Signal-based Reactivity** - Fine-grained UI updates with Preact Signals
+- 🗄️ **Tiered Storage** - IndexedDB with LocalStorage fallback and automatic migration
+- 🔄 **Multi-Tab Sync** - Real-time synchronization across browser tabs
+- 🚀 **Off-Main-Thread Processing** - Web Workers for heavy computations
 
 ## 🚀 Quick Start
 
@@ -45,94 +44,72 @@ npm run dev
 npm run build
 ```
 
-### Deploy to Vercel
-
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/yourusername/budget-tracker)
-
-## 💎 Core Features
-
-### Financial Management
-- **Envelope Budgeting** - Allocate every dollar with zero-based budgeting
-- **Transaction Tracking** - Income, expenses, splits, and transfers
-- **Recurring Transactions** - Bills, subscriptions, and scheduled payments
-- **Debt Management** - Snowball/avalanche strategies with payoff projections
-- **Savings Goals** - Track progress toward financial objectives
-- **Investment Tracking** - Monitor portfolio performance (coming soon)
-
-### Analytics & Insights
-- **Smart Insights** - AI-powered spending analysis
-- **Trend Charts** - Visualize spending over 3M/6M/12M/All-time
-- **Category Breakdown** - See where your money goes
-- **Net Worth Tracking** - Assets minus liabilities over time
-- **Calendar Heatmap** - GitHub-style spending visualization
-
-### User Experience
-- **PWA Support** - Install as native app on any device
-- **Touch Gestures** - Swipe to edit/delete transactions
-- **Keyboard Shortcuts** - Power user productivity
-- **Custom Categories** - Organize your way with emoji icons
-- **Multi-Currency** - Support for 150+ currencies
-- **Import/Export** - CSV, JSON, and QIF formats
-
-## 📊 Screenshots
-
-<div align="center">
-  <img src="assets/screenshot-dashboard.png" width="30%" alt="Dashboard">
-  <img src="assets/screenshot-transactions.png" width="30%" alt="Transactions">
-  <img src="assets/screenshot-analytics.png" width="30%" alt="Analytics">
-</div>
-
 ## 🏗️ Architecture
 
-Built with modern web standards and zero dependencies on frameworks:
+The project has been refactored from a monolithic `app.js` into a modern, modular structure under `js/modules/`, coordinated by a lazy-loading Dependency Injection (DI) container.
 
 ```
 budget-tracker/
-├── index.html          # Main application shell
-├── app.js             # Core application logic
-├── styles.css         # Styling with CSS variables
-├── manifest.json      # PWA configuration
-├── sw.js             # Service worker for offline
-└── js/
-    └── modules/       # 22 specialized modules
-        ├── state.js   # Centralized state management
-        ├── data-manager.js  # CRUD operations
-        ├── transactions.js  # Transaction handling
-        ├── analytics.js     # Charts and insights
-        └── ...
+├── app.ts              # Application entry point & orchestration
+├── js/
+│   ├── modules/
+│   │   ├── core/           # DI, Signals, EventBus, Multi-tab sync, Performance (43 modules)
+│   │   ├── data/           # IndexedDB/LocalStorage adapters, Migration, StorageManager (11 modules)
+│   │   ├── ui/             # Base UI components and layout management (23 modules)
+│   │   ├── features/       # Business logic (Budget, Debt, Savings, etc.) (24 modules)
+│   │   ├── components/     # Lit-style UI components (Charts, Modals, etc.) (19 modules)
+│   │   ├── orchestration/  # App lifecycle and feature integration (11 modules)
+│   │   ├── transactions/   # Transaction system (4 modules)
+│   │   └── types/          # TypeScript type definitions (3 modules)
+│   └── workers/        # Off-main-thread workers (filter-worker-optimized.ts)
+└── tests/              # Comprehensive Vitest & Playwright suite
 ```
 
 ### Tech Stack
 
-- **Frontend**: Vanilla JavaScript (ES6+), HTML5, CSS3
-- **Storage**: LocalStorage with IndexedDB planned
-- **Build**: Vite for bundling and optimization
-- **Testing**: Vitest with 207+ tests
-- **PWA**: Service Worker with offline support
+- **Language**: TypeScript (100%)
+- **Reactivity**: Preact Signals
+- **Rendering**: lit-html for efficient DOM updates
+- **Storage**: IndexedDB (Primary) + LocalStorage (Fallback)
+- **Build**: Vite 7+
+- **Testing**: Vitest (Unit/Integration) + Playwright (E2E)
+- **Architecture**: Modular DI-driven design
+
+## 📊 Core Features
+
+### Financial Management
+- **Envelope Budgeting** - Zero-based budgeting with monthly rollovers
+- **Transaction Tracking** - Optimized filtering via Web Workers
+- **Tiered Data Persistence** - Robust storage with automatic rollback & migration
+- **Multi-Tab Sync** - Atomic data updates across tabs using BroadcastChannel & Mutex
+
+### Performance & Reliability
+- **Performance Monitoring** - Real-time tracking of app vitals
+- **Error Boundaries** - Standardized error handling & circuit breakers
+- **Off-Main-Thread Filtering** - Smooth UI even with 10k+ transactions
+- **Lazy Loading** - Services are initialized only when needed via DI
 
 ## 🧪 Testing
 
 ```bash
-# Run test suite
+# Run unit & integration tests (Vitest)
 npm test
+
+# Run E2E tests (Playwright)
+npm run test:e2e
 
 # Run with coverage
 npm run test:coverage
-
-# Run in watch mode
-npm run test:watch
 ```
 
-Current test coverage: **87%** across 207 tests
+Current test coverage: **>90%** across 170 tests (8 test files).
 
 ## 🔒 Security
 
-### Implementation
-- **PIN Protection**: PBKDF2-SHA256 with 100k iterations
-- **XSS Prevention**: Input sanitization throughout
-- **CSP Headers**: Content Security Policy enabled
-- **HTTPS Only**: Enforced in production
-- **No Tracking**: Zero analytics or third-party scripts
+- **Privacy First**: All data stays on your device.
+- **PIN Protection**: PBKDF2-SHA256 with 100k iterations.
+- **XSS Prevention**: Standardized sanitization and safe DOM operations.
+- **Data Atomicity**: Mutex-protected storage operations for multi-tab safety.
 
 ### Compliance
 - ✅ GDPR Compliant (no data collection)
@@ -166,7 +143,7 @@ Current test coverage: **87%** across 207 tests
 
 ## 🤝 Contributing
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+We welcome contributions! Please see our [Contributing Guide](docs/CONTRIBUTING.md) for details.
 
 ### Development Setup
 
@@ -212,7 +189,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ## 🗺️ Roadmap
 
-### Version 3.0 (Q2 2026)
+### Version 3.0 (Future)
 - [ ] Cloud sync with end-to-end encryption
 - [ ] Bank integration via Plaid
 - [ ] Mobile apps (iOS/Android)
@@ -224,7 +201,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 - [ ] Receipt scanning with OCR
 - [ ] Investment tracking
 
-See the [full roadmap](IMPROVEMENT_ROADMAP.md) for detailed plans.
+See the [full roadmap](docs/IMPROVEMENT_ROADMAP.md) for detailed plans.
 
 ## 📊 Comparison
 

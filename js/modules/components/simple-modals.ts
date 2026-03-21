@@ -91,7 +91,7 @@ export function renderEditRecurringModal(): TemplateResult {
  */
 export function renderImportModal(): TemplateResult {
   return html`
-    <div id="import-options-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="import-options-modal-title">
+    <div id="import-options-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="import-options-modal-title" style="z-index: 60;">
       <div class="rounded-2xl p-6 max-w-sm w-full card-shadow" style="background: var(--bg-card-section); border: 1px solid var(--border-section);">
         <h3 id="import-options-modal-title" class="text-xl font-black mb-2 text-primary">Import Data</h3>
         <p class="text-sm mb-4 text-secondary">How would you like to import?</p>
@@ -175,6 +175,69 @@ export function renderSavingsGoalModal(): TemplateResult {
 }
 
 // ==========================================
+// CELEBRATION MODAL
+// ==========================================
+
+/**
+ * Render the achievement celebration modal
+ */
+export function renderCelebrationModal(): TemplateResult {
+  return html`
+    <div id="celebration-overlay" class="modal-overlay" role="dialog" aria-modal="true" style="z-index: 100;">
+      <div class="rounded-3xl p-8 max-w-sm w-full text-center card-shadow bg-premium" style="background: linear-gradient(135deg, var(--bg-card), var(--bg-primary)); border: 2px solid var(--color-accent);">
+        <div id="celebration-emoji" class="text-7xl mb-4 animate-bounce">🏆</div>
+        <h3 id="celebration-title" class="text-2xl font-black mb-2 text-primary">Achievement Unlocked!</h3>
+        <p id="celebration-desc" class="text-secondary font-bold mb-6">You've reached a new milestone!</p>
+        <button id="close-celebration" class="w-full py-3 rounded-xl font-black text-sm btn-primary">AWESOME!</button>
+      </div>
+    </div>
+  `;
+}
+
+// ==========================================
+// SYNC CONFLICT MODAL
+// ==========================================
+
+/**
+ * Render the sync conflict resolution modal
+ */
+export function renderSyncConflictModal(): TemplateResult {
+  return html`
+    <div id="sync-conflict-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="sync-conflict-title">
+      <div class="rounded-2xl p-6 max-w-md w-full card-shadow" style="background: var(--bg-card-section); border: 1px solid var(--border-section);">
+        <h3 id="sync-conflict-title" class="text-xl font-black mb-2 text-primary flex items-center gap-2">
+          <span class="text-warning">⚠️</span> Sync Conflict Detected
+        </h3>
+        <p class="text-sm mb-4 text-secondary">Another tab has updates that may conflict with your current changes.</p>
+        
+        <div id="sync-conflict-details" class="p-3 rounded-lg mb-6 text-xs" style="background: var(--bg-input);">
+          <div class="mb-2">
+            <span class="font-bold text-tertiary uppercase tracking-tighter">Remote Changes</span>
+            <div id="sync-remote-details" class="text-primary mt-1">Checking updates...</div>
+          </div>
+          <div>
+            <span class="font-bold text-tertiary uppercase tracking-tighter">Your Changes</span>
+            <div id="sync-local-details" class="text-primary mt-1">Unsaved edits</div>
+          </div>
+        </div>
+
+        <div class="space-y-2">
+          <button id="sync-accept-remote" class="w-full py-3 rounded-lg font-bold text-sm" style="background: var(--color-expense); color: white;">
+            Accept Updates from Other Tab
+          </button>
+          <button id="sync-keep-local" class="w-full py-3 rounded-lg font-bold text-sm" style="background: var(--bg-input); color: var(--text-primary);">
+            Keep My Local Changes
+          </button>
+          <button id="sync-merge-changes" class="w-full py-3 rounded-lg font-bold text-sm btn-primary">
+            Save & Merge All
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ==========================================
 // COMBINED SIMPLE MODALS
 // ==========================================
 
@@ -189,5 +252,6 @@ export function renderSimpleModals(): TemplateResult {
     ${renderImportModal()}
     ${renderAddSavingsModal()}
     ${renderSavingsGoalModal()}
+    ${renderSyncConflictModal()}
   `;
 }

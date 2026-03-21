@@ -40,19 +40,23 @@ const envelopeCards = computed((): EnvelopeCardData[] => {
   const currentMk = signals.currentMonth.value;
   const alloc = signals.monthlyAlloc.value[currentMk] || {};
 
-  // Force re-computation when transactions change
-  const _txCount = signals.transactions.value.length;
+  // Track transaction changes via length + a content hash (avoids full array reference dependency
+  // which would cause this expensive computed to refire on every unrelated signal batch)
+  const _txLen = signals.transactions.value.length;
+  const _txHash = signals.currentMonthTotals.value.expenses; // Changes when tx amounts change
 
   if (Object.keys(alloc).length === 0) return [];
 
   const rolloverEnabled = isRolloverEnabled();
   const rollovers = rolloverEnabled ? calculateMonthRollovers(currentMk) : {};
+  // Use pre-computed per-category expenses (single O(N) pass) instead of per-category filter
+  const expByCat = signals.expensesByCategory.value;
 
   return Object.entries(alloc).map(([catId, amt]) => {
     const cat = getCatInfo('expense', catId);
-    const spent = getMonthExpByCat(catId, currentMk);
+    const spent = expByCat[catId] || 0;
     const rollover = rollovers[catId] || 0;
-    const effectiveBudget = rolloverEnabled ? getEffectiveBudget(catId, currentMk) : amt;
+    const effectiveBudget = rolloverEnabled ? (amt + rollover) : amt;
     const percentage = effectiveBudget > 0 ? Math.min((spent / effectiveBudget) * 100, 100) : 0;
     const isOver = spent > effectiveBudget;
     const fillColor = isOver ? 'var(--color-expense)' : percentage > 80 ? 'var(--color-warning)' : 'var(--color-income)';
@@ -133,9 +137,14 @@ export function mountEnvelopeBudget(): () => void {
 
     if (cards.length === 0) {
       render(
-        html`<p class="text-center py-4 text-xs" style="color: var(--text-tertiary);">
-          No budget allocated yet. Click "Plan Budget" to start.
-        </p>`,
+        html`
+          <div class="budget-empty-panel budget-empty-panel--compact">
+            <div>
+              <p class="text-sm font-semibold mb-2" style="color: var(--text-primary);">No budget allocated yet</p>
+              <p class="text-xs" style="color: var(--text-tertiary);">Create category targets when you want a real spending plan instead of a loose monthly estimate.</p>
+            </div>
+          </div>
+        `,
         grid
       );
       return;

@@ -8,10 +8,15 @@
  */
 
 import { SK, lsGet, lsSet } from '../core/state.js';
-import { parseAmount, generateId } from '../core/utils.js';
+import { parseAmount, generateSecureId } from '../core/utils.js';
 import { validator } from '../core/validator.js';
-import { emit, Events } from '../core/event-bus.js';
+import { emit, Events, on } from '../core/event-bus.js';
 import { storageManager, STORES } from './storage-manager.js';
+import { Mutex } from '../core/mutex.js';
+import { DataSyncEvents, notifyDataSyncComplete, notifyDataSyncError } from '../core/data-sync-interface.js';
+import stateRevision from '../core/state-revision.js';
+import { getTabId } from '../core/tab-id.js';
+import { broadcastManager } from '../core/multi-tab-sync-broadcast.js';
 import type {
   Transaction,
   DataHandler,
@@ -49,54 +54,57 @@ interface StorageStats {
  */
 export class DataManager {
   private _handler: DataHandler | null = null;
-  private _operationInProgress: boolean = false;
+  private _operationMutex: Mutex = new Mutex();
   private _pendingOperations: Array<() => Promise<unknown>> = [];
   private _useIndexedDB: boolean = false;
   private _storageInitialized: boolean = false;
+  private _idbWriteFailed: boolean = false;
+  private _eventUnsubscribers: Array<() => void> = [];
 
   constructor() {
     // Properties initialized inline
   }
 
   /**
-   * Execute an atomic operation with retry mechanism
+   * Execute an atomic operation with retry mechanism using mutex
    */
   private async _atomicOperation<T extends OperationResult>(
     operation: () => Promise<T>,
     maxRetries: number = 3
   ): Promise<T> {
-    let retries = maxRetries;
-
-    while (retries > 0) {
-      try {
-        // Wait for any pending operations to complete
-        while (this._operationInProgress) {
-          await new Promise(resolve => setTimeout(resolve, 5));
-        }
-
-        this._operationInProgress = true;
-        const result = await operation();
-        this._operationInProgress = false;
-
-        if (result.isOk) return result;
-        throw new Error(result.error || 'Operation failed');
-      } catch (error) {
-        this._operationInProgress = false;
-        retries--;
-
-        if (retries === 0) {
-          const err = error as Error;
-          console.error('Atomic operation failed after retries:', err);
-          return { isOk: false, error: err.message } as T;
-        }
-
-        // Brief delay before retry
-        await new Promise(resolve => setTimeout(resolve, 10 + Math.random() * 10));
-      }
+    if (!this._handler) {
+      return { isOk: false, error: 'DataManager not initialized. Call init() first.' } as T;
     }
+    return this._operationMutex.runExclusive(async () => {
+      let lastError: Error | undefined;
 
-    // This should never be reached, but TypeScript requires a return
-    return { isOk: false, error: 'Unexpected error in atomic operation' } as T;
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          const result = await operation();
+          if (result.isOk) return result;
+          // Only retry storage write failures (transient); return immediately for
+          // deterministic failures like "not found" or "validation failed"
+          if (result.error === 'Storage write failed') {
+            throw new Error(result.error);
+          }
+          return result;
+        } catch (error) {
+          lastError = error as Error;
+          if (attempt < maxRetries - 1) {
+            // Exponential backoff: 100ms, 200ms, 400ms
+            await new Promise(resolve =>
+              setTimeout(resolve, Math.pow(2, attempt) * 100)
+            );
+          }
+        }
+      }
+
+      if (import.meta.env.DEV) console.error('Atomic operation failed after retries:', lastError);
+      return {
+        isOk: false,
+        error: lastError?.message || 'Operation failed after retries'
+      } as T;
+    });
   }
 
   /**
@@ -106,20 +114,43 @@ export class DataManager {
   async init(handler: DataHandler): Promise<OperationResult> {
     this._handler = handler;
 
+    // Clean up previous event listeners to prevent duplicates on re-init
+    this._eventUnsubscribers.forEach(unsub => unsub());
+    this._eventUnsubscribers = [];
+
+    // Set up event listeners for data sync
+    this._eventUnsubscribers.push(
+      on(DataSyncEvents.REQUEST_RELOAD, async ({ source }: { source: string }) => {
+        const transactions = await this.getAll();
+        emit(DataSyncEvents.TRANSACTION_UPDATED, { transactions });
+      })
+    );
+
+    this._eventUnsubscribers.push(
+      on(DataSyncEvents.REQUEST_SYNC, async ({ changes, source }: { changes: Transaction[], source: string }) => {
+        try {
+          await this.syncFromStorage(changes);
+          notifyDataSyncComplete({ success: true });
+        } catch (error) {
+          notifyDataSyncError(error as Error);
+        }
+      })
+    );
+
     // Initialize storage manager (IndexedDB or localStorage)
     try {
       const storageResult = await storageManager.init();
       if (storageResult.isOk) {
         this._useIndexedDB = storageManager.isUsingIndexedDB();
         this._storageInitialized = true;
-        console.log(`DataManager: Using ${storageResult.type} backend`);
+        // DataManager initialized with selected storage backend
       } else {
-        console.warn('DataManager: Storage manager init failed, using localStorage fallback');
+        if (import.meta.env.DEV) console.warn('DataManager: Storage manager init failed, using localStorage fallback');
         this._useIndexedDB = false;
         this._storageInitialized = false;
       }
     } catch (err) {
-      console.error('DataManager: Storage init error:', err);
+      if (import.meta.env.DEV) console.error('DataManager: Storage init error:', err);
       this._useIndexedDB = false;
       this._storageInitialized = false;
     }
@@ -134,29 +165,156 @@ export class DataManager {
   /**
    * Get all transactions from storage
    */
-  private async _getTransactions(): Promise<Transaction[]> {
+  async getAll(): Promise<Transaction[]> {
+    return this._getTransactions();
+  }
+
+  /**
+   * Get a single transaction by its backend ID
+   * Optimized for IndexedDB lookups
+   */
+  async get(id: string): Promise<Transaction | undefined> {
+    if (!id) return undefined;
+
+    // Try IndexedDB first if available
     if (this._storageInitialized && this._useIndexedDB) {
+      try {
+        const tx = await storageManager.get(STORES.TRANSACTIONS, id);
+        return tx as Transaction | undefined;
+      } catch (err) {
+        if (import.meta.env.DEV) console.error(`DataManager: IndexedDB get failed for ${id}:`, err);
+      }
+    }
+
+    // Fallback to localStorage scan
+    const transactions = await this._getTransactions();
+    return transactions.find(t => t.__backendId === id);
+  }
+
+  /**
+   * Sync transactions from external storage update
+   * Used by multi-tab synchronization
+   */
+  syncFromStorage(transactions: Transaction[]): void {
+    // Update internal state without triggering storage write
+    // since the data is already in storage from another tab
+    if (this._handler) {
+      this._handler.onDataChanged(transactions);
+    }
+  }
+
+  /**
+   * Internal helper to persist transactions to all active backends
+   * OPTIMIZED: Uses incremental updates for IndexedDB instead of clearing and re-writing everything
+   */
+  private async _persist(
+    transactions: Transaction[],
+    change?: { 
+      type: 'add' | 'update' | 'delete' | 'batch-add' | 'batch-delete' | 'split',
+      item?: Transaction,
+      items?: Transaction[],
+      id?: string,
+      ids?: string[]
+    }
+  ): Promise<boolean> {
+    let lsOk = false;
+    let idbOk = false;
+    let idbAttempted = false;
+
+    // When IndexedDB is active and healthy, skip the expensive synchronous localStorage write
+    // (JSON.stringify of 5000+ transactions takes 10-50ms). localStorage is only needed as fallback.
+    const skipLsWrite = this._storageInitialized && this._useIndexedDB && !this._idbWriteFailed;
+
+    // 1. Write to localStorage only when IDB is unavailable or has failed
+    if (!skipLsWrite) {
+      lsOk = lsSet(SK.TX, transactions);
+    }
+
+    // 2. Update IndexedDB if initialized
+    if (this._storageInitialized && this._useIndexedDB) {
+      idbAttempted = true;
+      try {
+        if (change) {
+          // Perform incremental update
+          switch (change.type) {
+            case 'add':
+              if (change.item) await storageManager.set(STORES.TRANSACTIONS, change.item.__backendId, change.item);
+              break;
+            case 'update':
+              if (change.item) await storageManager.set(STORES.TRANSACTIONS, change.item.__backendId, change.item);
+              break;
+            case 'delete':
+              if (change.id) await storageManager.delete(STORES.TRANSACTIONS, change.id);
+              break;
+            case 'batch-add':
+              if (change.items) await storageManager.updateBatch(STORES.TRANSACTIONS, change.items);
+              break;
+            case 'batch-delete':
+              if (change.ids) await storageManager.deleteBatch(STORES.TRANSACTIONS, change.ids);
+              break;
+            case 'split':
+              if (change.id && change.items) {
+                // Create splits first, then delete original. If creation fails,
+                // the original transaction is preserved (no data loss).
+                await storageManager.updateBatch(STORES.TRANSACTIONS, change.items);
+                await storageManager.delete(STORES.TRANSACTIONS, change.id);
+              }
+              break;
+            default:
+              await storageManager.importAll({ [STORES.TRANSACTIONS]: transactions }, true);
+          }
+        } else {
+          // Fallback to full overwrite
+          await storageManager.importAll({ [STORES.TRANSACTIONS]: transactions }, true);
+        }
+        
+        idbOk = true;
+        this._idbWriteFailed = false;
+      } catch (err) {
+        if (import.meta.env.DEV) console.error('DataManager: IndexedDB persistence failed:', err);
+        this._idbWriteFailed = true;
+        // IDB failed — write to localStorage as fallback
+        if (!lsOk) lsOk = lsSet(SK.TX, transactions);
+      }
+    }
+
+    // At least one active backend must succeed
+    const anyBackendOk = lsOk || (idbAttempted && idbOk);
+
+    // 3. Update in-memory state if at least one backend succeeded
+    if (anyBackendOk && this._handler) {
+      this._handler.onDataChanged(transactions);
+    }
+
+    if (anyBackendOk) {
+      try {
+        await stateRevision.recordStateChange(SK.TX, transactions, getTabId());
+        broadcastManager.sendStateUpdate(SK.TX, transactions);
+      } catch (error) {
+        if (import.meta.env.DEV) {
+          console.warn('DataManager: failed to broadcast transaction sync update:', error);
+        }
+      }
+    }
+
+    return anyBackendOk;
+  }
+
+  /**
+   * Get all transactions from storage (private implementation)
+   */
+  private async _getTransactions(): Promise<Transaction[]> {
+    // If the last IDB write failed, read from localStorage (which has the latest data)
+    // to prevent returning stale IDB data
+    if (this._storageInitialized && this._useIndexedDB && !this._idbWriteFailed) {
       try {
         return await storageManager.getAll(STORES.TRANSACTIONS) as Transaction[];
       } catch (err) {
-        console.error('DataManager: IndexedDB read failed, falling back:', err);
+        if (import.meta.env.DEV) console.error('DataManager: IndexedDB read failed, falling back:', err);
       }
     }
     // Fallback to localStorage
     return lsGet(SK.TX, []) as Transaction[];
-  }
-
-  /**
-   * Save transactions to storage
-   */
-  private async _saveTransactions(transactions: Transaction[]): Promise<boolean> {
-    // Always save to localStorage for backward compatibility
-    const lsOk = lsSet(SK.TX, transactions);
-
-    // If using IndexedDB, sync there too (handled by storage manager events)
-    // The storage manager handles multi-tab sync via BroadcastChannel
-
-    return lsOk;
   }
 
   /**
@@ -166,7 +324,7 @@ export class DataManager {
     // Use validator for comprehensive transaction validation
     const validation = validator.validateTransaction(txData);
     if (!validation.valid) {
-      console.error('dataSdk.create: validation failed', validation.errors);
+      if (import.meta.env.DEV) console.error('dataSdk.create: validation failed', validation.errors);
       return {
         isOk: false,
         error: 'Validation failed: ' + Object.values(validation.errors).join(', '),
@@ -177,32 +335,20 @@ export class DataManager {
     // Use sanitized data from validator
     const tx: Transaction = {
       ...validation.sanitized,
-      __backendId: txData.__backendId || `tx_${generateId()}`
+      __backendId: txData.__backendId || `tx_${generateSecureId()}`
     } as Transaction;
 
     return this._atomicOperation(async (): Promise<OperationResult<Transaction>> => {
-      // Try IndexedDB first if available
-      if (this._storageInitialized && this._useIndexedDB) {
-        try {
-          await storageManager.set(STORES.TRANSACTIONS, tx.__backendId, tx);
-          const newData = await this._getTransactions();
-          this._handler?.onDataChanged(newData);
-          emit(Events.TRANSACTION_ADDED, tx);
-          return { isOk: true, data: tx };
-        } catch (err) {
-          console.error('DataManager: IndexedDB create failed, falling back:', err);
-        }
+      const data = await this._getTransactions();
+      // Idempotency guard: skip if already persisted (e.g. from a partial retry)
+      if (data.some(t => t.__backendId === tx.__backendId)) {
+        return { isOk: true, data: tx };
       }
+      const newData = [...data, tx];
 
-      // Fallback to localStorage
-      const data = lsGet(SK.TX, []) as Transaction[];
-      const newData = [...data, tx]; // Don't mutate original array
-
-      const ok = lsSet(SK.TX, newData);
+      const ok = await this._persist(newData, { type: 'add', item: tx });
       if (!ok) return { isOk: false, error: 'Storage write failed' };
 
-      // Update state BEFORE emitting event so handlers see current data
-      this._handler?.onDataChanged(newData);
       emit(Events.TRANSACTION_ADDED, tx);
       return { isOk: true, data: tx };
     });
@@ -214,44 +360,44 @@ export class DataManager {
   async createBatch(txArray: Partial<Transaction>[]): Promise<OperationResult<Transaction[]>> {
     if (!txArray.length) return { isOk: true, data: [] };
 
+    // Validate all transactions before persisting
+    const validationErrors: string[] = [];
+    for (let i = 0; i < txArray.length; i++) {
+      const validation = validator.validateTransaction(txArray[i]);
+      if (!validation.valid) {
+        validationErrors.push(`Item ${i}: ${Object.values(validation.errors).join(', ')}`);
+      } else {
+        txArray[i] = validation.sanitized;
+      }
+    }
+    if (validationErrors.length > 0) {
+      return { isOk: false, error: `Batch validation failed: ${validationErrors.slice(0, 3).join('; ')}` };
+    }
+
     return this._atomicOperation(async (): Promise<OperationResult<Transaction[]>> => {
       const newTransactions: Transaction[] = txArray.map(txData => ({
         ...txData,
         amount: parseAmount(txData.amount ?? 0),
-        __backendId: txData.__backendId || `tx_${generateId()}`
+        __backendId: txData.__backendId || `tx_${generateSecureId()}`
       } as Transaction));
 
-      // Try IndexedDB first if available
-      if (this._storageInitialized && this._useIndexedDB) {
-        try {
-          await storageManager.createBatch(STORES.TRANSACTIONS, newTransactions);
-          const newData = await this._getTransactions();
-          this._handler?.onDataChanged(newData);
-          if (newTransactions.length === 1) {
-            emit(Events.TRANSACTION_ADDED, newTransactions[0]);
-          } else {
-            emit(Events.TRANSACTIONS_BATCH_ADDED, { transactions: newTransactions, count: newTransactions.length });
-          }
-          return { isOk: true, data: newTransactions };
-        } catch (err) {
-          console.error('DataManager: IndexedDB createBatch failed, falling back:', err);
-        }
+      const data = await this._getTransactions();
+      // Idempotency guard: filter out any items already persisted from a partial retry
+      const existingIds = new Set(data.map(t => t.__backendId));
+      const toAdd = newTransactions.filter(t => !existingIds.has(t.__backendId));
+      if (toAdd.length === 0) {
+        return { isOk: true, data: newTransactions };
       }
+      const newData = [...data, ...toAdd];
 
-      // Fallback to localStorage
-      const data = lsGet(SK.TX, []) as Transaction[];
-      const newData = [...data, ...newTransactions]; // Don't mutate original array
-
-      const ok = lsSet(SK.TX, newData);
+      const ok = await this._persist(newData, { type: 'batch-add', items: toAdd });
       if (!ok) return { isOk: false, error: 'Storage write failed' };
 
-      // Update state BEFORE emitting events so handlers see current data
-      this._handler?.onDataChanged(newData);
-      // Emit single batch event for all transactions (performance optimization)
-      if (newTransactions.length === 1) {
-        emit(Events.TRANSACTION_ADDED, newTransactions[0]);
-      } else {
-        emit(Events.TRANSACTIONS_BATCH_ADDED, { transactions: newTransactions, count: newTransactions.length });
+      // Emit event only for actually-added transactions
+      if (toAdd.length === 1) {
+        emit(Events.TRANSACTION_ADDED, toAdd[0]);
+      } else if (toAdd.length > 1) {
+        emit(Events.TRANSACTIONS_BATCH_ADDED, { transactions: toAdd, count: toAdd.length });
       }
       return { isOk: true, data: newTransactions };
     });
@@ -260,49 +406,29 @@ export class DataManager {
   /**
    * Update an existing transaction
    */
-  async update(tx: Transaction): Promise<OperationResult> {
+  async update(tx: Transaction): Promise<OperationResult<Transaction>> {
     if (!tx.__backendId) {
-      console.error('dataSdk.update: missing __backendId');
+      if (import.meta.env.DEV) console.error('dataSdk.update: missing __backendId');
       return { isOk: false, error: 'Missing __backendId' };
     }
 
     const updatedTx: Transaction = { ...tx, amount: parseAmount(tx.amount) };
 
-    return this._atomicOperation(async (): Promise<OperationResult> => {
-      // Try IndexedDB first if available
-      if (this._storageInitialized && this._useIndexedDB) {
-        try {
-          // Check if transaction exists
-          const existing = await storageManager.get(STORES.TRANSACTIONS, tx.__backendId);
-          if (!existing) {
-            return { isOk: false, error: 'Transaction not found' };
-          }
-
-          await storageManager.set(STORES.TRANSACTIONS, tx.__backendId, updatedTx);
-          const newData = await this._getTransactions();
-          this._handler?.onDataChanged(newData);
-          emit(Events.TRANSACTION_UPDATED, updatedTx);
-          return { isOk: true };
-        } catch (err) {
-          console.error('DataManager: IndexedDB update failed, falling back:', err);
-        }
-      }
-
-      // Fallback to localStorage
-      const data = lsGet(SK.TX, []) as Transaction[];
+    return this._atomicOperation(async (): Promise<OperationResult<Transaction>> => {
+      // OPTIMIZATION OPPORTUNITY: _getTransactions() loads ALL transactions from storage.
+      // For single-item update, an indexed IDB put() would avoid the full read + linear scan.
+      const data = await this._getTransactions();
       const idx = data.findIndex(t => t.__backendId === tx.__backendId);
 
       if (idx >= 0) {
-        const newData = [...data]; // Don't mutate original array
+        const newData = [...data];
         newData[idx] = updatedTx;
 
-        const ok = lsSet(SK.TX, newData);
+        const ok = await this._persist(newData, { type: 'update', item: updatedTx });
         if (!ok) return { isOk: false, error: 'Storage write failed' };
 
-        // Update state BEFORE emitting event so handlers see current data
-        this._handler?.onDataChanged(newData);
         emit(Events.TRANSACTION_UPDATED, updatedTx);
-        return { isOk: true };
+        return { isOk: true, data: updatedTx };
       }
 
       return { isOk: false, error: 'Transaction not found' };
@@ -314,35 +440,25 @@ export class DataManager {
    */
   async delete(tx: Transaction): Promise<OperationResult> {
     return this._atomicOperation(async (): Promise<OperationResult> => {
-      // Try IndexedDB first if available
-      if (this._storageInitialized && this._useIndexedDB) {
-        try {
-          await storageManager.delete(STORES.TRANSACTIONS, tx.__backendId);
-          const newData = await this._getTransactions();
-          this._handler?.onDataChanged(newData);
-          emit(Events.TRANSACTION_DELETED, tx);
-          return { isOk: true };
-        } catch (err) {
-          console.error('DataManager: IndexedDB delete failed, falling back:', err);
-        }
-      }
-
-      // Fallback to localStorage
-      const data = lsGet(SK.TX, []) as Transaction[];
+      // OPTIMIZATION OPPORTUNITY: _getTransactions() loads ALL transactions from storage.
+      // For single-item delete, an indexed IDB delete() would avoid the full read.
+      const data = await this._getTransactions();
       const newData = data.filter(t => t.__backendId !== tx.__backendId);
 
-      const ok = lsSet(SK.TX, newData);
+      if (newData.length === data.length) {
+        return { isOk: false, error: 'Transaction not found' };
+      }
+
+      const ok = await this._persist(newData, { type: 'delete', id: tx.__backendId });
       if (!ok) return { isOk: false, error: 'Storage write failed' };
 
-      // Update state BEFORE emitting event so handlers see current data
-      this._handler?.onDataChanged(newData);
       emit(Events.TRANSACTION_DELETED, tx);
       return { isOk: true };
     });
   }
 
   /**
-   * Split a transaction into multiple parts atomically
+   * Split a transaction into multiple parts atomically with rollback capability
    * This operation either succeeds completely or fails completely,
    * preventing partial failures that could corrupt the ledger.
    */
@@ -358,12 +474,23 @@ export class DataManager {
       return { isOk: false, error: 'No valid splits provided' };
     }
 
-    // Validate split amounts sum to original (within rounding tolerance)
-    const splitTotal = splits.reduce((sum, s) => sum + parseAmount(s.amount), 0);
-    const origAmount = parseAmount(originalTx.amount);
-    const tolerance = 0.01; // Allow 1 cent tolerance for rounding
+    // Use integer arithmetic to avoid floating point errors
+    const origCents = Math.round(parseAmount(originalTx.amount) * 100);
+    let splitTotalCents = 0;
+    
+    // Validate and accumulate using cents
+    for (const split of splits) {
+      const amountCents = Math.round(parseAmount(split.amount) * 100);
+      if (amountCents <= 0) {
+        return { isOk: false, error: 'All split amounts must be positive' };
+      }
+      splitTotalCents += amountCents;
+    }
 
-    if (Math.abs(splitTotal - origAmount) > tolerance) {
+    // Exact match required (no tolerance)
+    if (splitTotalCents !== origCents) {
+      const splitTotal = splitTotalCents / 100;
+      const origAmount = origCents / 100;
       return {
         isOk: false,
         error: `Split total (${splitTotal.toFixed(2)}) does not match original (${origAmount.toFixed(2)})`
@@ -374,7 +501,7 @@ export class DataManager {
     const newSplits: Transaction[] = splits.map(split => ({
       type: originalTx.type,
       category: split.category,
-      amount: parseAmount(split.amount),
+      amount: Math.round(parseAmount(split.amount) * 100) / 100, // Round to 2 decimals
       description: split.description || `Split: ${originalTx.description || ''}`,
       date: originalTx.date,
       tags: originalTx.tags,
@@ -385,71 +512,37 @@ export class DataManager {
       recurring_end: undefined,
       reconciled: true,
       splits: true,
-      __backendId: `tx_${generateId()}`
+      __backendId: `tx_${generateSecureId()}`
     }));
 
     return this._atomicOperation(async (): Promise<OperationResult<SplitResult>> => {
-      // Try IndexedDB first if available
-      if (this._storageInitialized && this._useIndexedDB) {
-        try {
-          // Verify original exists
-          const existing = await storageManager.get(STORES.TRANSACTIONS, originalTx.__backendId);
-          if (!existing) {
-            return { isOk: false, error: 'Original transaction not found' };
-          }
-
-          // Delete original and create splits
-          await storageManager.delete(STORES.TRANSACTIONS, originalTx.__backendId);
-          await storageManager.createBatch(STORES.TRANSACTIONS, newSplits);
-
-          const newData = await this._getTransactions();
-          this._handler?.onDataChanged(newData);
-          emit(Events.TRANSACTION_DELETED, originalTx);
-          emit(Events.TRANSACTIONS_BATCH_ADDED, { transactions: newSplits, count: newSplits.length });
-
-          return {
-            isOk: true,
-            data: { originalId: originalTx.__backendId, splits: newSplits }
-          };
-        } catch (err) {
-          console.error('DataManager: IndexedDB split failed, falling back:', err);
-        }
-      }
-
-      // Fallback to localStorage
-      const data = lsGet(SK.TX, []) as Transaction[];
-
-      // Validate original transaction exists
+      const data = await this._getTransactions();
       const origIdx = data.findIndex(t => t.__backendId === originalTx.__backendId);
+      
       if (origIdx < 0) {
         return { isOk: false, error: 'Original transaction not found' };
       }
 
-      // Perform the atomic swap: remove original, add all splits in one write
+      // Perform atomic swap in memory
       const newData = [
-        ...data.slice(0, origIdx),      // Keep data before original
-        ...newSplits,                    // Add split transactions
-        ...data.slice(origIdx + 1)       // Keep data after original
+        ...data.slice(0, origIdx),
+        ...newSplits,
+        ...data.slice(origIdx + 1)
       ];
 
-      // Write all changes atomically
-      const ok = lsSet(SK.TX, newData);
+      const ok = await this._persist(newData, { 
+        type: 'split', 
+        id: originalTx.__backendId, 
+        items: newSplits 
+      });
       if (!ok) return { isOk: false, error: 'Storage write failed' };
 
-      // Update state BEFORE emitting events
-      this._handler?.onDataChanged(newData);
-
-      // Emit events after successful write
       emit(Events.TRANSACTION_DELETED, originalTx);
-      // Emit single batch event for all split transactions (performance optimization)
       emit(Events.TRANSACTIONS_BATCH_ADDED, { transactions: newSplits, count: newSplits.length });
 
       return {
         isOk: true,
-        data: {
-          originalId: originalTx.__backendId,
-          splits: newSplits
-        }
+        data: { originalId: originalTx.__backendId, splits: newSplits }
       };
     });
   }

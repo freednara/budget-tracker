@@ -8,7 +8,8 @@
  */
 'use strict';
 
-import type { EncryptedBundle, PinBundle, PinCreationResult } from '../types/index.js';
+import type { EncryptedBundle, PinBundle, PinCreationResult } from '../../../types/index.js';
+import { CONFIG } from '../../core/config.js';
 
 // ==========================================
 // WORD LIST
@@ -50,6 +51,9 @@ const WORD_LIST: readonly string[] = [
   'safe', 'salt', 'sand', 'scale', 'scene', 'school', 'scout', 'screen'
 ] as const;
 
+// Pre-built Set for O(1) word lookups instead of O(n) Array.includes()
+const WORD_SET: ReadonlySet<string> = new Set(WORD_LIST);
+
 // ==========================================
 // RECOVERY PHRASE FUNCTIONS
 // ==========================================
@@ -76,7 +80,7 @@ export function generateRecoveryPhrase(): string {
 export function validateRecoveryPhrase(phrase: string): boolean {
   const words = phrase.toLowerCase().trim().split(/\s+/);
   if (words.length !== 12) return false;
-  return words.every(word => WORD_LIST.includes(word));
+  return words.every(word => WORD_SET.has(word));
 }
 
 // ==========================================
@@ -104,7 +108,7 @@ async function deriveKeyFromPhrase(phrase: string, salt: ArrayBuffer): Promise<C
     {
       name: 'PBKDF2',
       salt: salt,
-      iterations: 100000,
+      iterations: CONFIG.SECURITY.PBKDF2_ITERATIONS,
       hash: 'SHA-256'
     },
     keyMaterial,
@@ -177,7 +181,7 @@ export async function decryptPinWithRecovery(encryptedBundle: EncryptedBundle, r
 
   } catch (err) {
     // Decryption failed (wrong phrase or corrupted data)
-    console.warn('PIN decryption failed:', (err as Error).message);
+    if (import.meta.env.DEV) console.warn('PIN decryption failed:', (err as Error).message);
     return null;
   }
 }
@@ -205,7 +209,7 @@ export async function hashPin(pin: string): Promise<string> {
     {
       name: 'PBKDF2',
       salt: salt,
-      iterations: 100000,
+      iterations: CONFIG.SECURITY.PBKDF2_ITERATIONS,
       hash: 'SHA-256'
     },
     keyMaterial,
@@ -217,9 +221,9 @@ export async function hashPin(pin: string): Promise<string> {
 }
 
 /**
- * Verify a PIN against a stored hash
+ * Verify a PIN against a PBKDF2-formatted stored hash (salt:hash)
  */
-export async function verifyPin(entered: string, stored: string): Promise<boolean> {
+async function verifyPinPBKDF2(entered: string, stored: string): Promise<boolean> {
   const [saltB64, hashB64] = stored.split(':');
   if (!saltB64 || !hashB64) return false;
 
@@ -238,16 +242,56 @@ export async function verifyPin(entered: string, stored: string): Promise<boolea
     {
       name: 'PBKDF2',
       salt: salt,
-      iterations: 100000,
+      iterations: CONFIG.SECURITY.PBKDF2_ITERATIONS,
       hash: 'SHA-256'
     },
     keyMaterial,
     256
   );
 
-  // Compare hashes
   const storedHash = base64ToArrayBuffer(hashB64);
   return timingSafeEqual(new Uint8Array(newHash), new Uint8Array(storedHash));
+}
+
+/**
+ * Verify entered PIN against stored PIN (single source of truth for all formats).
+ * Supports: recovery-enabled JSON, PBKDF2 (salt:hash), legacy SHA-256, plaintext.
+ */
+export async function verifyPin(entered: string, stored: string): Promise<boolean> {
+  // Recovery-enabled format (JSON with version: 2)
+  if (hasRecoveryEnabled(stored)) {
+    try {
+      const bundle = JSON.parse(stored) as { hash: string };
+      return verifyPinPBKDF2(entered, bundle.hash);
+    } catch {
+      return false;
+    }
+  }
+
+  // PBKDF2 format (salt:hash with base64)
+  if (stored.includes(':')) {
+    try {
+      return await verifyPinPBKDF2(entered, stored);
+    } catch {
+      if (import.meta.env.DEV) console.error('PIN verification failed: corrupted stored hash');
+      return false;
+    }
+  }
+
+  // Legacy SHA-256 hash (64 hex chars, no salt)
+  if (/^[0-9a-f]{64}$/.test(stored)) {
+    const encoder = new TextEncoder();
+    const buf = await crypto.subtle.digest('SHA-256', encoder.encode(entered));
+    const hash = Array.from(new Uint8Array(buf))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+    return hash === stored;
+  }
+
+  // Plaintext comparison (very old legacy)
+  // FIXED: Use constant-time comparison to prevent timing attacks
+  const enc = new TextEncoder();
+  return timingSafeEqual(enc.encode(entered), enc.encode(stored));
 }
 
 // ==========================================
@@ -258,10 +302,10 @@ export async function verifyPin(entered: string, stored: string): Promise<boolea
  * Timing-safe comparison to prevent timing attacks
  */
 function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  let result = 0;
-  for (let i = 0; i < a.length; i++) {
-    result |= a[i] ^ b[i];
+  const maxLen = Math.max(a.length, b.length);
+  let result = a.length !== b.length ? 1 : 0;
+  for (let i = 0; i < maxLen; i++) {
+    result |= (a[i % a.length] || 0) ^ (b[i % b.length] || 0);
   }
   return result === 0;
 }
@@ -346,7 +390,7 @@ export async function recoverPinHash(storedBundle: string, recoveryPhrase: strin
 
     return await decryptPinWithRecovery(bundle, recoveryPhrase);
   } catch (err) {
-    console.error('Recovery failed:', err);
+    if (import.meta.env.DEV) console.error('Recovery failed:', err);
     return null;
   }
 }

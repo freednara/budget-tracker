@@ -1,11 +1,16 @@
 /**
  * Categories Module
- * Category definitions and helper functions
+ * Category definitions and helper functions with reactive indexing for O(1) performance.
  *
  * @module categories
  */
 
 import * as signals from './signals.js';
+import { computed } from '@preact/signals-core';
+import {
+  isSavingsTransferCategory,
+  SAVINGS_TRANSFER_CATEGORY_INFO
+} from './transaction-classification.js';
 import type {
   TransactionType,
   CategoryChild,
@@ -15,12 +20,18 @@ import type {
 } from '../../types/index.js';
 
 // ==========================================
+// CONSTANTS
+// ==========================================
+
+/** Default color for new/unknown categories. */
+export const DEFAULT_CATEGORY_COLOR = '#8b5cf6';
+
+// ==========================================
 // CATEGORY DEFINITIONS
 // ==========================================
 
 /**
  * Expense category definitions with hierarchical subcategories
- * Each category can have optional children array for subcategories
  */
 export const EXPENSE_CATS: readonly CategoryDefinition[] = [
   { id: 'food', name: 'Food & Dining', emoji: '🍔', color: '#f97316', children: [
@@ -59,8 +70,7 @@ export const INCOME_CATS: readonly CategoryChild[] = [
 ] as const;
 
 /**
- * Emoji picker categories for custom category creation
- * Organized by theme for easy emoji selection
+ * Emoji picker categories
  */
 export const EMOJI_PICKER_CATEGORIES: EmojiPickerCategories = {
   money: ['💵', '💴', '💶', '💷', '💰', '💸', '💳', '🏦', '🪙', '💎', '📈', '📉', '💹', '🏧'],
@@ -75,37 +85,67 @@ export const EMOJI_PICKER_CATEGORIES: EmojiPickerCategories = {
 } as const;
 
 // ==========================================
+// REACTIVE INDEXED CATEGORIES
+// ==========================================
+
+/**
+ * All categories indexed by ID for fast O(1) lookup
+ * WATCHES: signals.customCats
+ */
+/**
+ * Pre-built index of all static (built-in) categories.
+ * Computed once at module load since EXPENSE_CATS and INCOME_CATS never change.
+ */
+const STATIC_CATEGORY_INDEX: Map<string, FlattenedCategory> = (() => {
+  const index = new Map<string, FlattenedCategory>();
+  for (const cat of EXPENSE_CATS) {
+    index.set(cat.id, cat as FlattenedCategory);
+    if (cat.children) {
+      for (const child of cat.children) {
+        index.set(child.id, { ...child, parent: cat.id, parentName: cat.name } as FlattenedCategory);
+      }
+    }
+  }
+  for (const cat of INCOME_CATS) {
+    index.set(cat.id, cat as FlattenedCategory);
+  }
+  return index;
+})();
+
+export const indexedCategories = computed(() => {
+  const customCats = signals.customCats.value;
+
+  // Fast path: no custom categories, return the static index directly
+  if (customCats.length === 0) {
+    return STATIC_CATEGORY_INDEX;
+  }
+
+  // Clone static index and overlay custom categories
+  const index = new Map(STATIC_CATEGORY_INDEX);
+  for (const cat of customCats) {
+    index.set(cat.id, cat as FlattenedCategory);
+  }
+  return index;
+});
+
+// ==========================================
 // CATEGORY HELPER FUNCTIONS
 // ==========================================
 
 /**
  * Get category information by ID
- * Searches custom categories first, then built-in categories
+ * FIXED: Uses indexed lookups for high performance
  */
-export function getCatInfo(type: TransactionType, catId: string): CategoryChild {
-  // Check custom categories first
-  const custom = signals.customCats.value.find((c: { id: string }) => c.id === catId);
-  if (custom) return custom as CategoryChild;
-
-  // Check built-in categories
-  const cats = type === 'expense' ? EXPENSE_CATS : INCOME_CATS;
-
-  // First check parent categories
-  const parent = cats.find(c => c.id === catId);
-  if (parent) return parent;
-
-  // Then check subcategories (only for expense categories with children)
-  if (type === 'expense') {
-    for (const cat of EXPENSE_CATS) {
-      if (cat.children && cat.children.length > 0) {
-        const child = cat.children.find(c => c.id === catId);
-        if (child) return child;
-      }
-    }
+export function getCatInfo(_type: TransactionType, catId: string): CategoryChild {
+  if (isSavingsTransferCategory(catId)) {
+    return { ...SAVINGS_TRANSFER_CATEGORY_INFO, id: catId };
   }
 
+  const found = indexedCategories.value.get(catId);
+  if (found) return found as CategoryChild;
+
   // Fallback for unknown categories
-  return { id: catId, name: 'Unknown', emoji: '❓', color: '#64748b' };
+  return { id: catId, name: 'Unknown', emoji: '❓', color: DEFAULT_CATEGORY_COLOR };
 }
 
 /**
@@ -127,12 +167,12 @@ export function getAllCats(type: TransactionType, includeChildren: boolean = fal
       flattened.push(cat);
       if (cat.children && cat.children.length > 0) {
         cat.children.forEach(child => {
-          flattened.push({ ...child, parent: cat.id, parentName: cat.name });
+          flattened.push({ ...child, parent: cat.id, parentName: cat.name } as FlattenedCategory);
         });
       }
     });
   } else {
-    flattened.push(...(base as readonly CategoryChild[]));
+    flattened.push(...(base as readonly CategoryChild[]).map(c => c as FlattenedCategory));
   }
 
   return [...flattened, ...(custom as FlattenedCategory[])];
@@ -142,23 +182,19 @@ export function getAllCats(type: TransactionType, includeChildren: boolean = fal
  * Find category by ID across all categories (expense and income)
  */
 export function findCategoryById(catId: string): CategoryChild | null {
-  // Search expense categories
-  let cat = getCatInfo('expense', catId);
-  if (cat.name !== 'Unknown') return cat;
+  if (isSavingsTransferCategory(catId)) {
+    return { ...SAVINGS_TRANSFER_CATEGORY_INFO, id: catId };
+  }
 
-  // Search income categories
-  cat = getCatInfo('income', catId);
-  if (cat.name !== 'Unknown') return cat;
-
-  return null;
+  const found = indexedCategories.value.get(catId);
+  return found ? (found as CategoryChild) : null;
 }
 
 /**
  * Check if a category has subcategories
  */
 export function hasSubcategories(catId: string): boolean {
-  const allCats: readonly CategoryDefinition[] = [...EXPENSE_CATS];
-  const cat = allCats.find(c => c.id === catId);
+  const cat = EXPENSE_CATS.find(c => c.id === catId);
   return !!(cat && cat.children && cat.children.length > 0);
 }
 
@@ -166,12 +202,6 @@ export function hasSubcategories(catId: string): boolean {
  * Get parent category ID for a subcategory
  */
 export function getParentCategory(subcatId: string): string | null {
-  for (const cat of EXPENSE_CATS) {
-    if (cat.children && cat.children.length > 0) {
-      const hasChild = cat.children.some(child => child.id === subcatId);
-      if (hasChild) return cat.id;
-    }
-  }
-
-  return null;
+  const found = indexedCategories.value.get(subcatId);
+  return found?.parent || null;
 }

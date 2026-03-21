@@ -1,321 +1,198 @@
 /**
  * Filter Events Module
- *
- * Handles all filter input event listeners, date presets, and filter presets.
- *
- * @module filter-events
+ * 
+ * Reactive filter management using signals.
  */
 'use strict';
 
-import { SK, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
+import { SK, persist } from '../../core/state.js';
 import { pagination } from '../../core/state-actions.js';
 import { debounce } from '../../core/utils.js';
 import { showToast } from '../core/ui.js';
-import {
-  setFilterChangeCallback,
-  initFilterPanel,
-  getDatePresetRange,
-  clearDatePresetSelection,
-  updateActiveFilterCount,
-  renderFilterPresets,
-  saveFilterPreset
-} from '../widgets/filters.js';
-import { renderTransactions, renderTransactionsAsync, saveAsTemplate, renderTemplates } from '../../transactions.js';
+import { getDatePresetRange, saveFilterPreset } from '../widgets/filters.js';
+import { renderTransactionsList } from '../../data/transaction-renderer.js';
+import { saveAsTemplate } from '../../transactions/template-manager.js';
 import { CONFIG } from '../../core/config.js';
 import DOM from '../../core/dom-cache.js';
-import type { PaginationState } from '../../../types/index.js';
+
+type PromptTextInputFn = (message: string, title?: string, defaultValue?: string, placeholder?: string) => Promise<string | null>;
 
 // ==========================================
-// TYPE DEFINITIONS
+// MODULE-LEVEL DEBOUNCED FUNCTIONS
 // ==========================================
 
-interface FilterEventCallbacks {
-  handleTransactionListClick?: (e: Event) => void;
-  handlePaginationClick?: (e: Event) => void;
-  swipeManagerCloseAll?: () => void;
-  initEmojiPicker?: () => void;
+const debouncedSearch = debounce((val: string) => {
+  updateFilter({ searchText: val });
+}, CONFIG.PAGINATION.FILTER_DEBOUNCE_MS);
+
+const debouncedTags = debounce((val: string) => {
+  updateFilter({ tags: val });
+}, CONFIG.PAGINATION.FILTER_DEBOUNCE_MS);
+
+const debouncedMinAmt = debounce((val: string) => {
+  updateFilter({ minAmount: val });
+}, CONFIG.PAGINATION.FILTER_DEBOUNCE_MS);
+
+const debouncedMaxAmt = debounce((val: string) => {
+  updateFilter({ maxAmount: val });
+}, CONFIG.PAGINATION.FILTER_DEBOUNCE_MS);
+
+let promptTextInputFn: PromptTextInputFn = async (message: string, title?: string, defaultValue?: string) => {
+  const response = window.prompt(message, defaultValue || '');
+  const trimmed = response?.trim() || '';
+  return trimmed || null;
+};
+
+export function setFilterPromptFn(fn: PromptTextInputFn): void {
+  promptTextInputFn = fn;
 }
 
 // ==========================================
-// MODULE STATE
+// ACTIONS
 // ==========================================
 
-// Configurable callbacks
-let handleTransactionListClickFn: ((e: Event) => void) | null = null;
-let handlePaginationClickFn: ((e: Event) => void) | null = null;
-let swipeManagerCloseAllFn: (() => void) | null = null;
-let initEmojiPickerFn: (() => void) | null = null;
+/**
+ * Update a filter value
+ */
+export function updateFilter(updates: Partial<signals.FilterState>): void {
+  signals.filters.value = { ...signals.filters.value, ...updates };
+  pagination.resetPage();
+  renderTransactionsList();
+}
+
+/**
+ * Clear all filters
+ */
+export function clearFilters(): void {
+  signals.filters.value = {
+    searchText: '',
+    type: 'all',
+    category: '',
+    tags: '',
+    dateFrom: '',
+    dateTo: '',
+    minAmount: '',
+    maxAmount: '',
+    reconciled: 'all',
+    recurring: false,
+    showAllMonths: false,
+    sortBy: 'date-desc'
+  };
+  pagination.resetPage();
+  renderTransactionsList();
+}
+
+/**
+ * Toggle advanced filters panel
+ */
+export function toggleAdvancedFilters(): void {
+  const next = !signals.filtersExpanded.value;
+  signals.filtersExpanded.value = next;
+  persist(SK.FILTER_EXPANDED, next);
+}
+
+/**
+ * Apply a date preset
+ */
+export function applyDatePreset(preset: string): void {
+  const { start: from, end: to } = getDatePresetRange(preset);
+  updateFilter({ 
+    dateFrom: from, 
+    dateTo: to,
+    showAllMonths: true 
+  });
+}
 
 // ==========================================
 // INITIALIZATION
 // ==========================================
 
 /**
- * Initialize filter event handlers
+ * Initialize filter event handlers (Reactive Bridge)
  */
-export function initFilterEvents(callbacks: FilterEventCallbacks): void {
-  if (callbacks.handleTransactionListClick) handleTransactionListClickFn = callbacks.handleTransactionListClick;
-  if (callbacks.handlePaginationClick) handlePaginationClickFn = callbacks.handlePaginationClick;
-  if (callbacks.swipeManagerCloseAll) swipeManagerCloseAllFn = callbacks.swipeManagerCloseAll;
-  if (callbacks.initEmojiPicker) initEmojiPickerFn = callbacks.initEmojiPicker;
-
-  setupFilterInputs();
-  setupDelegatedListeners();
-  setupQuickDateDropdown();
-  setupDatePresetButtons();
-  setupFilterPresets();
-  setupTemplates();
-
-  // Set up filter change callback for re-rendering transactions (use async path)
-  setFilterChangeCallback(async () => {
-    pagination.resetPage();
-    await renderTransactionsAsync();
+export function initFilterEvents(callbacks: any = {}): void {
+  // Search input (debounced functions are at module level, created only once)
+  DOM.get('search-text')?.addEventListener('input', (e: any) => {
+    debouncedSearch(e.target.value);
   });
 
-  // Advanced filter panel toggle
-  initFilterPanel();
+  // Basic filters
+  DOM.get('filter-type')?.addEventListener('change', (e: any) => {
+    updateFilter({ type: e.target.value });
+  });
 
-  // Initialize emoji picker for custom categories
-  initEmojiPickerFn?.();
-}
+  DOM.get('filter-category')?.addEventListener('change', (e: any) => {
+    updateFilter({ category: e.target.value });
+  });
 
-// ==========================================
-// FILTER INPUTS
-// ==========================================
+  // Sort
+  DOM.get('tx-sort')?.addEventListener('change', (e: any) => {
+    updateFilter({ sortBy: e.target.value });
+  });
 
-/**
- * Set up filter input event listeners with debouncing
- */
-function setupFilterInputs(): void {
-  const debouncedRender = debounce(async () => {
-    pagination.resetPage();
-    await renderTransactionsAsync();
-    updateActiveFilterCount();
-  }, CONFIG.PAGINATION.FILTER_DEBOUNCE_MS);
-
-  ['filter-type', 'search-text', 'filter-tags', 'filter-category', 'filter-from', 'filter-to', 'filter-min-amt', 'filter-max-amt'].forEach(id => {
-    const el = DOM.get(id);
-    if (!el) return;
-    if (el.tagName === 'SELECT') {
-      el.addEventListener('change', () => {
-        pagination.resetPage();
-        renderTransactions();
-        updateActiveFilterCount();
-      });
+  // Date quick filter dropdown
+  DOM.get('filter-date-quick')?.addEventListener('change', (e: any) => {
+    const preset = e.target.value;
+    if (preset === 'custom') {
+      // Show the custom date range panel
+      const customPanel = DOM.get('custom-date-range');
+      if (customPanel) customPanel.classList.remove('hidden');
+    } else if (preset) {
+      applyDatePreset(preset);
+      // Hide custom range panel if it was open
+      const customPanel = DOM.get('custom-date-range');
+      if (customPanel) customPanel.classList.add('hidden');
     } else {
-      el.addEventListener('input', debouncedRender);
+      // "This Month" selected — clear date filters
+      updateFilter({ dateFrom: '', dateTo: '', showAllMonths: false });
+      const customPanel = DOM.get('custom-date-range');
+      if (customPanel) customPanel.classList.add('hidden');
     }
   });
 
-  // Recurring filter checkbox
-  const filterRecurringEl = DOM.get('filter-recurring') as HTMLInputElement | null;
-  if (filterRecurringEl) {
-    filterRecurringEl.addEventListener('change', () => {
-      pagination.resetPage();
-      renderTransactions();
-      updateActiveFilterCount();
-    });
-  }
+  // Toggle advanced
+  DOM.get('toggle-advanced-filters')?.addEventListener('click', toggleAdvancedFilters);
 
-  // Unreconciled filter checkbox
-  const filterUnreconciledEl = DOM.get('filter-unreconciled') as HTMLInputElement | null;
-  if (filterUnreconciledEl) {
-    filterUnreconciledEl.addEventListener('change', () => {
-      pagination.resetPage();
-      renderTransactions();
-      updateActiveFilterCount();
-    });
-  }
-
-  // Show all months checkbox
-  DOM.get('tx-show-all-months')?.addEventListener('change', () => {
-    pagination.resetPage();
-    renderTransactions();
+  // Advanced filters (Advanced section)
+  DOM.get('filter-tags')?.addEventListener('input', (e: any) => debouncedTags(e.target.value));
+  DOM.get('filter-from')?.addEventListener('change', (e: any) => updateFilter({ dateFrom: e.target.value }));
+  DOM.get('filter-to')?.addEventListener('change', (e: any) => updateFilter({ dateTo: e.target.value }));
+  DOM.get('filter-min-amt')?.addEventListener('input', (e: any) => debouncedMinAmt(e.target.value));
+  DOM.get('filter-max-amt')?.addEventListener('input', (e: any) => debouncedMaxAmt(e.target.value));
+  // Unreconciled checkbox (show only unreconciled transactions when checked)
+  DOM.get('filter-unreconciled')?.addEventListener('change', (e: any) => {
+    updateFilter({ reconciled: e.target.checked ? 'no' : 'all' });
   });
+  DOM.get('filter-recurring')?.addEventListener('change', (e: any) => updateFilter({ recurring: e.target.checked }));
+  DOM.get('tx-show-all-months')?.addEventListener('change', (e: any) => updateFilter({ showAllMonths: e.target.checked }));
 
-  // Sort dropdown
-  DOM.get('tx-sort')?.addEventListener('change', () => {
-    pagination.resetPage();
-    renderTransactions();
-  });
-
-  // Clear filters button
-  DOM.get('clear-filters-btn')?.addEventListener('click', () => {
-    const searchText = DOM.get('search-text') as HTMLInputElement | null;
-    const filterType = DOM.get('filter-type') as HTMLSelectElement | null;
-    const filterCategory = DOM.get('filter-category') as HTMLSelectElement | null;
-    const filterTags = DOM.get('filter-tags') as HTMLInputElement | null;
-    const filterFrom = DOM.get('filter-from') as HTMLInputElement | null;
-    const filterTo = DOM.get('filter-to') as HTMLInputElement | null;
-    const filterMinAmt = DOM.get('filter-min-amt') as HTMLInputElement | null;
-    const filterMaxAmt = DOM.get('filter-max-amt') as HTMLInputElement | null;
-
-    if (searchText) searchText.value = '';
-    if (filterType) filterType.value = 'all';
-    if (filterCategory) filterCategory.value = '';
-    if (filterTags) filterTags.value = '';
-    if (filterFrom) filterFrom.value = '';
-    if (filterTo) filterTo.value = '';
-    if (filterMinAmt) filterMinAmt.value = '';
-    if (filterMaxAmt) filterMaxAmt.value = '';
-    if (filterRecurringEl) filterRecurringEl.checked = false;
-    if (filterUnreconciledEl) filterUnreconciledEl.checked = false;
-    clearDatePresetSelection();
-    // Reset quick date dropdown
-    const quickDateEl = DOM.get('filter-date-quick') as HTMLSelectElement | null;
-    if (quickDateEl) quickDateEl.value = '';
-    // Hide custom date range section
-    DOM.get('custom-date-range')?.classList.add('hidden');
-    // Update active filter count
-    updateActiveFilterCount();
-    pagination.resetPage();
-    renderTransactions();
-  });
-}
-
-// ==========================================
-// DELEGATED LISTENERS
-// ==========================================
-
-/**
- * Set up delegated event listeners for transaction list and pagination
- */
-function setupDelegatedListeners(): void {
-  const txList = DOM.get('transactions-list');
-  if (txList && handleTransactionListClickFn) {
-    txList.addEventListener('click', handleTransactionListClickFn);
-  }
-
-  const paginationControls = DOM.get('pagination-controls');
-  if (paginationControls && handlePaginationClickFn) {
-    paginationControls.addEventListener('click', handlePaginationClickFn);
-  }
-
-  // Close swipes when clicking outside transaction list
-  document.addEventListener('click', (e: MouseEvent) => {
-    const target = e.target as HTMLElement;
-    if (!target.closest('.swipe-container') && !target.closest('.swipe-action-btn')) {
-      swipeManagerCloseAllFn?.();
-    }
-  });
-}
-
-// ==========================================
-// DATE PRESETS
-// ==========================================
-
-/**
- * Set up quick date dropdown handler
- */
-function setupQuickDateDropdown(): void {
-  const quickDateEl = DOM.get('filter-date-quick') as HTMLSelectElement | null;
-  if (!quickDateEl) return;
-
-  quickDateEl.addEventListener('change', () => {
-    const val = quickDateEl.value;
-    const customDateRange = DOM.get('custom-date-range');
-    const advancedFilters = DOM.get('advanced-filters');
-    const chevron = DOM.get('filter-chevron');
-    const toggle = DOM.get('toggle-advanced-filters');
-    const filterFrom = DOM.get('filter-from') as HTMLInputElement | null;
-    const filterTo = DOM.get('filter-to') as HTMLInputElement | null;
-
-    if (val === 'custom') {
-      // Show custom date range and expand advanced filters
-      customDateRange?.classList.remove('hidden');
-      if (advancedFilters && !advancedFilters.classList.contains('expanded')) {
-        advancedFilters.classList.add('expanded');
-        chevron?.classList.add('rotated');
-        toggle?.setAttribute('aria-expanded', 'true');
-        persist(SK.FILTER_EXPANDED, true);
-      }
-    } else {
-      customDateRange?.classList.add('hidden');
-      if (val) {
-        const { start: from, end: to } = getDatePresetRange(val);
-        if (filterFrom) filterFrom.value = from;
-        if (filterTo) filterTo.value = to;
-        // Enable "All months" checkbox when using date presets
-        const showAllEl = DOM.get('tx-show-all-months') as HTMLInputElement | null;
-        if (showAllEl) showAllEl.checked = true;
-      } else {
-        if (filterFrom) filterFrom.value = '';
-        if (filterTo) filterTo.value = '';
-      }
-      pagination.resetPage();
-      renderTransactions();
-    }
-    updateActiveFilterCount();
-  });
-}
-
-/**
- * Set up date preset button handlers
- */
-function setupDatePresetButtons(): void {
+  // Date Presets
   document.querySelectorAll<HTMLButtonElement>('.date-preset-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const preset = btn.dataset.preset || '';
-      const { start: from, end: to } = getDatePresetRange(preset);
-      const filterFrom = DOM.get('filter-from') as HTMLInputElement | null;
-      const filterTo = DOM.get('filter-to') as HTMLInputElement | null;
-      if (filterFrom) filterFrom.value = from;
-      if (filterTo) filterTo.value = to;
-      // Enable "All months" checkbox when using date presets
-      const showAllEl = DOM.get('tx-show-all-months') as HTMLInputElement | null;
-      if (showAllEl) showAllEl.checked = true;
-      // Update visual selection
-      document.querySelectorAll<HTMLButtonElement>('.date-preset-btn').forEach(b => {
-        b.classList.remove('btn-primary');
-        b.classList.add('form-input-secondary');
-      });
-      btn.classList.add('btn-primary');
-      btn.classList.remove('form-input-secondary');
-      pagination.resetPage();
-      renderTransactions();
-    });
+    btn.addEventListener('click', () => applyDatePreset(btn.dataset.preset || ''));
   });
-}
 
-// ==========================================
-// FILTER PRESETS
-// ==========================================
+  // Clear button
+  DOM.get('clear-filters-btn')?.addEventListener('click', clearFilters);
 
-/**
- * Set up filter preset save/load handlers
- */
-function setupFilterPresets(): void {
-  DOM.get('save-filter-preset-btn')?.addEventListener('click', () => {
-    const name = prompt('Enter a name for this filter preset:');
-    if (name && name.trim()) {
-      saveFilterPreset(name.trim());
+  // Save filter preset button
+  DOM.get('save-filter-preset-btn')?.addEventListener('click', async () => {
+    const name = await promptTextInputFn('Name this filter preset:', 'Save Filter Preset', '', 'Preset name');
+    if (name) {
+      saveFilterPreset(name);
+      showToast(`Preset "${name}" saved`);
     }
   });
 
-  // Initialize saved filter presets
-  renderFilterPresets();
-}
-
-// ==========================================
-// TEMPLATES
-// ==========================================
-
-/**
- * Set up template save handlers
- */
-function setupTemplates(): void {
-  DOM.get('save-as-template-btn')?.addEventListener('click', () => {
+  // Template saving
+  DOM.get('save-as-template-btn')?.addEventListener('click', async () => {
     if (!signals.selectedCategory.value) {
       showToast('Select a category first', 'error');
       return;
     }
-    const name = prompt('Enter a name for this template:');
-    if (name && name.trim()) {
-      saveAsTemplate(name.trim());
+    const name = await promptTextInputFn('Enter a name for this template:', 'Save Transaction Template', '', 'Template name');
+    if (name) {
+      saveAsTemplate(name);
     }
   });
-
-  // Initialize templates
-  renderTemplates();
 }

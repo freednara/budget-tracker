@@ -120,17 +120,17 @@ function buildSummaryCards(
     <div class="p-3 rounded-lg" style="background: var(--bg-input);">
       <p class="text-xs font-bold" style="color: var(--text-secondary);">Expenses</p>
       <p class="text-lg font-black" style="color: var(--color-expense);">${fmtCurFn(curExp)}</p>
-      <p class="text-xs" style="color: ${expChange > 0 ? 'var(--color-expense)' : 'var(--color-income)'};">${expChange > 0 ? '↑' : '↓'} ${Math.abs(expChange)}%</p>
+      <p class="text-xs" style="color: ${expChange > 0 ? 'var(--color-expense)' : expChange < 0 ? 'var(--color-income)' : 'var(--text-tertiary)'};">${expChange > 0 ? '↑' : expChange < 0 ? '↓' : '—'} ${Math.abs(expChange)}%</p>
     </div>
     <div class="p-3 rounded-lg" style="background: var(--bg-input);">
       <p class="text-xs font-bold" style="color: var(--text-secondary);">Income</p>
       <p class="text-lg font-black" style="color: var(--color-income);">${fmtCurFn(curInc)}</p>
-      <p class="text-xs" style="color: ${incChange >= 0 ? 'var(--color-income)' : 'var(--color-expense)'};">${incChange >= 0 ? '↑' : '↓'} ${Math.abs(incChange)}%</p>
+      <p class="text-xs" style="color: ${incChange > 0 ? 'var(--color-income)' : incChange < 0 ? 'var(--color-expense)' : 'var(--text-tertiary)'};">${incChange > 0 ? '↑' : incChange < 0 ? '↓' : '—'} ${Math.abs(incChange)}%</p>
     </div>
     <div class="p-3 rounded-lg" style="background: var(--bg-input);">
       <p class="text-xs font-bold" style="color: var(--text-secondary);">Savings</p>
       <p class="text-lg font-black" style="color: ${curSav >= 0 ? 'var(--color-accent)' : 'var(--color-expense)'};">${fmtCurFn(curSav)}</p>
-      <p class="text-xs" style="color: ${savChange >= 0 ? 'var(--color-income)' : 'var(--color-expense)'};">${savChange >= 0 ? '↑' : '↓'} ${Math.abs(savChange)}%</p>
+      <p class="text-xs" style="color: ${savChange > 0 ? 'var(--color-income)' : savChange < 0 ? 'var(--color-expense)' : 'var(--text-tertiary)'};">${savChange > 0 ? '↑' : savChange < 0 ? '↓' : '—'} ${Math.abs(savChange)}%</p>
     </div>
   </div>`;
 }

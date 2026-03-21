@@ -7,28 +7,34 @@
  */
 'use strict';
 
-import { SK, lsSet, lsGet } from '../../core/state.js';
+import { SK } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
+import { hydrateFromImport } from '../../core/state-hydration.js';
 import { showToast, showProgress, hideProgress, openModal, closeModal } from '../../ui/core/ui.js';
+// Confirmation function injected via DI (avoids features → UI layer violation)
+let confirmDataOperation: (message: string, details?: string) => Promise<boolean> = async () => true;
+
+export function setImportConfirmFn(fn: (message: string, details?: string) => Promise<boolean>): void {
+  confirmDataOperation = fn;
+}
 import {
   buildExportData,
   buildCsvContent,
   sanitizeImportedTransactions,
   buildImportState,
   tryAtomicWrite,
-  findContentDuplicates,
-  MAX_IMPORT_SIZE,
   MAX_IMPORT_TRANSACTIONS
 } from './import-export.js';
+import { findContentDuplicates, formatDuplicateSummary, excludeDuplicates } from './duplicate-detection.js';
 import { setTheme } from '../personalization/theme.js';
-import { hideBackupReminder } from '../../orchestration/backup-reminder.js';
+import { markBackupCompleted } from '../../orchestration/backup-reminder.js';
 import { awardAchievement } from '../gamification/achievements.js';
-import { emit, Events } from '../../core/event-bus.js';
-import { getTodayStr, esc, parseAmount, downloadBlob } from '../../core/utils.js';
-import { getCatInfo } from '../../core/categories.js';
+import { emit, on, Events } from '../../core/event-bus.js';
+import { FeatureEvents } from '../../core/feature-event-interface.js';
+import { getTodayStr, esc, downloadBlob } from '../../core/utils.js';
 import { CONFIG } from '../../core/config.js';
 import DOM from '../../core/dom-cache.js';
-import type { Transaction, CurrencySettings, Theme } from '../../../types/index.js';
+import type { Transaction, Theme } from '../../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
@@ -47,6 +53,34 @@ interface ImportData {
 // Module-level variable for temporary import data storage
 let _importData: ImportData | null = null;
 
+// Enhanced import size limits based on storage capacity
+const getMaxImportSize = (): number => {
+  return 25 * 1024 * 1024; // Default to 25MB
+};
+
+const MAX_IMPORT_SIZE = getMaxImportSize();
+
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
+}
+
+function ensureGlobalImportInput(): HTMLInputElement | null {
+  const input = DOM.get('import-file') as HTMLInputElement | null;
+  if (!input) return null;
+
+  // Keep the hidden file input out of the transactions view so tab/layout churn
+  // cannot interfere with the chooser or detach the active input mid-restore.
+  if (input.parentElement !== document.body) {
+    input.value = '';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+  }
+
+  return input;
+}
+
 /**
  * Clear pending import data (called when import modal is dismissed)
  */
@@ -56,53 +90,20 @@ export function clearImportData(): void {
 
 /**
  * Update signals from imported state object
- * Called after buildImportState returns the new state values
  */
 function updateSignalsFromImport(newS: Record<string, unknown>): void {
-  if (newS.savingsGoals !== undefined) {
-    signals.savingsGoals.value = newS.savingsGoals as typeof signals.savingsGoals.value;
+  hydrateFromImport(newS);
+  updateCurrencyDisplay();
+}
+
+/**
+ * Update currency display in UI
+ */
+function updateCurrencyDisplay(): void {
+  const currencyDisplay = DOM.get('currency-display');
+  if (currencyDisplay && signals.currency.value) {
+    currencyDisplay.textContent = signals.currency.value.symbol;
   }
-  if (newS.savingsContribs !== undefined) {
-    signals.savingsContribs.value = newS.savingsContribs as typeof signals.savingsContribs.value;
-  }
-  if (newS.currency !== undefined) {
-    signals.currency.value = newS.currency as typeof signals.currency.value;
-  }
-  if (newS.customCats !== undefined) {
-    signals.customCats.value = newS.customCats as typeof signals.customCats.value;
-  }
-  if (newS.monthlyAlloc !== undefined) {
-    signals.monthlyAlloc.value = newS.monthlyAlloc as typeof signals.monthlyAlloc.value;
-  }
-  if (newS.debts !== undefined) {
-    signals.debts.value = newS.debts as typeof signals.debts.value;
-  }
-  if (newS.rolloverSettings !== undefined) {
-    signals.rolloverSettings.value = newS.rolloverSettings as typeof signals.rolloverSettings.value;
-  }
-  if (newS.alerts !== undefined) {
-    signals.alerts.value = newS.alerts as typeof signals.alerts.value;
-  }
-  if (newS.achievements !== undefined) {
-    signals.achievements.value = newS.achievements as typeof signals.achievements.value;
-  }
-  if (newS.streak !== undefined) {
-    signals.streak.value = newS.streak as typeof signals.streak.value;
-  }
-  if (newS.insightPers !== undefined) {
-    signals.insightPers.value = newS.insightPers as typeof signals.insightPers.value;
-  }
-  if (newS.filterPresets !== undefined) {
-    signals.filterPresets.value = newS.filterPresets as typeof signals.filterPresets.value;
-  }
-  if (newS.txTemplates !== undefined) {
-    signals.txTemplates.value = newS.txTemplates as typeof signals.txTemplates.value;
-  }
-  if (newS.sections !== undefined) {
-    signals.sections.value = newS.sections as typeof signals.sections.value;
-  }
-  // Load transactions from localStorage (already written by tryAtomicWrite)
-  signals.transactions.value = lsGet(SK.TX, []) as Transaction[];
 }
 
 // ==========================================
@@ -111,6 +112,7 @@ function updateSignalsFromImport(newS: Record<string, unknown>): void {
 
 // Configurable callbacks
 let fmtCurFn: (v: number) => string = (v) => '$' + v.toFixed(2);
+let importHandlersBound = false;
 
 // ==========================================
 // INITIALIZATION
@@ -124,6 +126,11 @@ export function initImportExportEvents(callbacks: ImportExportCallbacks): void {
 
   setupExportHandlers();
   setupImportHandlers();
+
+  // Register Feature Event Listener
+  on(FeatureEvents.CLEAR_IMPORT_DATA, () => {
+    clearImportData();
+  });
 }
 
 // ==========================================
@@ -139,8 +146,7 @@ function setupExportHandlers(): void {
     const data = buildExportData();
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     downloadBlob(blob, `budget-tracker-backup-${getTodayStr()}.json`);
-    lsSet(SK.LAST_BACKUP, Date.now());
-    hideBackupReminder();
+    markBackupCompleted();
     awardAchievement('data_pro');
   });
 
@@ -151,12 +157,11 @@ function setupExportHandlers(): void {
 
   // Export CSV
   DOM.get('export-csv-btn')?.addEventListener('click', () => {
-    const txs = lsGet(SK.TX, []) as Transaction[];
+    const txs = [...signals.transactions.value] as Transaction[];
     const csvContent = buildCsvContent(txs);
     const blob = new Blob([csvContent], { type: 'text/csv' });
     downloadBlob(blob, `budget-tracker-${getTodayStr()}.csv`);
-    lsSet(SK.LAST_BACKUP, Date.now());
-    hideBackupReminder();
+    markBackupCompleted();
     awardAchievement('data_pro');
   });
 }
@@ -169,100 +174,121 @@ function setupExportHandlers(): void {
  * Set up import button and modal handlers
  */
 function setupImportHandlers(): void {
-  DOM.get('import-data-btn')?.addEventListener('click', () => {
-    (DOM.get('import-file') as HTMLInputElement | null)?.click();
+  if (importHandlersBound) return;
+  importHandlersBound = true;
+  ensureGlobalImportInput();
+
+  document.addEventListener('click', (event: Event) => {
+    const target = event.target as HTMLElement | null;
+    const button = target?.closest<HTMLElement>('#import-data-btn, #import-overwrite, #import-merge, #cancel-import');
+    if (!button) return;
+
+    switch (button.id) {
+      case 'import-data-btn':
+        openImportFileChooser();
+        break;
+      case 'import-overwrite':
+        void handleImportOverwrite();
+        break;
+      case 'import-merge':
+        void handleImportMerge();
+        break;
+      case 'cancel-import':
+        closeModal('import-options-modal');
+        _importData = null;
+        break;
+    }
   });
 
-  DOM.get('import-file')?.addEventListener('change', handleImportFile);
-  DOM.get('import-overwrite')?.addEventListener('click', handleImportOverwrite);
-  DOM.get('import-merge')?.addEventListener('click', handleImportMerge);
-  DOM.get('cancel-import')?.addEventListener('click', () => {
-    closeModal('import-options-modal');
-    _importData = null;
+  // Delegate file input changes at the document level so the restore flow stays
+  // resilient even if the hidden input is replaced during reload or remount work.
+  document.addEventListener('change', (event: Event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || target.id !== 'import-file') return;
+    void handleImportFile(event);
   });
+}
+
+function openImportFileChooser(): void {
+  const input = ensureGlobalImportInput();
+  if (!input) return;
+
+  // Reset the chooser so selecting the same backup twice still emits `change`.
+  input.value = '';
+  input.click();
 }
 
 /**
  * Handle file selection for import
  */
-function handleImportFile(e: Event): void {
+async function handleImportFile(e: Event): Promise<void> {
   const input = e.target as HTMLInputElement;
   const file = input.files?.[0];
   if (!file) return;
 
-  // File size validation
-  if (file.size > MAX_IMPORT_SIZE) {
-    showToast(`File too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum is 5MB.`, 'error');
-    input.value = '';
-    return;
-  }
+  try {
+    if (file.size > MAX_IMPORT_SIZE) {
+      const fileSizeMB = (file.size / 1024 / 1024).toFixed(1);
+      const maxSizeMB = (MAX_IMPORT_SIZE / 1024 / 1024).toFixed(0);
+      showToast(`File too large (${fileSizeMB}MB). Maximum is ${maxSizeMB}MB.`, 'error');
+      _importData = null;
+      return;
+    }
 
-  const reader = new FileReader();
-  reader.onload = (evt) => {
-    try {
-      const result = evt.target?.result;
-      if (typeof result !== 'string') return;
+    const importData = JSON.parse(await file.text()) as ImportData;
+    _importData = importData;
 
-      const importData = JSON.parse(result) as ImportData;
-      _importData = importData;
+    if (!importData || !Array.isArray(importData.transactions)) {
+      showToast('Invalid backup file: missing transactions array', 'error');
+      _importData = null;
+      return;
+    }
 
-      if (!importData || !Array.isArray(importData.transactions)) {
-        showToast('Invalid backup file: missing transactions array', 'error');
+    const txCount = importData.transactions.length;
+    if (txCount > MAX_IMPORT_TRANSACTIONS) {
+      const message = `This file contains ${txCount.toLocaleString()} transactions.`;
+      const details = `Importing more than ${MAX_IMPORT_TRANSACTIONS.toLocaleString()} transactions may impact performance.`;
+      const proceed = await confirmDataOperation(message, details);
+
+      if (!proceed) {
         _importData = null;
         return;
       }
-
-      // Transaction count validation
-      const txCount = importData.transactions.length;
-      if (txCount > MAX_IMPORT_TRANSACTIONS) {
-        const proceed = confirm(`This file contains ${txCount.toLocaleString()} transactions. Importing more than ${MAX_IMPORT_TRANSACTIONS.toLocaleString()} may slow down the app. Continue anyway?`);
-        if (!proceed) {
-          _importData = null;
-          return;
-        }
-      }
-      openModal('import-options-modal');
-    } catch (err) {
-      console.error('Import JSON parse error:', err);
-      const errMsg = err instanceof SyntaxError
-        ? `Invalid JSON: ${esc(err.message.slice(0, 50))}`
-        : 'Invalid backup file format';
-      showToast(errMsg, 'error');
-      _importData = null;
     }
-  };
-  reader.readAsText(file);
-  input.value = '';
+
+    await nextFrame();
+    openModal('import-options-modal');
+  } catch (err) {
+    if (import.meta.env.DEV) console.error('Import JSON parse error:', err);
+    showToast('Invalid backup file format', 'error');
+    _importData = null;
+  } finally {
+    input.value = '';
+  }
 }
 
 /**
- * Handle import overwrite - replaces all existing data
+ * Handle import overwrite
  */
 async function handleImportOverwrite(): Promise<void> {
   if (!_importData) return;
 
   try {
     const d = _importData;
-    const txCount = (d.transactions || []).length;
-    showProgress('Importing Data', `Processing ${txCount} transactions...`);
+    showProgress('Importing Data', 'Processing...');
     await new Promise(r => setTimeout(r, CONFIG.TIMING.UI_DELAY));
 
     const txList = sanitizeImportedTransactions(d.transactions || []);
     const { newS, writes, theme } = buildImportState(d, 'overwrite', txList);
 
-    if (!tryAtomicWrite(writes)) {
+    if (!(await tryAtomicWrite(writes))) {
       hideProgress();
-      showToast('Import failed: storage is full. No data changed.', 'error');
+      showToast('Import failed: storage error', 'error');
       return;
     }
 
     updateSignalsFromImport(newS);
     if (theme) setTheme(theme as Theme);
-    // Update currency display after import
-    const currencyDisplay = DOM.get('currency-display');
-    if (currencyDisplay && signals.currency.value) {
-      currencyDisplay.textContent = signals.currency.value.symbol;
-    }
     _importData = null;
     hideProgress();
     closeModal('import-options-modal');
@@ -270,97 +296,82 @@ async function handleImportOverwrite(): Promise<void> {
     emit(Events.DATA_IMPORTED);
   } catch (err) {
     hideProgress();
-    console.error('Import failed:', err);
-    showToast('Import failed: backup data is malformed', 'error');
+    showToast('Import failed: ' + (err instanceof Error ? err.message : 'unknown error'), 'error');
   }
 }
 
 /**
- * Handle import merge - adds new transactions to existing data
+ * Handle import merge
  */
 async function handleImportMerge(): Promise<void> {
   if (!_importData) return;
 
   try {
     const d = _importData;
-    const txCount = (d.transactions || []).length;
-    showProgress('Merging Data', `Processing ${txCount} transactions...`);
+    showProgress('Merging Data', 'Processing...');
     await new Promise(r => setTimeout(r, CONFIG.TIMING.UI_DELAY));
 
-    const existing = lsGet(SK.TX, []) as Transaction[];
+    const existing = [...signals.transactions.value] as Transaction[];
     const existingIds = new Set(existing.map(t => t.__backendId));
-    // Null-guard t before dereferencing __backendId
-    const incomingFiltered = (d.transactions || []).filter((t): t is Record<string, unknown> => {
+    
+    let incomingFiltered = (d.transactions || []).filter((t): t is Record<string, unknown> => {
       const tx = t as Record<string, unknown> | null;
       return tx != null && !existingIds.has(tx.__backendId as string);
     });
 
-    // Check for content duplicates - cast to Transaction[] for the comparison
     const incomingAsTransactions = incomingFiltered as unknown as Transaction[];
-    const contentDupes = findContentDuplicates(incomingAsTransactions, existing);
+    const duplicates = findContentDuplicates(incomingAsTransactions, existing);
 
-    if (contentDupes.length > 0) {
-      hideProgress(); // Hide before showing confirm dialog
-      const sampleDupes = contentDupes.slice(0, 3).map(t => {
-        const cat = getCatInfo(t.type, t.category);
-        return `• ${t.date}: ${cat?.name || t.category} - ${fmtCurFn(parseFloat(String(t.amount)))}${t.description ? ` (${t.description.slice(0, 20)}...)` : ''}`;
-      }).join('\n');
-      const moreText = contentDupes.length > 3 ? `\n...and ${contentDupes.length - 3} more` : '';
-      const proceed = confirm(`Found ${contentDupes.length} potential duplicate(s):\n\n${sampleDupes}${moreText}\n\nClick OK to import anyway, or Cancel to skip duplicates.`);
+    if (duplicates.exact.length > 0) {
+      showToast(`Skipping ${duplicates.exact.length} exact duplicate(s)`, 'info');
+      incomingFiltered = excludeDuplicates(incomingFiltered as unknown as Transaction[], duplicates.exact) as unknown as Record<string, unknown>[];
+    }
+    
+    if (duplicates.similar.length > 0) {
+      hideProgress();
+      closeModal('import-options-modal');
+      const message = `Found ${duplicates.similar.length} similar transactions that might be duplicates.`;
+      const details = `Choose 'Continue' to import them anyway, or 'Cancel' to skip them.`;
+      
+      const proceed = await confirmDataOperation(message, details);
 
       if (!proceed) {
-        showProgress('Merging Data', 'Importing (skipping duplicates)...');
-        await new Promise(r => setTimeout(r, CONFIG.TIMING.UI_DELAY));
-        // Filter out content duplicates
-        const dupeKeys = new Set(contentDupes.map(t =>
-          `${t.date}|${t.type}|${t.category}|${parseFloat(String(t.amount)).toFixed(2)}|${(t.description || '').toLowerCase().trim()}`
-        ));
-        const filtered = incomingFiltered.filter(t => {
-          const tx = t as Record<string, unknown>;
-          const key = `${tx.date}|${tx.type}|${tx.category}|${parseFloat(String(tx.amount)).toFixed(2)}|${(String(tx.description || '')).toLowerCase().trim()}`;
-          return !dupeKeys.has(key);
-        });
-        const newTx = sanitizeImportedTransactions(filtered, existingIds);
+        showProgress('Merging Data', 'Skipping similar...');
+        const filteredTransactions = excludeDuplicates(incomingFiltered as unknown as Transaction[], duplicates.similar);
+        const newTx = sanitizeImportedTransactions(filteredTransactions as unknown as Record<string, unknown>[], existingIds);
         const mergedTx = [...existing, ...newTx];
         const { newS, writes, theme } = buildImportState(d, 'merge', mergedTx);
-        if (!tryAtomicWrite(writes)) {
+        
+        if (!(await tryAtomicWrite(writes))) {
           hideProgress();
-          showToast('Import failed: storage is full', 'error');
+          showToast('Import failed: storage error', 'error');
           return;
         }
+        
         updateSignalsFromImport(newS);
         if (theme) setTheme(theme as Theme);
-        // Update currency display after import
-        const currencyDisplay = DOM.get('currency-display');
-        if (currencyDisplay && signals.currency.value) {
-          currencyDisplay.textContent = signals.currency.value.symbol;
-        }
         _importData = null;
         hideProgress();
         closeModal('import-options-modal');
-        showToast(`Imported ${newTx.length} transactions (${contentDupes.length} duplicates skipped)`, 'success');
+        showToast(`skipped ${duplicates.similar.length} similar transaction${duplicates.similar.length === 1 ? '' : 's'} and imported ${newTx.length}`, 'info');
         emit(Events.DATA_IMPORTED);
         return;
       }
-      showProgress('Merging Data', 'Importing (including duplicates)...');
-      await new Promise(r => setTimeout(r, CONFIG.TIMING.UI_DELAY));
+      
+      showProgress('Merging Data', 'Importing all...');
     }
 
     const newTx = sanitizeImportedTransactions(incomingFiltered, existingIds);
     const mergedTx = [...existing, ...newTx];
     const { newS, writes, theme } = buildImportState(d, 'merge', mergedTx);
-    if (!tryAtomicWrite(writes)) {
+    
+    if (!(await tryAtomicWrite(writes))) {
       hideProgress();
-      showToast('Import failed: storage is full. No data changed.', 'error');
+      showToast('Import failed: storage error', 'error');
       return;
     }
     updateSignalsFromImport(newS);
     if (theme) setTheme(theme as Theme);
-    // Update currency display after import
-    const currencyDisplay = DOM.get('currency-display');
-    if (currencyDisplay && signals.currency.value) {
-      currencyDisplay.textContent = signals.currency.value.symbol;
-    }
     _importData = null;
     hideProgress();
     closeModal('import-options-modal');
@@ -368,7 +379,6 @@ async function handleImportMerge(): Promise<void> {
     emit(Events.DATA_IMPORTED);
   } catch (err) {
     hideProgress();
-    console.error('Import failed:', err);
-    showToast('Import failed: backup data is malformed', 'error');
+    showToast('Import failed: ' + (err instanceof Error ? err.message : 'unknown error'), 'error');
   }
 }

@@ -6,6 +6,7 @@
  */
 
 import DOM from './dom-cache.js';
+import { sanitize, esc } from './utils-pure.js';
 import type {
   Transaction,
   ValidationRules,
@@ -15,7 +16,7 @@ import type {
   TransactionValidationResult,
   ImportValidationResult,
   ImportValidationError
-} from '../types/index.js';
+} from '../../types/index.js';
 
 // ==========================================
 // VALIDATOR CLASS
@@ -23,6 +24,9 @@ import type {
 
 class Validator {
   private rules: ValidationRules;
+  // Pre-compiled regexes for performance (avoid re-creation on every call)
+  private readonly dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  private readonly legacyShaRegex = /^[0-9a-f]{64}$/;
 
   constructor() {
     this.rules = {
@@ -34,18 +38,24 @@ class Validator {
       },
       description: {
         maxLength: 500,
-        pattern: /^[^<>]*$/,  // No HTML tags
-        message: 'Description cannot contain HTML tags'
+        // Allow < and > for mathematical expressions, comparisons, etc.
+        // HTML escaping happens at render time via esc()
+        pattern: /^[\s\S]*$/,  // Allow all characters
+        message: 'Description is too long (max 500 characters)'
       },
       notes: {
         maxLength: 500,
-        pattern: /^[^<>]*$/,
-        message: 'Notes cannot contain HTML tags'
+        // Allow < and > for mathematical expressions, comparisons, etc.
+        // HTML escaping happens at render time via esc()
+        pattern: /^[\s\S]*$/,  // Allow all characters
+        message: 'Notes are too long (max 500 characters)'
       },
       tags: {
         maxLength: 200,
-        pattern: /^[^<>]*$/,
-        message: 'Tags cannot contain HTML tags'
+        // Allow < and > in tags as well
+        // HTML escaping happens at render time via esc()
+        pattern: /^[\s\S]*$/,  // Allow all characters
+        message: 'Tags are too long (max 200 characters)'
       },
       date: {
         min: '1900-01-01',
@@ -133,8 +143,8 @@ class Validator {
       return { valid: false, error: 'Date is required' };
     }
 
-    // Check format (YYYY-MM-DD)
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(strValue)) {
+    // Check format (YYYY-MM-DD) - uses pre-compiled regex
+    if (!this.dateRegex.test(strValue)) {
       return { valid: false, error: 'Invalid date format' };
     }
 
@@ -175,21 +185,16 @@ class Validator {
 
   /**
    * Sanitize text input
-   *
-   * Note: Only trim whitespace - HTML escaping is done at render time via esc().
-   * Pattern validation in validateText() already rejects < and > characters.
+   * FIXED: Uses robust sanitization to prevent XSS while allowing safe characters.
    */
   sanitizeText(text: string): string {
-    return String(text).trim();
-  }
-
-  /**
-   * Escape HTML for safe display
-   */
-  escapeHtml(text: string): string {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    if (!text) return '';
+    // 1. Trim whitespace
+    let sanitized = text.trim();
+    // 2. Strip dangerous HTML tags/attributes (esc() is applied at render time by Lit)
+    sanitized = sanitize(sanitized);
+    // 3. Length limit safety (redundant but good for defense-in-depth)
+    return sanitized.slice(0, 1000);
   }
 
   /**
@@ -293,18 +298,17 @@ class Validator {
   showFieldError(element: HTMLElement | null, message: string): void {
     if (!element) return;
 
-    // Add error styling
     element.classList.add('error');
     element.setAttribute('aria-invalid', 'true');
 
-    // Find or create error message element
     const parent = element.parentElement;
     if (!parent) return;
 
-    let errorEl = parent.querySelector('.field-error') as HTMLElement | null;
+    let errorEl = parent.querySelector('.error-message') as HTMLElement | null;
     if (!errorEl) {
-      errorEl = document.createElement('div');
-      errorEl.className = 'field-error';
+      errorEl = document.createElement('span');
+      errorEl.className = 'error-message text-xs';
+      errorEl.style.color = 'var(--color-expense)';
       parent.appendChild(errorEl);
     }
 
@@ -318,17 +322,15 @@ class Validator {
   clearFieldError(element: HTMLElement | null): void {
     if (!element) return;
 
-    // Remove error styling
     element.classList.remove('error');
-    element.removeAttribute('aria-invalid');
+    element.setAttribute('aria-invalid', 'false');
 
-    // Hide error message
     const parent = element.parentElement;
     if (!parent) return;
 
-    const errorEl = parent.querySelector('.field-error') as HTMLElement | null;
+    const errorEl = parent.querySelector('.error-message') as HTMLElement | null;
     if (errorEl) {
-      errorEl.style.display = 'none';
+      errorEl.remove();
     }
   }
 
@@ -380,41 +382,8 @@ class Validator {
 
 const validator = new Validator();
 
-// ==========================================
-// VALIDATION STYLES
-// ==========================================
-
-if (!DOM.get('validator-styles')) {
-  const style = document.createElement('style');
-  style.id = 'validator-styles';
-  style.textContent = `
-    .field-error {
-      color: var(--color-expense, #e74c3c);
-      font-size: 12px;
-      margin-top: 4px;
-      display: none;
-    }
-
-    input.error,
-    textarea.error,
-    select.error {
-      border-color: var(--color-expense, #e74c3c) !important;
-      background-color: rgba(231, 76, 60, 0.05);
-    }
-
-    input.error:focus,
-    textarea.error:focus,
-    select.error:focus {
-      outline-color: var(--color-expense, #e74c3c);
-      box-shadow: 0 0 0 3px rgba(231, 76, 60, 0.1);
-    }
-
-    [aria-invalid="true"] {
-      border-color: var(--color-expense, #e74c3c) !important;
-    }
-  `;
-  document.head.appendChild(style);
-}
+// Validation styles are defined in style.css (not injected from JS)
+// See: input.error, .field-error, [aria-invalid="true"] rules in style.css
 
 // ==========================================
 // STANDALONE EXPORTS FOR TESTING
@@ -426,6 +395,48 @@ export const validateDate = (value: string) => validator.validateDate(value);
 export const validateText = (value: string | null | undefined, type: TextFieldType) => validator.validateText(value, type);
 export const validateTransaction = (transaction: Partial<Transaction>) => validator.validateTransaction(transaction);
 export const validateImportData = (data: unknown[]) => validator.validateImportData(data);
+
+// ==========================================
+// FIELD ERROR UI UTILITIES
+// Shared by any form that needs validation feedback
+// ==========================================
+
+import DOMCache from './dom-cache.js';
+
+/**
+ * Show validation error on a form field.
+ * Sets aria-invalid, adds .error class, and creates/updates an error message span.
+ */
+export function setFieldError(fieldName: string, message: string): void {
+  const fieldEl = DOMCache.get(fieldName) as HTMLInputElement | null;
+  if (!fieldEl) return;
+
+  fieldEl.setAttribute('aria-invalid', 'true');
+  fieldEl.classList.add('error');
+
+  let errorEl = fieldEl.parentElement?.querySelector('.error-message') as HTMLElement;
+  if (!errorEl) {
+    errorEl = document.createElement('span');
+    errorEl.className = 'error-message text-xs';
+    errorEl.style.color = 'var(--color-expense)';
+    fieldEl.parentElement?.appendChild(errorEl);
+  }
+  errorEl.textContent = message;
+}
+
+/**
+ * Clear validation error from a form field.
+ */
+export function clearFieldError(fieldName: string): void {
+  const fieldEl = DOMCache.get(fieldName) as HTMLInputElement | null;
+  if (!fieldEl) return;
+
+  fieldEl.setAttribute('aria-invalid', 'false');
+  fieldEl.classList.remove('error');
+
+  const errorEl = fieldEl.parentElement?.querySelector('.error-message');
+  if (errorEl) errorEl.remove();
+}
 
 export default validator;
 export { validator };

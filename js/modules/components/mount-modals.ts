@@ -54,7 +54,7 @@ export function renderAllModals(): TemplateResult {
  */
 export function mountModals(container: HTMLElement): () => void {
   if (!container) {
-    console.warn('mountModals: No container provided');
+    if (import.meta.env.DEV) console.warn('mountModals: No container provided');
     return () => {};
   }
 

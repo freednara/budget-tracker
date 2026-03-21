@@ -11,8 +11,13 @@
 
 import { signal, computed, effect, batch } from '@preact/signals-core';
 import type { Signal, ReadonlySignal } from '@preact/signals-core';
-import { lsGet, lsSet, SK } from './state.js';
-import { getMonthKey, toCents, toDollars } from './utils.js';
+import { getDefaultContainer, Services } from './di-container.js';
+import { lsGet, lsSet, SK, getStored } from './state.js';
+import { getMonthKey, getTodayStr as _getTodayStr, toCents, toDollars } from './utils.js';
+import { isTrackedExpenseTransaction } from './transaction-classification.js';
+import { calcTotals, getEffectiveIncome, getDailyAllowance, getSpendingPace, getMonthExpByCat, getMonthTx } from '../features/financial/calculations.js';
+import { calculateMonthlyTotalsWithCacheSync } from './monthly-totals-cache.js';
+import { getCatInfo } from './categories.js';
 import type {
   Transaction,
   SavingsGoal,
@@ -34,7 +39,8 @@ import type {
   DailyAllowanceData,
   DailyAllowanceStatus,
   SpendingPaceData,
-  SpendingPaceStatus
+  SpendingPaceStatus,
+  Theme
 } from '../../types/index.js';
 
 // ==========================================
@@ -63,49 +69,49 @@ export const transactions = signal<Transaction[]>([]);
  * Savings goals configuration
  */
 export const savingsGoals = signal<Record<string, SavingsGoal>>(
-  lsGet<Record<string, SavingsGoal>>(SK.SAVINGS, {})
+  getStored<Record<string, SavingsGoal>>(SK.SAVINGS)
 );
 
 /**
  * Savings contributions history
  */
 export const savingsContribs = signal<SavingsContribution[]>(
-  lsGet<SavingsContribution[]>(SK.SAVINGS_CONTRIB, [])
+  getStored<SavingsContribution[]>(SK.SAVINGS_CONTRIB)
 );
 
 /**
  * Monthly budget allocations by month key and category
  */
 export const monthlyAlloc = signal<Record<string, MonthlyAllocation>>(
-  lsGet<Record<string, MonthlyAllocation>>(SK.ALLOC, {})
+  getStored<Record<string, MonthlyAllocation>>(SK.ALLOC)
 );
 
 /**
  * User achievements/badges
  */
 export const achievements = signal<Record<string, unknown>>(
-  lsGet<Record<string, unknown>>(SK.ACHIEVE, {})
+  getStored<Record<string, unknown>>(SK.ACHIEVE)
 );
 
 /**
  * Streak tracking data
  */
 export const streak = signal<StreakData>(
-  lsGet<StreakData>(SK.STREAK, { current: 0, longest: 0, lastDate: '' })
+  getStored<StreakData>(SK.STREAK)
 );
 
 /**
  * Custom user-defined categories
  */
 export const customCats = signal<CustomCategory[]>(
-  lsGet<CustomCategory[]>(SK.CUSTOM_CAT, [])
+  getStored<CustomCategory[]>(SK.CUSTOM_CAT)
 );
 
 /**
  * Debt tracking entries
  */
 export const debts = signal<Debt[]>(
-  lsGet<Debt[]>(SK.DEBTS, [])
+  getStored<Debt[]>(SK.DEBTS)
 );
 
 // ==========================================
@@ -116,67 +122,105 @@ export const debts = signal<Debt[]>(
  * Currency settings (home currency and symbol)
  */
 export const currency = signal<CurrencySettings>(
-  lsGet<CurrencySettings>(SK.CURRENCY, { home: 'USD', symbol: '$' })
+  getStored<CurrencySettings>(SK.CURRENCY)
 );
 
 /**
  * Section visibility settings
  */
 export const sections = signal<SectionsConfig>(
-  lsGet<SectionsConfig>(SK.SECTIONS, { envelope: true })
+  getStored<SectionsConfig>(SK.SECTIONS)
 );
 
 /**
  * PIN for app lock (hashed)
  */
 export const pin = signal<string>(
-  lsGet<string>(SK.PIN, '')
+  getStored<string>(SK.PIN)
 );
 
 /**
  * Insight message personality
  */
 export const insightPers = signal<InsightPersonality>(
-  lsGet<InsightPersonality>(SK.INSIGHT_PERS, 'serious')
+  getStored<InsightPersonality>(SK.INSIGHT_PERS)
 );
 
 /**
  * Alert preferences
  */
 export const alerts = signal<AlertPrefs>(
-  lsGet<AlertPrefs>(SK.ALERTS, { budgetThreshold: 0.8 })
+  getStored<AlertPrefs>(SK.ALERTS)
+);
+
+/**
+ * Current theme preference (light/dark/system)
+ */
+export const theme = signal<Theme>(
+  getStored<Theme>(SK.THEME, 'dark' as Theme)
 );
 
 /**
  * Rollover settings for budget categories
  */
 export const rolloverSettings = signal<RolloverSettings>(
-  lsGet<RolloverSettings>(SK.ROLLOVER_SETTINGS, {
-    enabled: false,
-    mode: 'all',
-    categories: [],
-    maxRollover: null,
-    negativeHandling: 'zero'
-  })
+  getStored<RolloverSettings>(SK.ROLLOVER_SETTINGS)
 );
 
 /**
  * Filter presets
  */
 export const filterPresets = signal<FilterPreset[]>(
-  lsGet<FilterPreset[]>(SK.FILTER_PRESETS, [])
+  getStored<FilterPreset[]>(SK.FILTER_PRESETS)
 );
 
 /**
  * Transaction templates
  */
 export const txTemplates = signal<TxTemplate[]>(
-  lsGet<TxTemplate[]>(SK.TX_TEMPLATES, [])
+  getStored<TxTemplate[]>(SK.TX_TEMPLATES)
+);
+
+/**
+ * Last backup timestamp (ms)
+ */
+export const lastBackup = signal<number>(
+  getStored<number>(SK.LAST_BACKUP, 0)
+);
+
+/**
+ * Transaction count at the time of the last backup
+ */
+export const lastBackupTxCount = signal<number>(
+  getStored<number>('backup_reminder_last_tx_count' as any, 0)
 );
 
 // ==========================================
 // UI STATE SIGNALS (session only)
 // ==========================================
+
+/**
+ * Today's date string (YYYY-MM-DD), updated automatically at midnight
+ * Use this instead of getTodayStr() inside computed signals
+ */
+export const todayStr = signal<string>(_getTodayStr());
+
+// Schedule update at next midnight
+function _scheduleNextMidnight(): void {
+  const now = new Date();
+  const msUntilMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime() - now.getTime();
+  setTimeout(() => {
+    todayStr.value = _getTodayStr();
+    _scheduleNextMidnight();
+  }, msUntilMidnight + 100); // +100ms safety margin
+}
+_scheduleNextMidnight();
+
+/**
+ * Lightweight refresh counter — increment to force dependent computeds to recompute
+ * without cloning the entire transactions array
+ */
+export const refreshVersion = signal<number>(0);
 
 /**
  * Currently selected month (YYYY-MM format)
@@ -202,6 +246,11 @@ export const currentTab = signal<TransactionType>('expense');
 export const selectedCategory = signal<string>('');
 
 /**
+ * Set of IDs for alerts dismissed in the current session
+ */
+export const dismissedAlerts = signal<Set<string>>(new Set());
+
+/**
  * ID of transaction being edited (null if not editing)
  */
 export const editingId = signal<string | null>(null);
@@ -222,14 +271,78 @@ export const addSavingsGoalId = signal<string | null>(null);
 export const splitTxId = signal<string | null>(null);
 
 /**
+ * Current rows in the split modal
+ */
+export interface SplitRow {
+  id: string;
+  categoryId: string;
+  amount: number;
+}
+
+export const splitRows = signal<SplitRow[]>([]);
+
+/**
+ * Onboarding tour state
+ */
+export interface OnboardingState {
+  active: boolean;
+  step: number;
+  completed: boolean;
+}
+
+export const onboarding = signal<OnboardingState>(
+  getStored<OnboardingState>(SK.ONBOARD, { active: false, step: 0, completed: false })
+);
+
+/**
  * Transaction data pending edit confirmation
  */
 export const pendingEditTx = signal<Transaction | null>(null);
 
 /**
+ * Whether the form is in edit mode
+ */
+export const isEditing = signal<boolean>(false);
+
+/**
+ * Text for the form title
+ */
+export const formTitle = signal<string>('➕ Add Transaction');
+
+/**
+ * Text for the form submit button
+ */
+export const submitButtonText = signal<string>('ADD TRANSACTION');
+
+/**
  * Whether editing entire recurring series
  */
 export const editSeriesMode = signal<boolean>(false);
+
+/**
+ * Recurring transaction preview data
+ */
+export interface RecurringPreview {
+  show: boolean;
+  count: number;
+  startDate: string;
+  endDate: string;
+  isCapped: boolean;
+  error?: string;
+}
+
+export const recurringPreview = signal<RecurringPreview>({
+  show: false,
+  count: 0,
+  startDate: '',
+  endDate: '',
+  isCapped: false
+});
+
+/**
+ * Currently selected day in the calendar widget
+ */
+export const selectedCalendarDay = signal<number | null>(null);
 
 /**
  * Active main tab (dashboard/transactions/budget)
@@ -245,38 +358,112 @@ export const pagination = signal<PaginationState>({
   totalItems: 0
 });
 
+/**
+ * Transaction filters state
+ */
+export interface FilterState {
+  searchText: string;
+  type: TransactionType | 'all';
+  category: string;
+  tags: string;
+  dateFrom: string;
+  dateTo: string;
+  minAmount: string;
+  maxAmount: string;
+  reconciled: 'all' | 'yes' | 'no';
+  recurring: boolean;
+  showAllMonths: boolean;
+  sortBy: string;
+}
+
+export const filters = signal<FilterState>({
+  searchText: '',
+  type: 'all',
+  category: '',
+  tags: '',
+  dateFrom: '',
+  dateTo: '',
+  minAmount: '',
+  maxAmount: '',
+  reconciled: 'all',
+  recurring: false,
+  showAllMonths: false,
+  sortBy: 'date-desc'
+});
+
+/**
+ * Whether advanced filters are expanded
+ */
+export const filtersExpanded = signal<boolean>(
+  getStored<boolean>(SK.FILTER_EXPANDED, false)
+);
+
 // ==========================================
 // COMPUTED SIGNALS (derived values)
 // ==========================================
 
 /**
+ * Number of active filters
+ */
+export const activeFilterCount: ReadonlySignal<number> = computed(() => {
+  const f = filters.value;
+  let count = 0;
+  if (f.searchText) count++;
+  if (f.type !== 'all') count++;
+  if (f.category) count++;
+  if (f.tags) count++;
+  if (f.dateFrom) count++;
+  if (f.dateTo) count++;
+  if (f.minAmount) count++;
+  if (f.maxAmount) count++;
+  if (f.reconciled !== 'all') count++;
+  if (f.recurring) count++;
+  return count;
+});
+
+/**
+ * Transactions grouped by month key (YYYY-MM)
+ * Optimized Map-based index for O(1) month lookups
+ */
+export const transactionsByMonth: ReadonlySignal<Map<string, Transaction[]>> = computed(() => {
+  const map = new Map<string, Transaction[]>();
+  const _rv = refreshVersion.value; // Also recompute on forced refresh
+  
+  for (const tx of transactions.value) {
+    if (!tx.date) continue;
+    const mk = getMonthKey(tx.date);
+    if (!map.has(mk)) {
+      map.set(mk, []);
+    }
+    map.get(mk)!.push(tx);
+  }
+  return map;
+});
+
+/**
  * Transactions for the currently selected month
  * Automatically updates when transactions or currentMonth change
+ * OPTIMIZED: Uses Map-based index for O(1) lookup instead of O(N) filter
  */
-export const currentMonthTx: ReadonlySignal<Transaction[]> = computed(() =>
-  transactions.value.filter(t =>
-    t.date && getMonthKey(t.date) === currentMonth.value
-  )
-);
+export const currentMonthTx: ReadonlySignal<Transaction[]> = computed(() => {
+  const mk = currentMonth.value;
+  return transactionsByMonth.value.get(mk) || [];
+});
 
 /**
  * Totals for the current month (income, expenses, balance)
  * Automatically updates when currentMonthTx changes
  */
 export const currentMonthTotals: ReadonlySignal<MonthTotals> = computed(() => {
-  const txs = currentMonthTx.value;
-  let incomeCents = 0;
-  let expensesCents = 0;
-
-  for (const tx of txs) {
-    const amtCents = toCents(tx.amount);
-    if (tx.type === 'income') incomeCents += amtCents;
-    else if (tx.type === 'expense') expensesCents += amtCents;
-  }
-
-  const income = toDollars(incomeCents);
-  const expenses = toDollars(expensesCents);
-  return { income, expenses, balance: income - expenses };
+  // Keep the currently viewed month live from the signal-backed transaction list.
+  // Historical lookups can use the monthly cache, but the active dashboard needs
+  // immediate consistency after local edits, imports, and cross-tab sync updates.
+  const totals = calcTotals(currentMonthTx.value);
+  return {
+    income: totals.income,
+    expenses: totals.expenses,
+    balance: totals.balance
+  };
 });
 
 /**
@@ -292,6 +479,23 @@ export const budgetRemaining: ReadonlySignal<number> = computed(() => {
 });
 
 /**
+ * Unassigned balance for current month (Available to Budget)
+ * FIXED: Memoized to avoid O(M*N) historical scanning on every access
+ * Accumulates from all previous months for true zero-based budgeting
+ */
+export const unassignedBalance: ReadonlySignal<number> = computed(() => {
+  const mk = currentMonth.value;
+  const alloc = monthlyAlloc.value;
+  // Simple: current month income minus current month total allocations
+  // Avoids expensive multi-month iteration that caused freezes
+  const income = currentMonthTotals.value.income;
+  const allocCents = Object.values(alloc[mk] || {}).reduce(
+    (s: number, v: number) => s + toCents(v), 0
+  );
+  return income - toDollars(allocCents);
+});
+
+/**
  * Savings rate for current month (percentage)
  * Returns (income - expenses) / income * 100
  */
@@ -301,14 +505,44 @@ export const savingsRate: ReadonlySignal<number> = computed(() => {
 });
 
 /**
+ * Current financial insights
+ * FIXED: Uses DI container to resolve insights generator, removing circular dependency issues
+ * Auto-updates when transactions or personality changes
+ */
+export const currentInsights: ReadonlySignal<Array<{ type: string; message: string; action?: any }>> = computed(() => {
+  try {
+    const container = getDefaultContainer();
+    
+    // Check if initialized to avoid errors during early startup
+    if (!container.isInitialized(Services.INSIGHTS_GENERATOR)) {
+      return [];
+    }
+    
+    const generateInsights = container.resolveSync<() => any>(Services.INSIGHTS_GENERATOR);
+
+    // Dependencies that trigger recalculation
+    const _txCount = transactions.value.length;
+    const _month = currentMonth.value;
+    const _personality = insightPers.value;
+
+    const insights = generateInsights();
+    return insights;
+  } catch (e) {
+    // If not yet available, return empty
+    return [];
+  }
+});
+
+/**
  * Total expenses by category for current month
  * Returns a map of category ID to total amount
  */
 export const expensesByCategory: ReadonlySignal<Record<string, number>> = computed(() => {
   const expByCatCents: Record<string, number> = {};
-  const expTx = currentMonthTx.value.filter(t => t.type === 'expense');
 
-  for (const tx of expTx) {
+  // Single pass: filter and accumulate simultaneously
+  for (const tx of currentMonthTx.value) {
+    if (!isTrackedExpenseTransaction(tx)) continue;
     expByCatCents[tx.category] = (expByCatCents[tx.category] || 0) + toCents(tx.amount);
   }
 
@@ -340,89 +574,32 @@ export const hasTransactions: ReadonlySignal<boolean> = computed(() =>
 
 /**
  * Daily allowance data for current month
+ * Delegates to getDailyAllowance() in calculations.ts (single source of truth)
  * Recomputes when transactions, monthlyAlloc, or currentMonth change
  */
 export const dailyAllowanceData: ReadonlySignal<DailyAllowanceData> = computed(() => {
+  // Access reactive dependencies so signal recomputes when they change
+  const _txCount = transactions.value.length;
+  const _alloc = monthlyAlloc.value;
   const mk = currentMonth.value;
-  const now = new Date();
-  const [year, month] = mk.split('-').map(Number);
-  const isCurrentMonth = now.getFullYear() === year && now.getMonth() + 1 === month;
-  const daysInMonth = new Date(year, month, 0).getDate();
-  const daysRemaining = isCurrentMonth ? Math.max(1, daysInMonth - now.getDate() + 1) : 0;
 
-  // Get total allocated budget for the month
-  const alloc = monthlyAlloc.value[mk] || {};
-  const totalBudgetCents = Object.values(alloc as Record<string, number>).reduce(
-    (s: number, v: number) => s + toCents(v), 0
-  );
-  const totalBudget = toDollars(totalBudgetCents);
-
-  // Get total spent (from currentMonthTotals for efficiency)
-  const spentCents = toCents(currentMonthTotals.value.expenses);
-  const spent = toDollars(spentCents);
-
-  // Calculate remaining budget
-  const remainingCents = totalBudgetCents - spentCents;
-  const remaining = toDollars(remainingCents);
-
-  // Calculate daily allowance
-  const dailyAllowanceCents = daysRemaining > 0 ? Math.floor(remainingCents / daysRemaining) : 0;
-  const dailyAllowance = toDollars(dailyAllowanceCents);
-
-  // Determine status based on budget health
-  let status: DailyAllowanceStatus = 'neutral';
-  if (totalBudget === 0) {
-    status = 'no-budget';
-  } else if (remaining <= 0) {
-    status = 'over';
-  } else if (dailyAllowance < totalBudget / daysInMonth * 0.3) {
-    status = 'warning';
-  } else {
-    status = 'healthy';
-  }
-
-  return { dailyAllowance, daysRemaining, totalBudget, spent, remaining, status, isCurrentMonth };
+  // Delegate to pure function in calculations.ts
+  return getDailyAllowance(mk);
 });
 
 /**
  * Spending pace data for current month
+ * Delegates to getSpendingPace() in calculations.ts (single source of truth)
  * Shows if spending is ahead, on track, or behind budget pace
  */
 export const spendingPaceData: ReadonlySignal<SpendingPaceData> = computed(() => {
+  // Access reactive dependencies so signal recomputes when they change
+  const _txCount = transactions.value.length;
+  const _alloc = monthlyAlloc.value;
   const mk = currentMonth.value;
-  const now = new Date();
-  const [year, month] = mk.split('-').map(Number);
-  const isCurrentMonth = now.getFullYear() === year && now.getMonth() + 1 === month;
-  const daysInMonth = new Date(year, month, 0).getDate();
-  const dayOfMonth = isCurrentMonth ? now.getDate() : daysInMonth;
 
-  // Expected percent of budget that should be spent by now
-  const expectedPercent = daysInMonth > 0 ? (dayOfMonth / daysInMonth) * 100 : 0;
-
-  // Get total budget and spent
-  const alloc = monthlyAlloc.value[mk] || {};
-  const totalBudgetCents = Object.values(alloc as Record<string, number>).reduce(
-    (s: number, v: number) => s + toCents(v), 0
-  );
-
-  if (totalBudgetCents === 0) {
-    return { status: 'no-budget' as SpendingPaceStatus, percentOfBudget: 0, expectedPercent, difference: 0, isCurrentMonth };
-  }
-
-  const spentCents = toCents(currentMonthTotals.value.expenses);
-  const percentOfBudget = totalBudgetCents > 0 ? (spentCents / totalBudgetCents) * 100 : 0;
-  const difference = percentOfBudget - expectedPercent;
-
-  let status: SpendingPaceStatus;
-  if (difference > 10) {
-    status = 'over'; // Red - spending too fast
-  } else if (difference > -10) {
-    status = 'on-track'; // Yellow - within 10%
-  } else {
-    status = 'under'; // Green - spending less than expected
-  }
-
-  return { status, percentOfBudget, expectedPercent, difference, isCurrentMonth };
+  // Delegate to pure function in calculations.ts
+  return getSpendingPace(mk);
 });
 
 /**
@@ -450,6 +627,90 @@ export const envelopeData: ReadonlySignal<EnvelopeItem[]> = computed(() => {
     const isOver = spent > allocated;
     return { categoryId, allocated, spent, remaining, percentage, isOver };
   });
+});
+
+/**
+ * Status of current transaction split
+ */
+export interface SplitStatus {
+  originalAmount: number;
+  totalSplitAmount: number;
+  remainingAmount: number;
+  isValid: boolean;
+  hasEmptyFields: boolean;
+}
+
+export const splitStatus: ReadonlySignal<SplitStatus> = computed(() => {
+  const txId = splitTxId.value;
+  const rows = splitRows.value;
+  
+  if (!txId) return { originalAmount: 0, totalSplitAmount: 0, remainingAmount: 0, isValid: false, hasEmptyFields: false };
+  
+  const tx = transactions.value.find(t => t.__backendId === txId);
+  if (!tx) return { originalAmount: 0, totalSplitAmount: 0, remainingAmount: 0, isValid: false, hasEmptyFields: false };
+  
+  const origCents = toCents(tx.amount);
+  const splitCents = rows.reduce((sum, row) => sum + toCents(row.amount), 0);
+  const hasEmptyFields = rows.some(row => !row.categoryId || toCents(row.amount) === 0);
+  
+  return {
+    originalAmount: tx.amount,
+    totalSplitAmount: toDollars(splitCents),
+    remainingAmount: toDollars(origCents - splitCents),
+    isValid: origCents === splitCents && rows.length > 0 && !hasEmptyFields,
+    hasEmptyFields
+  };
+});
+
+/**
+ * Current budget alerts for the active month
+ * Memoized: skips recomputation when inputs haven't materially changed
+ */
+let _prevAlertInputs: { mk: string; allocKeys: string; expJson: string; threshold: number | null; dismissedSize: number } | null = null;
+let _prevAlertResult: string[] = [];
+
+export const activeAlerts: ReadonlySignal<string[]> = computed(() => {
+  const mk = currentMonth.value;
+  const alloc = monthlyAlloc.value[mk] || {};
+  const expByCat = expensesByCategory.value;
+  const alertSettings = alerts.value;
+  const dismissed = dismissedAlerts.value;
+
+  if (alertSettings.budgetThreshold === null) return [];
+
+  // Quick memoization check: compare cheap fingerprints of inputs
+  const allocKeys = Object.keys(alloc).join(',');
+  const expJson = JSON.stringify(expByCat);
+  const inputs = { mk, allocKeys, expJson, threshold: alertSettings.budgetThreshold, dismissedSize: dismissed.size };
+  if (_prevAlertInputs &&
+      _prevAlertInputs.mk === inputs.mk &&
+      _prevAlertInputs.allocKeys === inputs.allocKeys &&
+      _prevAlertInputs.expJson === inputs.expJson &&
+      _prevAlertInputs.threshold === inputs.threshold &&
+      _prevAlertInputs.dismissedSize === inputs.dismissedSize) {
+    return _prevAlertResult;
+  }
+
+  const foundAlerts: string[] = [];
+
+  Object.entries(alloc).forEach(([catId, amt]) => {
+    if (!(amt > 0)) return;
+
+    const spent = expByCat[catId] || 0;
+    if (spent >= amt * alertSettings.budgetThreshold!) {
+      const cat = getCatInfo('expense', catId);
+      const alertText = `${cat.emoji} ${cat.name}: ${Math.round(spent / amt * 100)}% spent`;
+
+      // Filter out dismissed alerts
+      if (!dismissed.has(`${mk}:${alertText}`)) {
+        foundAlerts.push(alertText);
+      }
+    }
+  });
+
+  _prevAlertInputs = inputs;
+  _prevAlertResult = foundAlerts;
+  return foundAlerts;
 });
 
 /**
@@ -484,22 +745,46 @@ export const budgetUsagePercent: ReadonlySignal<number> = computed(() => {
 // PERSISTENCE EFFECTS
 // ==========================================
 
-// Auto-persist signals to localStorage when they change
-effect(() => { lsSet(SK.SAVINGS, savingsGoals.value); });
-effect(() => { lsSet(SK.SAVINGS_CONTRIB, savingsContribs.value); });
-effect(() => { lsSet(SK.ALLOC, monthlyAlloc.value); });
-effect(() => { lsSet(SK.ACHIEVE, achievements.value); });
-effect(() => { lsSet(SK.STREAK, streak.value); });
-effect(() => { lsSet(SK.CUSTOM_CAT, customCats.value); });
-effect(() => { lsSet(SK.DEBTS, debts.value); });
-effect(() => { lsSet(SK.CURRENCY, currency.value); });
-effect(() => { lsSet(SK.SECTIONS, sections.value); });
-effect(() => { lsSet(SK.PIN, pin.value); });
-effect(() => { lsSet(SK.INSIGHT_PERS, insightPers.value); });
-effect(() => { lsSet(SK.ALERTS, alerts.value); });
-effect(() => { lsSet(SK.ROLLOVER_SETTINGS, rolloverSettings.value); });
-effect(() => { lsSet(SK.FILTER_PRESETS, filterPresets.value); });
-effect(() => { lsSet(SK.TX_TEMPLATES, txTemplates.value); });
+// Import revision tracking, multi-tab sync, and signal batcher
+import stateRevision from './state-revision.js';
+import { broadcastManager } from './multi-tab-sync-broadcast.js';
+import { getTabId } from './tab-id.js';
+import { getSignalBatcher } from './signal-batcher.js';
+
+// Initialize signal batcher for optimized persistence
+const batcher = getSignalBatcher({
+  debounceMs: 150,
+  maxBatchSize: 20,
+  flushOnVisibilityChange: true,
+  onWrite: (key, value) => {
+    stateRevision.recordStateChange(key, value, getTabId());
+    broadcastManager.sendStateUpdate(key, value);
+  }
+});
+
+// Register all persisted signals with the batcher
+// This is O(1) per change instead of O(N) where N is number of signals
+batcher.registerSignals({
+  [SK.SAVINGS]: savingsGoals,
+  [SK.SAVINGS_CONTRIB]: savingsContribs,
+  [SK.ALLOC]: monthlyAlloc,
+  [SK.ACHIEVE]: achievements,
+  [SK.STREAK]: streak,
+  [SK.CUSTOM_CAT]: customCats,
+  [SK.DEBTS]: debts,
+  [SK.CURRENCY]: currency,
+  [SK.SECTIONS]: sections,
+  [SK.PIN]: pin,
+  [SK.INSIGHT_PERS]: insightPers,
+  [SK.ALERTS]: alerts,
+  [SK.THEME]: theme,
+  [SK.ROLLOVER_SETTINGS]: rolloverSettings,
+  [SK.FILTER_PRESETS]: filterPresets,
+  [SK.TX_TEMPLATES]: txTemplates,
+  [SK.ONBOARD]: onboarding,
+  [SK.LAST_BACKUP]: lastBackup,
+  ['backup_reminder_last_tx_count' as any]: lastBackupTxCount
+});
 
 // ==========================================
 // BATCH HELPER
@@ -516,7 +801,7 @@ effect(() => { lsSet(SK.TX_TEMPLATES, txTemplates.value); });
  *   currentMonth.value = '2026-03';
  * });
  */
-export { batch };
+export { signal, batch, getDefaultContainer, Services };
 
 // ==========================================
 // UTILITY FUNCTIONS
@@ -524,13 +809,12 @@ export { batch };
 
 /**
  * Get transactions for a specific month
+ * OPTIMIZED: Uses Map-based index for O(1) lookup
  * @param mk - Month key in YYYY-MM format (defaults to currentMonth)
  */
 export function getMonthTransactions(mk?: string): Transaction[] {
   const month = mk ?? currentMonth.value;
-  return transactions.value.filter(t =>
-    t.date && getMonthKey(t.date) === month
-  );
+  return transactionsByMonth.value.get(month) || [];
 }
 
 /**
@@ -540,36 +824,16 @@ export function getMonthTransactions(mk?: string): Transaction[] {
  */
 export function getCategoryExpenses(categoryId: string, mk?: string): number {
   const month = mk ?? currentMonth.value;
-  let totalCents = 0;
-
-  for (const tx of transactions.value) {
-    if (tx.type === 'expense' &&
-        tx.category === categoryId &&
-        tx.date &&
-        getMonthKey(tx.date) === month) {
-      totalCents += toCents(tx.amount);
-    }
-  }
-
-  return toDollars(totalCents);
+  // Use pure function from calculations.ts - single source of truth
+  return getMonthExpByCat(categoryId, month);
 }
 
 /**
  * Calculate totals for a specific month
+ * Uses calcTotals from calculations.ts to maintain single source of truth
  * @param mk - Month key in YYYY-MM format
  */
 export function calculateMonthTotals(mk: string): MonthTotals {
   const txs = getMonthTransactions(mk);
-  let incomeCents = 0;
-  let expensesCents = 0;
-
-  for (const tx of txs) {
-    const amtCents = toCents(tx.amount);
-    if (tx.type === 'income') incomeCents += amtCents;
-    else if (tx.type === 'expense') expensesCents += amtCents;
-  }
-
-  const income = toDollars(incomeCents);
-  const expenses = toDollars(expensesCents);
-  return { income, expenses, balance: income - expenses };
+  return calcTotals(txs, mk);
 }

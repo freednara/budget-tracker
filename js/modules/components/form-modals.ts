@@ -75,6 +75,7 @@ export function renderDebtModal(): TemplateResult {
         </div>
 
         <div class="flex gap-3 mt-6">
+          <button id="delete-debt" class="hidden px-4 py-3 rounded-lg font-bold" style="background: var(--bg-card); color: var(--color-expense);">🗑️</button>
           <button id="cancel-debt" class="flex-1 py-3 rounded-lg font-bold" style="background: var(--bg-input); color: var(--text-primary);">Cancel</button>
           <button id="save-debt" class="flex-1 py-3 rounded-lg font-bold" style="background: var(--color-expense); color: white;">Save Debt</button>
         </div>
@@ -173,6 +174,9 @@ export function renderDebtStrategyModal(): TemplateResult {
         <div id="strategy-recommendation" class="p-3 rounded-lg mb-4" style="background: color-mix(in srgb, var(--color-accent) 10%, transparent);">
           <p class="text-sm" style="color: var(--text-primary);"><strong>💡 Recommendation:</strong> <span id="strategy-rec-text">--</span></p>
         </div>
+
+        <!-- Dynamic strategy comparison results -->
+        <div id="strategy-results" class="space-y-4 mb-4"></div>
 
         <!-- Payoff Order -->
         <div class="mb-4">
@@ -279,29 +283,12 @@ export function renderCategoryModal(): TemplateResult {
 // ==========================================
 
 /**
- * Render the split transaction modal
+ * Render the split transaction modal container.
+ * Content is rendered reactively by split-transactions.ts mountSplitModal()
  */
 export function renderSplitModal(): TemplateResult {
   return html`
-    <div id="split-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="split-modal-title">
-      <div class="rounded-2xl p-6 max-w-lg w-full card-shadow" style="background: var(--bg-card-section); border: 1px solid var(--border-section);">
-        <h3 id="split-modal-title" class="text-xl font-black mb-4 text-primary">Split Transaction</h3>
-        <div class="flex justify-between mb-3 p-3 rounded-lg" style="background: var(--bg-input);">
-          <span class="text-sm font-bold text-secondary">Original Amount:</span>
-          <span id="split-original-amount" class="text-sm font-black text-primary">$0.00</span>
-        </div>
-        <div id="split-rows" class="space-y-2 mb-3"></div>
-        <button id="add-split-row" class="w-full py-2 rounded-lg text-sm font-semibold mb-3" style="background: var(--bg-input); color: var(--text-secondary); border: 1px dashed var(--border-input);">+ Add Split</button>
-        <div class="flex justify-between mb-4 p-3 rounded-lg" style="background: color-mix(in srgb, var(--color-accent) 10%, transparent);">
-          <span class="text-sm font-bold text-accent">Remaining:</span>
-          <span id="split-remaining" class="text-sm font-black text-accent">$0.00</span>
-        </div>
-        <div class="flex gap-3">
-          <button id="cancel-split" class="flex-1 py-3 rounded-lg font-bold" style="background: var(--bg-input); color: var(--text-primary);">Cancel</button>
-          <button id="save-split" class="flex-1 py-3 rounded-lg font-bold btn-primary">Save Split</button>
-        </div>
-      </div>
-    </div>
+    <div id="split-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-hidden="true"></div>
   `;
 }
 

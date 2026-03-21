@@ -13,6 +13,9 @@
 import * as signals from '../../core/signals.js';
 import { sumByType, getMonthKey, parseMonthKey, toCents, toDollars } from '../../core/utils.js';
 import { getCatInfo } from '../../core/categories.js';
+import { isTrackedExpenseTransaction } from '../../core/transaction-classification.js';
+import { isRolloverEnabled, getEffectiveBudget, calculateMonthRollovers } from './rollover.js';
+import monthlyTotalsCache from '../../core/monthly-totals-cache.js';
 import type {
   Transaction,
   SavingsContribution,
@@ -69,17 +72,23 @@ interface MonthlyDataCentsEntry {
 
 /**
  * Get transactions for a specific month
- * Uses signals for reactive state access
+ * OPTIMIZED: Uses Map-based index from signals for O(1) month lookups
  */
 export function getMonthTx(mk: string = signals.currentMonth.value): Transaction[] {
-  return signals.transactions.value.filter((t: Transaction) => t.date && getMonthKey(t.date) === mk);
+  // Always use the optimized transactionsByMonth Map from signals
+  return signals.transactionsByMonth.value.get(mk) || [];
 }
 
 /**
  * Get expense transactions for a specific month
+ * REFACTORED: Leverages signals when possible
  */
 export function getMonthExpenses(mk: string = signals.currentMonth.value): Transaction[] {
-  return getMonthTx(mk).filter((t: Transaction) => t.type === 'expense');
+  if (mk === signals.currentMonth.value) {
+    // Use the already filtered current month transactions
+    return signals.currentMonthTx.value.filter((t: Transaction) => isTrackedExpenseTransaction(t));
+  }
+  return getMonthTx(mk).filter((t: Transaction) => isTrackedExpenseTransaction(t));
 }
 
 // ==========================================
@@ -88,20 +97,43 @@ export function getMonthExpenses(mk: string = signals.currentMonth.value): Trans
 
 /**
  * Calculate totals from a transaction list
- * Single-pass algorithm for optimal performance
+ * CRITICAL FIX: Now uses memoized cache to prevent cross-tab race conditions
  */
-export function calcTotals(txList: Transaction[]): Totals {
-  // Single pass: accumulate both income and expenses at once
+export function calcTotals(txList: Transaction[], monthKey?: string): Totals {
+  // If we have a month key, use the memoized cache (sync version for compatibility)
+  if (monthKey) {
+    return monthlyTotalsCache.calculateSync(monthKey);
+  }
+  
+  // For arbitrary transaction lists, calculate directly
   const result = txList.reduce((acc: TotalsAccumulator, tx: Transaction) => {
     const amtCents = toCents(tx.amount);
     if (tx.type === 'income') acc.incomeCents += amtCents;
-    else if (tx.type === 'expense') acc.expensesCents += amtCents;
+    else if (isTrackedExpenseTransaction(tx)) acc.expensesCents += amtCents;
     return acc;
   }, { incomeCents: 0, expensesCents: 0 });
 
   const income = toDollars(result.incomeCents);
   const expenses = toDollars(result.expensesCents);
-  return { income, expenses, balance: income - expenses };
+  return { income, expenses, balance: toDollars(result.incomeCents - result.expensesCents) };
+}
+
+/**
+ * CRITICAL FIX: Race-condition-safe monthly totals calculation
+ */
+export function getMonthlyTotals(monthKey: string): Totals {
+  return monthlyTotalsCache.calculateSync(monthKey);
+}
+
+/**
+ * Invalidate monthly totals cache when data changes
+ */
+export function invalidateMonthlyTotalsCache(monthKey?: string): void {
+  if (monthKey) {
+    monthlyTotalsCache.invalidateMonth(monthKey);
+  } else {
+    monthlyTotalsCache.invalidateAll();
+  }
 }
 
 /**
@@ -125,20 +157,76 @@ export function getMonthlySavings(mk: string): number {
  * Get expenses for a specific category in a month
  */
 export function getMonthExpByCat(catId: string, mk: string): number {
-  return sumByType(getMonthTx(mk).filter((t: Transaction) => t.category === catId), 'expense');
+  const cents = getMonthTx(mk)
+    .filter((t: Transaction) => isTrackedExpenseTransaction(t) && t.category === catId)
+    .reduce((sum: number, t: Transaction) => sum + toCents(t.amount), 0);
+  return toDollars(cents);
 }
 
 /**
- * Calculate unallocated income (uses integer math)
+ * Calculate unallocated income
+ * OPTIMIZED: Uses transactionsByMonth keys instead of iterating over all transactions
  */
 export function getUnassigned(mk: string): number {
-  const income = getEffectiveIncome(mk);
-  const alloc = signals.monthlyAlloc.value[mk] || {};
-  const totalAllocCents = Object.values(alloc as Record<string, number>).reduce(
-    (s: number, v: number) => s + toCents(v), 0
-  );
-  const totalAlloc = toDollars(totalAllocCents);
-  return income - totalAlloc;
+  // For the current month, use the memoized signal if available (O(1))
+  if (mk === signals.currentMonth.value) {
+    return signals.unassignedBalance.value;
+  }
+  
+  // 1. Find all relevant months chronologically using optimized Map keys
+  const allMonths = new Set(signals.transactionsByMonth.value.keys());
+  Object.keys(signals.monthlyAlloc.value).forEach(month => allMonths.add(month));
+  
+  const sortedMonths = Array.from(allMonths).sort();
+  if (!allMonths.has(mk)) {
+    sortedMonths.push(mk);
+    sortedMonths.sort();
+  }
+  
+  // 2. Accumulate unassigned using cached totals
+  let cumulativeUnassignedCents = 0;
+  
+  for (const month of sortedMonths) {
+    if (month > mk) break;
+    
+    const totals = monthlyTotalsCache.calculateSync(month);
+    const monthIncomeCents = toCents(totals.income);
+    const monthAlloc = (signals.monthlyAlloc.value[month] || {}) as Record<string, number>;
+    let monthAllocCents = 0;
+    for (const key in monthAlloc) {
+      monthAllocCents += toCents(monthAlloc[key]);
+    }
+    
+    cumulativeUnassignedCents += (monthIncomeCents - monthAllocCents);
+  }
+  
+  return toDollars(cumulativeUnassignedCents);
+}
+
+// ==========================================
+// ROLLOVER CACHE
+// ==========================================
+
+/**
+ * Module-level cache for rollover results keyed by month
+ * Shared by getDailyAllowance() and getSpendingPace() to avoid duplicate calls
+ */
+let rolloverCache: { month: string; rollovers: Record<string, number> } | null = null;
+
+function getCachedRollovers(mk: string): Record<string, number> {
+  if (rolloverCache && rolloverCache.month === mk) {
+    return rolloverCache.rollovers;
+  }
+  const rollovers = calculateMonthRollovers(mk);
+  rolloverCache = { month: mk, rollovers };
+  return rollovers;
+}
+
+/**
+ * Invalidate the rollover cache (call when transactions or allocations change)
+ */
+export function invalidateRolloverCache(): void {
+  rolloverCache = null;
 }
 
 // ==========================================
@@ -146,18 +234,14 @@ export function getUnassigned(mk: string): number {
 // ==========================================
 
 /**
- * Calculate spending velocity
+ * Calculate spending velocity (uses pure function internally)
  */
 export function calcVelocity(): VelocityData {
   const currentMk = signals.currentMonth.value;
-  const viewDate = parseMonthKey(currentMk);
-  const now = new Date();
-  const isCurrentMonth = getMonthKey(now) === currentMk;
-  const daysInMonth = new Date(viewDate.getFullYear(), viewDate.getMonth() + 1, 0).getDate();
-  const daysElapsed = isCurrentMonth ? Math.max(1, now.getDate()) : daysInMonth;
-  const monthExp = sumByType(getMonthTx(currentMk), 'expense');
-  const dailyRate = daysElapsed > 0 ? monthExp / daysElapsed : 0;
-  return { dailyRate, projected: dailyRate * daysInMonth, actual: monthExp };
+  const transactions = signals.transactions.value;
+  
+  // Delegate to pure function for testability
+  return calcVelocityPure(transactions, currentMk, new Date());
 }
 
 /**
@@ -170,15 +254,20 @@ export function getDailyAllowance(mk: string = signals.currentMonth.value): Dail
   const daysInMonth = new Date(viewDate.getFullYear(), viewDate.getMonth() + 1, 0).getDate();
   const daysRemaining = isCurrentMonth ? Math.max(1, daysInMonth - now.getDate() + 1) : 0;
 
-  // Get total allocated budget for the month
+  // Get total allocated budget for the month (including rollover if enabled)
+  // Use cached calculateMonthRollovers to avoid redundant computation
   const alloc = signals.monthlyAlloc.value[mk] || {};
-  const totalBudgetCents = Object.values(alloc as Record<string, number>).reduce(
-    (s: number, v: number) => s + toCents(v), 0
-  );
+  const rolloverActive = isRolloverEnabled();
+  const rollovers = rolloverActive ? getCachedRollovers(mk) : {};
+  let totalBudgetCents = 0;
+  for (const [catId, amt] of Object.entries(alloc as Record<string, number>)) {
+    totalBudgetCents += toCents(amt) + (rolloverActive ? toCents(rollovers[catId] || 0) : 0);
+  }
   const totalBudget = toDollars(totalBudgetCents);
 
   // Get total spent
-  const spentCents = toCents(sumByType(getMonthTx(mk), 'expense'));
+  const spentCents = getMonthExpenses(mk)
+    .reduce((sum: number, tx: Transaction) => sum + toCents(tx.amount), 0);
   const spent = toDollars(spentCents);
 
   // Calculate remaining budget
@@ -225,17 +314,22 @@ export function getSpendingPace(mk: string = signals.currentMonth.value): Spendi
   // Expected percent of budget that should be spent by now
   const expectedPercent = daysInMonth > 0 ? (dayOfMonth / daysInMonth) * 100 : 0;
 
-  // Get total budget and spent
+  // Get total budget and spent (including rollover if enabled)
+  // Use cached calculateMonthRollovers to avoid redundant computation
   const alloc = signals.monthlyAlloc.value[mk] || {};
-  const totalBudgetCents = Object.values(alloc as Record<string, number>).reduce(
-    (s: number, v: number) => s + toCents(v), 0
-  );
+  const rolloverActive = isRolloverEnabled();
+  const rollovers = rolloverActive ? getCachedRollovers(mk) : {};
+  let totalBudgetCents = 0;
+  for (const [catId, amt] of Object.entries(alloc as Record<string, number>)) {
+    totalBudgetCents += toCents(amt) + (rolloverActive ? toCents(rollovers[catId] || 0) : 0);
+  }
 
   if (totalBudgetCents === 0) {
     return { status: 'no-budget', percentOfBudget: 0, expectedPercent, difference: 0 };
   }
 
-  const spentCents = toCents(sumByType(getMonthTx(mk), 'expense'));
+  const spentCents = getMonthExpenses(mk)
+    .reduce((sum: number, tx: Transaction) => sum + toCents(tx.amount), 0);
   const percentOfBudget = totalBudgetCents > 0 ? (spentCents / totalBudgetCents) * 100 : 0;
   const difference = percentOfBudget - expectedPercent;
 
@@ -262,13 +356,24 @@ export function getSpendingPace(mk: string = signals.currentMonth.value): Spendi
 // ==========================================
 
 /**
+ * Module-level cache for top category result (invalidated when month changes)
+ */
+let topCatCache: { month: string; result: TopCategoryResult | null } | null = null;
+
+/**
  * Get top spending category (uses integer math)
  * Single-pass algorithm for optimal performance
+ * Cached per month to avoid redundant recalculation
  */
 export function getTopCat(): TopCategoryResult | null {
+  const currentMonth = signals.currentMonth.value;
+  if (topCatCache && topCatCache.month === currentMonth) {
+    return topCatCache.result;
+  }
+
   // Single pass: filter and accumulate category totals together
   const catsCents = getMonthTx().reduce((acc: Record<string, number>, t: Transaction) => {
-    if (t.type === 'expense') {
+    if (isTrackedExpenseTransaction(t)) {
       const amtCents = toCents(t.amount);
       acc[t.category] = (acc[t.category] || 0) + amtCents;
     }
@@ -276,7 +381,17 @@ export function getTopCat(): TopCategoryResult | null {
   }, {});
 
   const sorted = Object.entries(catsCents).sort((a, b) => b[1] - a[1]);
-  return sorted.length > 0 ? { ...getCatInfo('expense', sorted[0][0]), amount: toDollars(sorted[0][1]) } : null;
+  const result = sorted.length > 0 ? { ...getCatInfo('expense', sorted[0][0]), amount: toDollars(sorted[0][1]) } : null;
+
+  topCatCache = { month: currentMonth, result };
+  return result;
+}
+
+/**
+ * Invalidate the top category cache (call when transactions change)
+ */
+export function invalidateTopCatCache(): void {
+  topCatCache = null;
 }
 
 // ==========================================
@@ -284,67 +399,61 @@ export function getTopCat(): TopCategoryResult | null {
 // ==========================================
 
 /**
- * Get comprehensive year statistics (uses integer math)
- * Single-pass algorithm for optimal performance
+ * Get comprehensive year statistics
+ * FIXED: Now optimized with monthly totals cache
  */
 export function getYearStats(year: string): YearStats {
-  // Single pass: accumulate all stats at once
-  const result = signals.transactions.value.reduce((acc: YearStatsAccumulator, tx: Transaction) => {
-    // Skip transactions without dates or from different years
-    if (!tx.date || !tx.date.startsWith(year)) return acc;
+  const transactions = signals.transactions.value;
+  
+  // 1. Get all month keys for the year
+  const monthKeys: string[] = [];
+  for (let m = 1; m <= 12; m++) {
+    monthKeys.push(`${year}-${String(m).padStart(2, '0')}`);
+  }
 
-    acc.txCount++;
-    const amtCents = toCents(tx.amount);
-    const mk = getMonthKey(tx.date);
+  // 2. Aggregate data from cached monthly totals
+  const monthlyData: Record<string, { income: number; expenses: number }> = {};
+  const catTotalsCents: Record<string, number> = {};
+  let totalIncomeCents = 0;
+  let totalExpensesCents = 0;
+  let yearTxCount = 0;
 
-    // Initialize month data if needed
-    if (!acc.monthlyDataCents[mk]) {
-      acc.monthlyDataCents[mk] = { income: 0, expenses: 0 };
+  for (const mk of monthKeys) {
+    const totals = monthlyTotalsCache.calculateSync(mk);
+    
+    // Skip months with no data to keep stats clean
+    if (totals.income === 0 && totals.expenses === 0 && Object.keys(totals.categoryTotals || {}).length === 0) {
+      continue;
     }
 
-    if (tx.type === 'income') {
-      acc.incomeCents += amtCents;
-      acc.monthlyDataCents[mk].income += amtCents;
-    } else if (tx.type === 'expense') {
-      acc.expensesCents += amtCents;
-      acc.monthlyDataCents[mk].expenses += amtCents;
-      // Track category totals
-      acc.catTotalsCents[tx.category] = (acc.catTotalsCents[tx.category] || 0) + amtCents;
-    }
+    totalIncomeCents += toCents(totals.income);
+    totalExpensesCents += toCents(totals.expenses);
+    
+    monthlyData[mk] = {
+      income: totals.income,
+      expenses: totals.expenses
+    };
 
-    return acc;
-  }, {
-    incomeCents: 0,
-    expensesCents: 0,
-    catTotalsCents: {},
-    monthlyDataCents: {},
-    txCount: 0
-  });
+    // Accumulate category totals
+    Object.entries(totals.categoryTotals || {}).forEach(([catId, amount]) => {
+      catTotalsCents[catId] = (catTotalsCents[catId] || 0) + toCents(amount);
+    });
+  }
 
-  // Convert cents to dollars
-  const income = toDollars(result.incomeCents);
-  const expenses = toDollars(result.expensesCents);
-  const net = income - expenses;
-  const savingsRate = income > 0 ? ((income - expenses) / income * 100) : 0;
+  // Calculate txCount separately (not currently in basic monthly totals)
+  yearTxCount = transactions.filter(t => t.date?.startsWith(year)).length;
 
-  // Build top categories (convert cents to dollars)
-  const topCategories: TopCategoryResult[] = Object.entries(result.catTotalsCents)
+  const income = toDollars(totalIncomeCents);
+  const expenses = toDollars(totalExpensesCents);
+  const net = toDollars(totalIncomeCents - totalExpensesCents);
+  const savingsRate = income > 0 ? (net / income * 100) : 0;
+
+  const topCategories: TopCategoryResult[] = Object.entries(catTotalsCents)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5)
     .map(([catId, cents]) => ({ ...getCatInfo('expense', catId), amount: toDollars(cents) }));
 
-  // Convert monthly data cents to dollars
-  const monthlyData: Record<string, { income: number; expenses: number }> = {};
-  Object.entries(result.monthlyDataCents).forEach(([mk, data]) => {
-    monthlyData[mk] = {
-      income: toDollars(data.income),
-      expenses: toDollars(data.expenses)
-    };
-  });
-
   const monthCount = Object.keys(monthlyData).length || 1;
-  const avgMonthlyIncome = income / monthCount;
-  const avgMonthlyExpenses = expenses / monthCount;
 
   return {
     year,
@@ -354,9 +463,9 @@ export function getYearStats(year: string): YearStats {
     savingsRate,
     topCategories,
     monthlyData,
-    avgMonthlyIncome,
-    avgMonthlyExpenses,
-    txCount: result.txCount
+    avgMonthlyIncome: income / monthCount,
+    avgMonthlyExpenses: expenses / monthCount,
+    txCount: yearTxCount
   };
 }
 
@@ -365,98 +474,62 @@ export function getYearStats(year: string): YearStats {
 // ==========================================
 
 /**
- * Get lifetime statistics across all transactions (uses integer math)
- * Single-pass algorithm for optimal performance
+ * Get lifetime statistics across all transactions
+ * OPTIMIZED: Aggregates from monthly cache using Map-based index (O(M))
  */
 export function getAllTimeStats(): AllTimeStats | null {
-  // Single pass: accumulate all stats at once
-  const result = signals.transactions.value.reduce((acc: AllTimeStatsAccumulator, tx: Transaction) => {
-    // Skip transactions without dates
-    if (!tx.date) return acc;
+  const transactions = signals.transactions.value;
+  if (transactions.length === 0) return null;
 
-    acc.txCount++;
-    const amtCents = toCents(tx.amount);
-    const mk = getMonthKey(tx.date);
-    const year = tx.date.substring(0, 4);
+  // 1. Find all months with data using optimized Map keys
+  const sortedMonths = Array.from(signals.transactionsByMonth.value.keys()).sort();
+  if (sortedMonths.length === 0) return null;
 
-    // Track first and last dates
-    if (!acc.firstDate || tx.date < acc.firstDate) acc.firstDate = tx.date;
-    if (!acc.lastDate || tx.date > acc.lastDate) acc.lastDate = tx.date;
-
-    // Track years
-    acc.yearsSet.add(year);
-
-    // Initialize month data if needed
-    if (!acc.monthlyDataCents[mk]) {
-      acc.monthlyDataCents[mk] = { income: 0, expenses: 0 };
-    }
-
-    if (tx.type === 'income') {
-      acc.totalIncomeCents += amtCents;
-      acc.monthlyDataCents[mk].income += amtCents;
-    } else if (tx.type === 'expense') {
-      acc.totalExpensesCents += amtCents;
-      acc.monthlyDataCents[mk].expenses += amtCents;
-    }
-
-    return acc;
-  }, {
-    totalIncomeCents: 0,
-    totalExpensesCents: 0,
-    monthlyDataCents: {},
-    yearsSet: new Set<string>(),
-    firstDate: null,
-    lastDate: null,
-    txCount: 0
-  });
-
-  if (result.txCount === 0) return null;
-
-  // Convert cents to dollars
-  const totalIncome = toDollars(result.totalIncomeCents);
-  const totalExpenses = toDollars(result.totalExpensesCents);
-  const netSavings = totalIncome - totalExpenses;
-  const savingsRate = totalIncome > 0 ? ((totalIncome - totalExpenses) / totalIncome * 100) : 0;
-
-  // Convert monthly data and find best/worst months
+  const yearsSet = new Set<string>();
+  
+  let totalIncomeCents = 0;
+  let totalExpensesCents = 0;
   const monthlyData: Record<string, { income: number; expenses: number; net: number }> = {};
   let bestMonth: MonthBestWorst | null = null;
   let worstMonth: MonthBestWorst | null = null;
 
-  Object.entries(result.monthlyDataCents).forEach(([mk, d]) => {
-    const income = toDollars(d.income);
-    const expenses = toDollars(d.expenses);
+  // 2. Process each month from cache
+  for (const mk of sortedMonths) {
+    const totals = monthlyTotalsCache.calculateSync(mk);
+    const income = totals.income;
+    const expenses = totals.expenses;
     const net = income - expenses;
+    
+    totalIncomeCents += toCents(income);
+    totalExpensesCents += toCents(expenses);
+    yearsSet.add(mk.substring(0, 4));
+    
     monthlyData[mk] = { income, expenses, net };
 
-    // Track best month (highest net)
     if (!bestMonth || net > bestMonth.net) {
       bestMonth = { month: mk, income, expenses, net };
     }
-    // Track worst month (highest expenses)
     if (!worstMonth || expenses > worstMonth.expenses) {
       worstMonth = { month: mk, income, expenses, net };
     }
-  });
+  }
 
-  const monthCount = Object.keys(monthlyData).length || 1;
-  const avgMonthlySpend = totalExpenses / monthCount;
-
-  // Convert years set to sorted array
-  const years = [...result.yearsSet].sort().reverse();
+  const totalIncome = toDollars(totalIncomeCents);
+  const totalExpenses = toDollars(totalExpensesCents);
+  const monthCount = sortedMonths.length || 1;
 
   return {
-    firstDate: result.firstDate!,
-    lastDate: result.lastDate!,
+    firstDate: sortedMonths[0] + '-01',
+    lastDate: sortedMonths[sortedMonths.length - 1] + '-28', // Approximation
     totalIncome,
     totalExpenses,
-    netSavings,
-    savingsRate,
-    txCount: result.txCount,
-    avgMonthlySpend,
+    netSavings: toDollars(totalIncomeCents - totalExpensesCents),
+    savingsRate: totalIncome > 0 ? (toDollars(totalIncomeCents - totalExpensesCents) / totalIncome * 100) : 0,
+    txCount: transactions.length,
+    avgMonthlySpend: totalExpenses / monthCount,
     bestMonth,
     worstMonth,
-    years
+    years: Array.from(yearsSet).sort().reverse()
   };
 }
 
@@ -487,49 +560,23 @@ export function calcPercentChange(current: number, previous: number): number {
 
 /**
  * Get detailed monthly breakdown for a year
- * Single-pass algorithm for optimal performance
+ * FIXED: Aggregates from monthly cache for O(M) performance
  */
 export function getDetailedYearStats(year: string): Record<string, DetailedMonthData> {
-  // Initialize all 12 months upfront (in cents for precision)
-  const monthlyDataCents: Record<string, MonthlyDataCentsEntry> = {};
+  const monthlyData: Record<string, DetailedMonthData> = {};
+  
   for (let m = 1; m <= 12; m++) {
     const mk = `${year}-${String(m).padStart(2, '0')}`;
-    monthlyDataCents[mk] = { income: 0, expenses: 0, categories: {} };
-  }
-
-  // Single pass: filter and accumulate in one operation
-  signals.transactions.value.forEach((tx: Transaction) => {
-    // Skip transactions without dates or from different years
-    if (!tx.date || !tx.date.startsWith(year)) return;
-
-    const mk = getMonthKey(tx.date);
-    if (!monthlyDataCents[mk]) return;
-
-    const amountCents = toCents(tx.amount);
-    if (tx.type === 'income') {
-      monthlyDataCents[mk].income += amountCents;
-    } else if (tx.type === 'expense') {
-      monthlyDataCents[mk].expenses += amountCents;
-      monthlyDataCents[mk].categories[tx.category] = (monthlyDataCents[mk].categories[tx.category] || 0) + amountCents;
-    }
-  });
-
-  // Convert cents to dollars for return
-  const monthlyData: Record<string, DetailedMonthData> = {};
-  Object.entries(monthlyDataCents).forEach(([mk, data]) => {
-    const income = toDollars(data.income);
-    const expenses = toDollars(data.expenses);
-    const categories: Record<string, number> = {};
-    Object.entries(data.categories).forEach(([cat, cents]) => {
-      categories[cat] = toDollars(cents);
-    });
+    const totals = monthlyTotalsCache.calculateSync(mk);
+    
     monthlyData[mk] = {
-      income,
-      expenses,
-      net: income - expenses,
-      categories
+      income: totals.income,
+      expenses: totals.expenses,
+      net: totals.income - totals.expenses,
+      categories: { ...(totals.categoryTotals || {}) }
     };
-  });
+  }
+  
   return monthlyData;
 }
 
@@ -554,6 +601,58 @@ export function compareYearsMonthly(year1: string, year2: string): MonthlyCompar
     });
   }
   return comparison;
+}
+
+// ==========================================
+// INITIALIZATION
+// ==========================================
+
+import { on, emit } from '../../core/event-bus.js';
+import { FeatureEvents, type FeatureResponse } from '../../core/feature-event-interface.js';
+
+/**
+ * Initialize calculations module and register feature event listeners
+ */
+export function initCalculations(): void {
+  // Request: Month Transactions
+  on(FeatureEvents.REQUEST_MONTH_TX, (data: any) => {
+    const { month } = data.payload || {};
+    const responseEvent = data.responseEvent;
+    if (responseEvent) {
+      const result = getMonthTx(month);
+      emit(responseEvent, { type: FeatureEvents.REQUEST_MONTH_TX, result });
+    }
+  });
+
+  // Request: Month Expenses
+  on(FeatureEvents.REQUEST_MONTH_EXPENSES, (data: any) => {
+    const { month } = data.payload || {};
+    const responseEvent = data.responseEvent;
+    if (responseEvent) {
+      const result = getMonthExpenses(month);
+      emit(responseEvent, { type: FeatureEvents.REQUEST_MONTH_EXPENSES, result });
+    }
+  });
+
+  // Request: Effective Income
+  on(FeatureEvents.REQUEST_EFFECTIVE_INCOME, (data: any) => {
+    const { month } = data.payload || {};
+    const responseEvent = data.responseEvent;
+    if (responseEvent) {
+      const result = getEffectiveIncome(month);
+      emit(responseEvent, { type: FeatureEvents.REQUEST_EFFECTIVE_INCOME, result });
+    }
+  });
+
+  // Request: Totals
+  on(FeatureEvents.REQUEST_TOTALS, (data: any) => {
+    const { transactions } = data.payload || {};
+    const responseEvent = data.responseEvent;
+    if (responseEvent) {
+      const result = calcTotals(transactions);
+      emit(responseEvent, { type: FeatureEvents.REQUEST_TOTALS, result });
+    }
+  });
 }
 
 // ==========================================
@@ -611,7 +710,11 @@ export function calcVelocityPure(
   const daysInMonth = new Date(viewDate.getFullYear(), viewDate.getMonth() + 1, 0).getDate();
   const daysElapsed = isCurrentMonth ? Math.max(1, referenceDate.getDate()) : daysInMonth;
   const monthTx = transactions.filter(tx => tx.date && getMonthKey(tx.date) === currentMonth);
-  const monthExp = sumByType(monthTx, 'expense');
+  const monthExp = toDollars(
+    monthTx.reduce((sum: number, tx: Transaction) => (
+      isTrackedExpenseTransaction(tx) ? sum + toCents(tx.amount) : sum
+    ), 0)
+  );
   const dailyRate = daysElapsed > 0 ? monthExp / daysElapsed : 0;
   return { dailyRate, projected: dailyRate * daysInMonth, actual: monthExp };
 }
@@ -629,7 +732,7 @@ export function getYearStatsPure(transactions: Transaction[], year: string): Yea
     .filter(t => t.type === 'income')
     .reduce((s, t) => s + toCents(t.amount), 0);
   const expensesCents = yearTx
-    .filter(t => t.type === 'expense')
+    .filter((t: Transaction) => isTrackedExpenseTransaction(t))
     .reduce((s, t) => s + toCents(t.amount), 0);
 
   const income = toDollars(incomeCents);
@@ -639,7 +742,7 @@ export function getYearStatsPure(transactions: Transaction[], year: string): Yea
 
   // Category breakdown for expenses (also using cents)
   const catTotalsCents: Record<string, number> = {};
-  yearTx.filter(t => t.type === 'expense').forEach(t => {
+  yearTx.filter((t: Transaction) => isTrackedExpenseTransaction(t)).forEach((t: Transaction) => {
     catTotalsCents[t.category] = (catTotalsCents[t.category] || 0) + toCents(t.amount);
   });
   const topCategories = Object.entries(catTotalsCents)
@@ -674,13 +777,13 @@ export function getAllTimeStatsPure(transactions: Transaction[]): AllTimeStatsPu
     .filter(t => t.type === 'income')
     .reduce((s, t) => s + toCents(t.amount), 0);
   const totalExpensesCents = allTx
-    .filter(t => t.type === 'expense')
+    .filter((t: Transaction) => isTrackedExpenseTransaction(t))
     .reduce((s, t) => s + toCents(t.amount), 0);
 
   const totalIncome = toDollars(totalIncomeCents);
   const totalExpenses = toDollars(totalExpensesCents);
   const netSavings = toDollars(totalIncomeCents - totalExpensesCents);
-  const savingsRate = totalIncome > 0 ? ((totalIncome - totalExpenses) / totalIncome * 100) : 0;
+  const savingsRate = totalIncome > 0 ? (netSavings / totalIncome * 100) : 0;
 
   return {
     firstDate,

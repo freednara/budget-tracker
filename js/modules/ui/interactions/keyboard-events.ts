@@ -10,10 +10,11 @@
 import * as signals from '../../core/signals.js';
 import { modal, form } from '../../core/state-actions.js';
 import { closeModal } from '../core/ui.js';
-import { clearImportData } from '../../features/import-export/import-export-events.js';
+import { clearImportData } from '../../core/feature-event-interface.js';
 import { getAllCats } from '../../core/categories.js';
 import { CONFIG } from '../../core/config.js';
 import DOM from '../../core/dom-cache.js';
+import { clearFieldError } from '../../core/validator.js';
 import type { FlattenedCategory } from '../../../types/index.js';
 
 // ==========================================
@@ -39,14 +40,33 @@ let cancelEditingFn: (() => void) | null = null;
 let openSettingsModalFn: (() => void) | null = null;
 let renderCategoriesFn: (() => void) | null = null;
 
+// Store previous keyboard handler for cleanup
+let _keydownHandler: ((e: KeyboardEvent) => void) | null = null;
+
 // ==========================================
 // INITIALIZATION
 // ==========================================
 
 /**
- * Initialize keyboard event handlers
+ * Initialize keyboard event handlers.
+ * Returns a cleanup function that removes the global keydown listener.
  */
-export function initKeyboardEvents(callbacks: KeyboardCallbacks): void {
+export function initKeyboardEvents(callbacks: KeyboardCallbacks): () => void {
+  // Guard: if handler is already attached, just update callbacks and return existing cleanup
+  if (_keydownHandler) {
+    if (callbacks.switchMainTab) switchMainTabFn = callbacks.switchMainTab;
+    if (callbacks.switchTab) switchTabFn = callbacks.switchTab;
+    if (callbacks.cancelEditing) cancelEditingFn = callbacks.cancelEditing;
+    if (callbacks.openSettingsModal) openSettingsModalFn = callbacks.openSettingsModal;
+    if (callbacks.renderCategories) renderCategoriesFn = callbacks.renderCategories;
+    return () => {
+      if (_keydownHandler) {
+        document.removeEventListener('keydown', _keydownHandler);
+        _keydownHandler = null;
+      }
+    };
+  }
+
   if (callbacks.switchMainTab) switchMainTabFn = callbacks.switchMainTab;
   if (callbacks.switchTab) switchTabFn = callbacks.switchTab;
   if (callbacks.cancelEditing) cancelEditingFn = callbacks.cancelEditing;
@@ -55,6 +75,13 @@ export function initKeyboardEvents(callbacks: KeyboardCallbacks): void {
 
   setupKeyboardShortcuts();
   setupClearValidationOnInput();
+
+  return () => {
+    if (_keydownHandler) {
+      document.removeEventListener('keydown', _keydownHandler);
+      _keydownHandler = null;
+    }
+  };
 }
 
 // ==========================================
@@ -65,13 +92,19 @@ export function initKeyboardEvents(callbacks: KeyboardCallbacks): void {
  * Set up global keyboard shortcuts
  */
 function setupKeyboardShortcuts(): void {
-  document.addEventListener('keydown', (e: KeyboardEvent) => {
+  // Remove previous handler to prevent accumulation on re-init
+  if (_keydownHandler) {
+    document.removeEventListener('keydown', _keydownHandler);
+  }
+
+  _keydownHandler = (e: KeyboardEvent) => {
     const target = e.target as HTMLElement;
     if (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA') return;
 
     // Block all shortcuts when PIN overlay is active
     if (document.querySelector('.pin-overlay.active')) {
-      if (e.key === 'Escape') e.preventDefault();
+      e.preventDefault();
+      e.stopPropagation();
       return;
     }
 
@@ -138,7 +171,9 @@ function setupKeyboardShortcuts(): void {
         }, CONFIG.TIMING.FOCUS_DELAY);
       }
     }
-  });
+  };
+
+  document.addEventListener('keydown', _keydownHandler);
 }
 
 // ==========================================
@@ -146,26 +181,10 @@ function setupKeyboardShortcuts(): void {
 // ==========================================
 
 /**
- * Set up validation error clearing on input
+ * Set up validation error clearing on input.
+ * Delegates to the shared clearFieldError utility from validator.ts.
  */
 function setupClearValidationOnInput(): void {
-  DOM.get('amount')?.addEventListener('input', () => {
-    const amtEl = DOM.get('amount') as HTMLInputElement | null;
-    const amtErr = DOM.get('amount-error');
-    if (amtEl) {
-      amtEl.style.borderColor = '';
-      amtEl.removeAttribute('aria-invalid');
-    }
-    if (amtErr) amtErr.classList.add('hidden');
-  });
-
-  DOM.get('date')?.addEventListener('change', () => {
-    const dateEl = DOM.get('date') as HTMLInputElement | null;
-    const dateErr = DOM.get('date-error');
-    if (dateEl) {
-      dateEl.style.borderColor = '';
-      dateEl.removeAttribute('aria-invalid');
-    }
-    if (dateErr) dateErr.classList.add('hidden');
-  });
+  DOM.get('amount')?.addEventListener('input', () => clearFieldError('amount'));
+  DOM.get('date')?.addEventListener('change', () => clearFieldError('date'));
 }

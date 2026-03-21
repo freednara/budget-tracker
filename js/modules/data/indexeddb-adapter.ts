@@ -97,7 +97,7 @@ export class IndexedDBAdapter extends StorageAdapter {
 
         // Handle connection closing
         this.db.onclose = () => {
-          console.warn('IndexedDB connection closed unexpectedly');
+          if (import.meta.env.DEV) console.warn('IndexedDB connection closed unexpectedly');
           this.db = null;
           this._initPromise = null;
         };
@@ -114,7 +114,7 @@ export class IndexedDBAdapter extends StorageAdapter {
 
       request.onerror = (event: Event) => {
         const target = event.target as IDBOpenDBRequest;
-        console.error('IndexedDB open error:', target.error);
+        if (import.meta.env.DEV) console.error('IndexedDB open error:', target.error);
         resolve({ isOk: false, error: target.error?.message || 'Failed to open database' });
       };
 
@@ -137,6 +137,7 @@ export class IndexedDBAdapter extends StorageAdapter {
       txStore.createIndex('by_type', 'type', { unique: false });
       txStore.createIndex('by_category', 'category', { unique: false });
       txStore.createIndex('by_reconciled', 'reconciled', { unique: false });
+      txStore.createIndex('by_date_type', ['date', 'type'], { unique: false });
     }
 
     // Settings store (key-value)
@@ -226,7 +227,7 @@ export class IndexedDBAdapter extends StorageAdapter {
         const request = objectStore.get(key);
 
         request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
+        request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
       } catch (err) {
         reject(err);
       }
@@ -258,7 +259,7 @@ export class IndexedDBAdapter extends StorageAdapter {
         const request = objectStore.put(data);
 
         request.onsuccess = () => resolve(true);
-        request.onerror = () => reject(request.error);
+        request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
       } catch (err) {
         reject(err);
       }
@@ -272,7 +273,7 @@ export class IndexedDBAdapter extends StorageAdapter {
         const request = objectStore.delete(key);
 
         request.onsuccess = () => resolve(true);
-        request.onerror = () => reject(request.error);
+        request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
       } catch (err) {
         reject(err);
       }
@@ -286,7 +287,7 @@ export class IndexedDBAdapter extends StorageAdapter {
         const request = objectStore.getAll();
 
         request.onsuccess = () => resolve(request.result || []);
-        request.onerror = () => reject(request.error);
+        request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
       } catch (err) {
         reject(err);
       }
@@ -300,7 +301,7 @@ export class IndexedDBAdapter extends StorageAdapter {
         const request = objectStore.clear();
 
         request.onsuccess = () => resolve(true);
-        request.onerror = () => reject(request.error);
+        request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
       } catch (err) {
         reject(err);
       }
@@ -317,15 +318,17 @@ export class IndexedDBAdapter extends StorageAdapter {
         const objectStore = this._getStore(STORES.TRANSACTIONS, 'readonly');
         const index = objectStore.index('by_date');
 
-        // Create range for the month (YYYY-MM-01 to YYYY-MM-31)
+        // Create range for the month using first-day-of-next-month as exclusive upper bound
         const startDate = `${monthKey}-01`;
-        const endDate = `${monthKey}-31`;
-        const range = IDBKeyRange.bound(startDate, endDate);
+        const [y, m] = monthKey.split('-').map(Number);
+        const nextMonth = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+        const endDate = `${nextMonth}-01`;
+        const range = IDBKeyRange.bound(startDate, endDate, false, true);
 
         const request = index.getAll(range);
 
         request.onsuccess = () => resolve((request.result || []) as Transaction[]);
-        request.onerror = () => reject(request.error);
+        request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
       } catch (err) {
         reject(err);
       }
@@ -342,7 +345,7 @@ export class IndexedDBAdapter extends StorageAdapter {
         const request = index.getAll(range);
 
         request.onsuccess = () => resolve((request.result || []) as Transaction[]);
-        request.onerror = () => reject(request.error);
+        request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
       } catch (err) {
         reject(err);
       }
@@ -354,15 +357,37 @@ export class IndexedDBAdapter extends StorageAdapter {
       try {
         const objectStore = this._getStore(STORES.TRANSACTIONS, 'readonly');
 
-        // If no filters, just count all
-        if (Object.keys(filters).length === 0) {
-          const request = objectStore.count();
+        // Optimization: If only filtering by month, use the date index
+        if (Object.keys(filters).length === 1 && filters.monthKey) {
+          const index = objectStore.index('by_date');
+          // Use same boundary strategy as getTransactionsByMonth (exclusive upper bound on next month's first day)
+          const [y, m] = filters.monthKey.split('-').map(Number);
+          const nextMonth = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+          const range = IDBKeyRange.bound(`${filters.monthKey}-01`, `${nextMonth}-01`, false, true);
+          const request = index.count(range);
           request.onsuccess = () => resolve(request.result);
-          request.onerror = () => reject(request.error);
+          request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
           return;
         }
 
-        // For filtered counts, we need to iterate
+        // Optimization: If only filtering by type, use the type index
+        if (Object.keys(filters).length === 1 && filters.type && filters.type !== 'all') {
+          const index = objectStore.index('by_type');
+          const request = index.count(IDBKeyRange.only(filters.type));
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
+          return;
+        }
+
+        // Default: Full count or cursor-based filtered count
+        if (Object.keys(filters).length === 0) {
+          const request = objectStore.count();
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
+          return;
+        }
+
+        // For complex filtered counts, we still need to iterate
         let count = 0;
         const request = objectStore.openCursor();
 
@@ -372,12 +397,10 @@ export class IndexedDBAdapter extends StorageAdapter {
             const tx = cursor.value as Transaction;
             let matches = true;
 
-            if (filters.type && tx.type !== filters.type) matches = false;
-            if (filters.category && tx.category !== filters.category) matches = false;
+            if (filters.type && filters.type !== 'all' && tx.type !== filters.type) matches = false;
+            if (filters.category && filters.category !== 'all' && tx.category !== filters.category) matches = false;
             if (filters.reconciled !== undefined && tx.reconciled !== filters.reconciled) matches = false;
-            // Handle monthKey filter (from the interface pattern)
-            const monthKeyFilter = (filters as CountFilters).monthKey;
-            if (monthKeyFilter && !tx.date?.startsWith(monthKeyFilter)) matches = false;
+            if (filters.monthKey && !tx.date?.startsWith(filters.monthKey)) matches = false;
 
             if (matches) count++;
             cursor.continue();
@@ -386,7 +409,7 @@ export class IndexedDBAdapter extends StorageAdapter {
           }
         };
 
-        request.onerror = () => reject(request.error);
+        request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
       } catch (err) {
         reject(err);
       }
@@ -408,8 +431,8 @@ export class IndexedDBAdapter extends StorageAdapter {
         });
 
         transaction.oncomplete = () => resolve(true);
-        transaction.onerror = () => reject(transaction.error);
-        transaction.onabort = () => reject(new Error('Transaction aborted'));
+        transaction.onerror = () => reject(transaction.error ?? new Error(`IndexedDB createBatch failed for ${store}`));
+        transaction.onabort = () => reject(transaction.error ?? new Error(`IndexedDB createBatch aborted for ${store}`));
       } catch (err) {
         reject(err);
       }
@@ -427,8 +450,8 @@ export class IndexedDBAdapter extends StorageAdapter {
         });
 
         transaction.oncomplete = () => resolve(true);
-        transaction.onerror = () => reject(transaction.error);
-        transaction.onabort = () => reject(new Error('Transaction aborted'));
+        transaction.onerror = () => reject(transaction.error ?? new Error(`IndexedDB updateBatch failed for ${store}`));
+        transaction.onabort = () => reject(transaction.error ?? new Error(`IndexedDB updateBatch aborted for ${store}`));
       } catch (err) {
         reject(err);
       }
@@ -446,8 +469,8 @@ export class IndexedDBAdapter extends StorageAdapter {
         });
 
         transaction.oncomplete = () => resolve(true);
-        transaction.onerror = () => reject(transaction.error);
-        transaction.onabort = () => reject(new Error('Transaction aborted'));
+        transaction.onerror = () => reject(transaction.error ?? new Error(`IndexedDB deleteBatch failed for ${store}`));
+        transaction.onabort = () => reject(transaction.error ?? new Error(`IndexedDB deleteBatch aborted for ${store}`));
       } catch (err) {
         reject(err);
       }
@@ -466,7 +489,7 @@ export class IndexedDBAdapter extends StorageAdapter {
       try {
         data[storeName] = await this.getAll(storeName as StoreName);
       } catch (err) {
-        console.warn(`Failed to export ${storeName}:`, err);
+        if (import.meta.env.DEV) console.warn(`Failed to export ${storeName}:`, err);
         data[storeName] = [];
       }
     }
@@ -480,29 +503,62 @@ export class IndexedDBAdapter extends StorageAdapter {
         return false;
       }
 
-      // Get all store names
+      // Get all store names that exist in the database
       const storeNames = Object.values(STORES).filter(name =>
         this.db!.objectStoreNames.contains(name)
       ) as StoreName[];
 
-      // Clear if overwrite mode
       if (overwrite) {
-        for (const storeName of storeNames) {
-          await this.clear(storeName);
-        }
-      }
+        // Use a single transaction for clear + import to make it atomic
+        // If the tab closes mid-operation, the transaction is rolled back
+        const tx = this.db.transaction(storeNames, 'readwrite');
 
-      // Import each store
-      for (const storeName of storeNames) {
-        const items = data[storeName];
-        if (Array.isArray(items) && items.length > 0) {
-          await this.updateBatch(storeName, items);
+        // Only clear stores that have data in the import payload —
+        // do NOT clear unrelated stores (e.g. don't wipe savings when only updating transactions)
+        for (const storeName of storeNames) {
+          if (data[storeName] !== undefined) {
+            tx.objectStore(storeName).clear();
+          }
+        }
+
+        for (const storeName of storeNames) {
+          const items = data[storeName];
+          if (Array.isArray(items) && items.length > 0) {
+            const store = tx.objectStore(storeName);
+            for (const item of items) {
+              // Use the store's keyPath to determine if item has a valid key
+              const keyPath = store.keyPath as string | null;
+              if (keyPath) {
+                const key = (item as any)[keyPath];
+                if (key != null) {
+                  store.put(item);
+                }
+              } else {
+                // Store uses out-of-line keys or auto-increment — just put directly
+                store.put(item);
+              }
+            }
+          }
+        }
+
+        await new Promise<void>((resolve, reject) => {
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('Transaction aborted'));
+        });
+      } else {
+        // Non-overwrite: add items to existing stores
+        for (const storeName of storeNames) {
+          const items = data[storeName];
+          if (Array.isArray(items) && items.length > 0) {
+            await this.updateBatch(storeName, items);
+          }
         }
       }
 
       return true;
     } catch (err) {
-      console.error('Import failed:', err);
+      if (import.meta.env.DEV) console.error('Import failed:', err);
       return false;
     }
   }
@@ -513,14 +569,25 @@ export class IndexedDBAdapter extends StorageAdapter {
         return false;
       }
 
-      for (const storeName of Object.values(STORES)) {
-        if (this.db.objectStoreNames.contains(storeName)) {
-          await this.clear(storeName as StoreName);
-        }
+      // Use a single transaction for atomicity — all stores cleared or none
+      const storeNames = Object.values(STORES).filter(name =>
+        this.db!.objectStoreNames.contains(name)
+      ) as StoreName[];
+
+      const tx = this.db.transaction(storeNames, 'readwrite');
+      for (const name of storeNames) {
+        tx.objectStore(name).clear();
       }
+
+      await new Promise<void>((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error('Clear all transaction aborted'));
+      });
+
       return true;
     } catch (err) {
-      console.error('Clear all failed:', err);
+      if (import.meta.env.DEV) console.error('Clear all failed:', err);
       return false;
     }
   }
@@ -553,7 +620,7 @@ export class IndexedDBAdapter extends StorageAdapter {
             const store = this._getStore(storeName as StoreName, 'readonly');
             const request = store.count();
             request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
+            request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
           });
           stats.stores[storeName] = count;
         } catch {

@@ -8,7 +8,7 @@
 'use strict';
 
 import DOM from '../../core/dom-cache.js';
-import { openModal, closeModal } from '../../ui/core/ui.js';
+import { closeModal } from '../../ui/core/ui.js';
 import type { AchievementDefinition, CelebrationConfig } from '../../../types/index.js';
 
 // ==========================================
@@ -46,6 +46,7 @@ const DEFAULTS: CelebrationConfig = {
 
 // Configurable settings
 let config: CelebrationConfig = { ...DEFAULTS };
+let celebrationTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * Configure celebration settings
@@ -102,17 +103,25 @@ export function showCelebration(achieveId: string): void {
   const a = getAchievement(achieveId);
   if (!a) return;
 
+  const overlay = DOM.get('celebration-overlay');
   const emojiEl = DOM.get('celebration-emoji');
   const titleEl = DOM.get('celebration-title');
   const descEl = DOM.get('celebration-desc');
 
-  if (!emojiEl || !titleEl || !descEl) return;
+  if (!overlay || !emojiEl || !titleEl || !descEl) return;
 
   emojiEl.textContent = a.emoji;
   titleEl.textContent = 'Achievement Unlocked!';
   descEl.textContent = a.desc;
 
-  openModal('celebration-overlay');
+  if (celebrationTimeoutId) {
+    clearTimeout(celebrationTimeoutId);
+  }
+
+  overlay.classList.add('active');
   spawnConfetti();
-  setTimeout(() => closeModal('celebration-overlay'), config.celebrationDuration);
+  celebrationTimeoutId = setTimeout(() => {
+    closeModal('celebration-overlay');
+    celebrationTimeoutId = null;
+  }, config.celebrationDuration);
 }

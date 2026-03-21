@@ -10,14 +10,17 @@ import {
   getDebt,
   addDebt,
   updateDebt,
+  deleteDebt,
   recordPayment,
   compareStrategies
 } from '../../features/financial/debt-planner.js';
 import { showToast, openModal, closeModal } from '../core/ui.js';
-import { parseAmount, getTodayStr } from '../../core/utils.js';
+import { asyncConfirm } from '../components/async-modal.js';
+import { parseAmount, getTodayStr, fmtCur as fmtCurUtil } from '../../core/utils.js';
 // Note: Event bus handlers removed - debt list/summary now reactive via signals
 import DOM from '../../core/dom-cache.js';
 import { html, render, nothing, styleMap } from '../../core/lit-helpers.js';
+import type { DebtType } from '../../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
@@ -31,7 +34,7 @@ type RefreshAllCallback = () => void;
 // ==========================================
 
 // Configurable callbacks (set by app.js)
-let fmtCur: CurrencyFormatter = (v: number): string => '$' + v.toFixed(2);
+let fmtCur: CurrencyFormatter = fmtCurUtil;
 let refreshAllFn: RefreshAllCallback | null = null;
 
 /**
@@ -82,7 +85,32 @@ export function initDebtHandlers(): void {
     if (interestEl) interestEl.value = '';
     if (minimumEl) minimumEl.value = '';
     if (dueDayEl) dueDayEl.value = '1';
+    
+    // Hide delete button for new debts
+    const delBtn = DOM.get('delete-debt');
+    if (delBtn) delBtn.classList.add('hidden');
+    
     openModal('debt-modal');
+  });
+
+  DOM.get('delete-debt')?.addEventListener('click', async () => {
+    const editIdEl = DOM.get('edit-debt-id') as HTMLInputElement | null;
+    const debtId = editIdEl?.value || '';
+    if (!debtId) return;
+
+    const confirmed = await asyncConfirm({
+      title: 'Delete Debt',
+      message: 'Remove this debt from your tracking?',
+      details: 'This removes the debt entry and its progress from the planner. Existing transactions are not deleted.',
+      type: 'danger',
+      confirmText: 'Delete Debt',
+      cancelText: 'Keep Debt'
+    });
+    if (confirmed) {
+      deleteDebt(debtId);
+      showToast('Debt deleted');
+      closeModal('debt-modal');
+    }
   });
 
   DOM.get('cancel-debt')?.addEventListener('click', () => closeModal('debt-modal'));
@@ -156,6 +184,11 @@ export function initDebtHandlers(): void {
       if (interestEl) interestEl.value = (debt.interestRate * 100).toFixed(2);
       if (minimumEl) minimumEl.value = String(debt.minimumPayment);
       if (dueDayEl) dueDayEl.value = String(debt.dueDay);
+
+      // Show delete button when editing
+      const delBtn = DOM.get('delete-debt');
+      if (delBtn) delBtn.classList.remove('hidden');
+
       openModal('debt-modal');
     } else if (target.closest('.debt-payment-btn')) {
       const paymentIdEl = DOM.get('debt-payment-id') as HTMLInputElement | null;
@@ -167,6 +200,8 @@ export function initDebtHandlers(): void {
       if (paymentIdEl) paymentIdEl.value = debt.id;
       if (paymentNameEl) paymentNameEl.textContent = debt.name;
       if (paymentBalanceEl) paymentBalanceEl.textContent = fmtCur(debt.balance);
+      const paymentMinEl = DOM.get('debt-payment-minimum');
+      if (paymentMinEl) paymentMinEl.textContent = fmtCur(debt.minimumPayment);
       if (paymentAmountEl) paymentAmountEl.value = String(debt.minimumPayment);
       if (paymentDateEl) paymentDateEl.value = getTodayStr();
       openModal('debt-payment-modal');
@@ -177,26 +212,33 @@ export function initDebtHandlers(): void {
   DOM.get('cancel-debt-payment')?.addEventListener('click', () => closeModal('debt-payment-modal'));
 
   DOM.get('confirm-debt-payment')?.addEventListener('click', async () => {
-    const paymentIdEl = DOM.get('debt-payment-id') as HTMLInputElement | null;
-    const paymentAmountEl = DOM.get('debt-payment-amount') as HTMLInputElement | null;
-    const paymentDateEl = DOM.get('debt-payment-date') as HTMLInputElement | null;
+    const btn = DOM.get('confirm-debt-payment') as HTMLButtonElement | null;
+    if (btn?.disabled) return;
+    if (btn) btn.disabled = true;
 
-    const debtId = paymentIdEl?.value || '';
-    const amount = parseAmount(paymentAmountEl?.value || 0);
-    const date = paymentDateEl?.value || getTodayStr();
-    if (amount <= 0) {
-      showToast('Please enter a valid payment amount', 'error');
-      return;
+    try {
+      const paymentIdEl = DOM.get('debt-payment-id') as HTMLInputElement | null;
+      const paymentAmountEl = DOM.get('debt-payment-amount') as HTMLInputElement | null;
+      const paymentDateEl = DOM.get('debt-payment-date') as HTMLInputElement | null;
+
+      const debtId = paymentIdEl?.value || '';
+      const amount = parseAmount(paymentAmountEl?.value || 0);
+      const date = paymentDateEl?.value || getTodayStr();
+      if (amount <= 0) {
+        showToast('Please enter a valid payment amount', 'error');
+        return;
+      }
+      const result = await recordPayment(debtId, amount, date);
+      if (!result.isOk) {
+        showToast(result.error || 'Payment failed', 'error');
+        return;
+      }
+      closeModal('debt-payment-modal');
+      showToast('Payment recorded');
+      if (refreshAllFn) refreshAllFn();
+    } finally {
+      if (btn) btn.disabled = false;
     }
-    const result = await recordPayment(debtId, amount, date);
-    if (!result.isOk) {
-      showToast(result.error || 'Payment failed', 'error');
-      return;
-    }
-    closeModal('debt-payment-modal');
-    showToast('Payment recorded');
-    // renderDebtList and updateDebtSummary now reactive via mountDebtList/mountDebtSummary
-    if (refreshAllFn) refreshAllFn();
   });
 
   // Strategy Comparison Modal
@@ -206,9 +248,21 @@ export function initDebtHandlers(): void {
     const debts = getDebts().filter(d => d.isActive);
     const comparison = compareStrategies(debts, extraMonthly);
     const strategyResults = DOM.get('strategy-results');
+    const snowballMonthsEl = DOM.get('snowball-months');
+    const snowballInterestEl = DOM.get('snowball-interest');
+    const avalancheMonthsEl = DOM.get('avalanche-months');
+    const avalancheInterestEl = DOM.get('avalanche-interest');
+    const recommendationEl = DOM.get('strategy-rec-text');
+    const payoffOrderList = DOM.get('payoff-order-list');
     if (!strategyResults) return;
 
     if (!comparison || debts.length === 0) {
+      if (snowballMonthsEl) snowballMonthsEl.textContent = '-- months';
+      if (snowballInterestEl) snowballInterestEl.textContent = '$-- interest';
+      if (avalancheMonthsEl) avalancheMonthsEl.textContent = '-- months';
+      if (avalancheInterestEl) avalancheInterestEl.textContent = '$-- interest';
+      if (recommendationEl) recommendationEl.textContent = '--';
+      if (payoffOrderList) render(html``, payoffOrderList);
       render(html`<p style="text-align: center; color: var(--text-secondary);">Add debts to compare payoff strategies.</p>`, strategyResults);
       openModal('debt-strategy-modal');
       return;
@@ -217,6 +271,29 @@ export function initDebtHandlers(): void {
     const snowball = comparison.snowball;
     const avalanche = comparison.avalanche;
     const savings = avalanche.totalInterest - snowball.totalInterest;
+    const recommendedText = comparison.recommended === 'avalanche'
+      ? `Avalanche is the better money-saving plan here, reducing interest by ${fmtCur(Math.max(0, comparison.interestSaved))}.`
+      : comparison.interestSaved > 0
+        ? `Snowball gives quicker momentum while Avalanche only saves ${fmtCur(comparison.interestSaved)} more in interest.`
+        : 'Snowball is the better motivational fit here, with a similar payoff outcome.';
+
+    if (snowballMonthsEl) snowballMonthsEl.textContent = `${snowball.months} months`;
+    if (snowballInterestEl) snowballInterestEl.textContent = `${fmtCur(snowball.totalInterest)} interest`;
+    if (avalancheMonthsEl) avalancheMonthsEl.textContent = `${avalanche.months} months`;
+    if (avalancheInterestEl) avalancheInterestEl.textContent = `${fmtCur(avalanche.totalInterest)} interest`;
+    if (recommendationEl) recommendationEl.textContent = recommendedText;
+    if (payoffOrderList) {
+      render(html`
+        ${avalanche.order.length > 0 ? avalanche.order.map((item, index) => html`
+          <div style="display: flex; justify-content: space-between; gap: 1rem; padding: 0.5rem 0;">
+            <span>${index + 1}. ${item.name}</span>
+            <span style="color: var(--text-secondary);">Month ${item.month}</span>
+          </div>
+        `) : html`
+          <p style="color: var(--text-secondary);">No payoff order available yet.</p>
+        `}
+      `, payoffOrderList);
+    }
 
     render(html`
       <div style="display: grid; gap: 1rem;">

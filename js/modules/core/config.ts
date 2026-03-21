@@ -35,6 +35,24 @@ interface SecurityConfig {
 }
 
 // ==========================================
+// AUTO-LOCK CONFIGURATION
+// ==========================================
+
+interface AutoLockConfig {
+  readonly TIMEOUT_MS: number;
+  readonly ENABLED: boolean;
+}
+
+// ==========================================
+// RATE LIMIT CONFIGURATION
+// ==========================================
+
+interface RateLimitConfig {
+  readonly MAX_ATTEMPTS: number;
+  readonly BASE_LOCKOUT_MS: number;
+}
+
+// ==========================================
 // GESTURES CONFIGURATION
 // ==========================================
 
@@ -110,13 +128,21 @@ interface PaginationConfig {
   readonly FILTER_DEBOUNCE_MS: number;
 }
 
+interface BackupConfig {
+  readonly REMINDER_DAYS: number;
+  readonly TRANSACTION_THRESHOLD: number;
+  readonly SNOOZE_HOURS: number;
+  readonly MAX_SNOOZE_COUNT: number;
+  readonly URGENT_THRESHOLD: number;
+}
+
 // ==========================================
 // UI CONFIGURATION
 // ==========================================
 
 interface UIConfig {
   readonly MAX_FILE_SIZE_MB: number;
-  readonly MAX_TRANSACTIONS_WARNING: number;
+  readonly MAX_TRANSACTIONS_LIMIT: number;
   readonly CHAR_WARNING_THRESHOLD: number;
 }
 
@@ -140,7 +166,7 @@ interface AppConfig {
   readonly MAX_NOTES_LENGTH: number;
   readonly MAX_DATE_YEARS: number;
   readonly RECURRING_MAX_ENTRIES: number;
-  readonly BACKUP_REMINDER_DAYS: number;
+  readonly BACKUP: BackupConfig;
   readonly TIMING: TimingConfig;
   readonly SECURITY: SecurityConfig;
   readonly GESTURES: GesturesConfig;
@@ -150,6 +176,8 @@ interface AppConfig {
   readonly PAGINATION: PaginationConfig;
   readonly UI: UIConfig;
   readonly ANIMATION: AnimationConfig;
+  readonly AUTO_LOCK: AutoLockConfig;
+  readonly RATE_LIMIT: RateLimitConfig;
 }
 
 export const CONFIG: AppConfig = {
@@ -160,7 +188,15 @@ export const CONFIG: AppConfig = {
   MAX_NOTES_LENGTH: 500,
   MAX_DATE_YEARS: 10,
   RECURRING_MAX_ENTRIES: 365,
-  BACKUP_REMINDER_DAYS: 7,
+
+  // Backup Settings
+  BACKUP: {
+    REMINDER_DAYS: 7,
+    TRANSACTION_THRESHOLD: 5,
+    SNOOZE_HOURS: 24,
+    MAX_SNOOZE_COUNT: 3,
+    URGENT_THRESHOLD: 14
+  },
 
   // Timing (milliseconds)
   TIMING: {
@@ -178,7 +214,7 @@ export const CONFIG: AppConfig = {
 
   // Security
   SECURITY: {
-    PBKDF2_ITERATIONS: 100000,
+    PBKDF2_ITERATIONS: 600000,
     PIN_MIN_LENGTH: 4,
     SALT_BYTES: 16,
     DERIVED_BITS: 256
@@ -218,8 +254,8 @@ export const CONFIG: AppConfig = {
 
   // UI limits
   UI: {
-    MAX_FILE_SIZE_MB: 5,
-    MAX_TRANSACTIONS_WARNING: 10000,
+    MAX_FILE_SIZE_MB: 25, // FIXED: Unified with import-export default
+    MAX_TRANSACTIONS_LIMIT: 10000,
     CHAR_WARNING_THRESHOLD: 0.9
   },
 
@@ -227,6 +263,18 @@ export const CONFIG: AppConfig = {
   ANIMATION: {
     CONFETTI_COUNT: 30,
     CONFETTI_DURATION_BASE: 1.5
+  },
+
+  // Auto-lock on inactivity
+  AUTO_LOCK: {
+    TIMEOUT_MS: 300000, // 5 minutes
+    ENABLED: true
+  },
+
+  // PIN rate limiting (brute-force protection)
+  RATE_LIMIT: {
+    MAX_ATTEMPTS: 5,
+    BASE_LOCKOUT_MS: 30000 // 30 seconds, doubles each lockout
   }
 } as const;
 
@@ -234,20 +282,9 @@ export const CONFIG: AppConfig = {
 // CURRENCY CONFIGURATION
 // ==========================================
 
-export const CURRENCY_MAP: Record<string, string> = {
-  USD: '$',
-  EUR: '€',
-  GBP: '£',
-  JPY: '¥',
-  CAD: 'C$',
-  AUD: 'A$',
-  CHF: 'CHF',
-  CNY: '¥',
-  INR: '₹',
-  MXN: '$',
-  BRL: 'R$',
-  KRW: '₩'
-} as const;
+// Re-export canonical currency map from utils-pure (single source of truth)
+// Do NOT duplicate this map - update utils-pure.ts if currencies need to change
+export { CURRENCY_MAP } from './utils-pure.js';
 
 // Re-export types for use in other modules
 export type {
@@ -263,5 +300,7 @@ export type {
   CalendarIntensityConfig,
   PaginationConfig,
   UIConfig,
-  AnimationConfig
+  AnimationConfig,
+  AutoLockConfig,
+  RateLimitConfig
 };

@@ -10,50 +10,21 @@
 
 import { effect, computed } from '@preact/signals-core';
 import * as signals from '../core/signals.js';
-import { fmtCur, toCents, toDollars } from '../core/utils.js';
+import { fmtCur } from '../core/utils.js';
 import DOM from '../core/dom-cache.js';
+import { getTotalDebtSummary } from '../features/financial/debt-planner.js';
 
 // ==========================================
 // COMPUTED SIGNALS
 // ==========================================
 
 /**
- * Total debt summary computed from debts signal
+ * Total debt summary - delegates to debt-planner.ts (single source of truth)
  */
-interface DebtSummaryData {
-  totalBalance: number;
-  monthlyMinimum: number;
-  debtCount: number;
-}
-
-const debtSummary = computed((): DebtSummaryData => {
-  const debts = signals.debts.value;
-
-  if (!debts.length) {
-    return {
-      totalBalance: 0,
-      monthlyMinimum: 0,
-      debtCount: 0
-    };
-  }
-
-  let totalBalanceCents = 0;
-  let totalMinimumCents = 0;
-  let activeCount = 0;
-
-  for (const d of debts) {
-    if (d.isActive) {
-      totalBalanceCents += toCents(d.balance);
-      totalMinimumCents += toCents(d.minimumPayment);
-      activeCount++;
-    }
-  }
-
-  return {
-    totalBalance: toDollars(totalBalanceCents),
-    monthlyMinimum: toDollars(totalMinimumCents),
-    debtCount: activeCount
-  };
+const debtSummary = computed(() => {
+  // Access debts signal to establish reactive dependency
+  const _debts = signals.debts.value;
+  return getTotalDebtSummary();
 });
 
 // ==========================================

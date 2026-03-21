@@ -5,16 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'">
   <title>Budget Tracker Elite</title>
-  <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#3b82f6">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Budget Tracker">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%233b82f6' rx='20' width='100' height='100'/><text x='50' y='68' font-size='60' text-anchor='middle'>💰</text></svg>">
   <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'><rect fill='%233b82f6' width='180' height='180'/><text x='90' y='120' font-size='100' text-anchor='middle'>💰</text></svg>">
+  <link rel="dns-prefetch" href="//fonts.googleapis.com">
+  <link rel="dns-prefetch" href="//fonts.gstatic.com">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="preload" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" as="style" onload="this.onload=null;this.rel='stylesheet'">
+  <noscript><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet"></noscript>
   <link rel="stylesheet" href="style.css">
 </head>
 <body class="h-full m-0 p-0">
@@ -32,26 +35,28 @@
   <!-- ==========================================
        PIN LOCK SCREEN (Feature 20)
        ========================================== -->
-  <div id="pin-overlay" class="pin-overlay">
+  <div id="pin-overlay" class="pin-overlay" role="dialog" aria-modal="true" aria-label="PIN Lock Screen">
     <div class="text-center p-8">
       <div class="text-6xl mb-6">🔒</div>
       <h2 class="text-2xl font-black mb-2 text-primary">Budget Tracker Locked</h2>
       <p class="text-sm mb-6 text-secondary">Enter your PIN to continue</p>
       <div class="flex justify-center gap-3 mb-6" id="pin-dots"></div>
-      <input type="password" id="pin-input" maxlength="6" inputmode="numeric" pattern="[0-9]*"
-        class="w-48 px-4 py-3 rounded-lg text-2xl text-center font-bold"
-        style="background: var(--bg-input); color: var(--text-primary); border: 2px solid var(--border-input); letter-spacing: 8px;"
-        placeholder="• • • •" aria-label="Enter PIN" autocomplete="current-password">
-      <div id="pin-error" class="text-sm mt-3 hidden text-expense">Incorrect PIN</div>
-      <button id="pin-submit-btn" class="mt-4 px-8 py-3 rounded-lg font-bold text-sm btn-primary">Unlock</button>
+      <form id="pin-unlock-form">
+        <input type="password" id="pin-input" maxlength="6" inputmode="numeric" pattern="[0-9]*"
+          class="w-48 px-4 py-3 rounded-lg text-2xl text-center font-bold"
+          style="background: var(--bg-input); color: var(--text-primary); border: 2px solid var(--border-input); letter-spacing: 8px;"
+          placeholder="• • • •" aria-label="Enter PIN" autocomplete="current-password">
+        <div id="pin-error" class="text-sm mt-3 hidden text-expense">Incorrect PIN</div>
+        <button type="button" id="pin-submit-btn" class="mt-4 px-8 py-3 rounded-lg font-bold text-sm btn-primary">Unlock</button>
+      </form>
       <div class="mt-6">
-        <button id="forgot-pin-btn" class="text-xs underline" style="color: var(--text-tertiary);">Forgot PIN?</button>
+        <button type="button" id="forgot-pin-btn" class="text-xs underline" style="color: var(--text-tertiary);">Forgot PIN?</button>
       </div>
     </div>
   </div>
 
   <!-- Recovery Phrase Display Modal (shown after PIN setup) -->
-  <div id="recovery-phrase-modal" class="modal-overlay hidden">
+  <div id="recovery-phrase-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-label="Recovery Phrase">
     <div class="modal-content" style="max-width: 420px;">
       <div class="text-center mb-6">
         <div class="text-5xl mb-3">🔐</div>
@@ -78,7 +83,7 @@
   </div>
 
   <!-- Recovery Input Modal (for recovering forgotten PIN) -->
-  <div id="recovery-input-modal" class="modal-overlay hidden">
+  <div id="recovery-input-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-label="Recovery Phrase Input">
     <div class="modal-content" style="max-width: 420px;">
       <div class="text-center mb-6">
         <div class="text-5xl mb-3">🔑</div>
@@ -87,7 +92,8 @@
       </div>
       <textarea id="recovery-phrase-input" rows="3" class="w-full px-4 py-3 rounded-lg text-sm mb-4"
         style="background: var(--bg-input); color: var(--text-primary); border: 2px solid var(--border-input);"
-        placeholder="Enter your 12 recovery words separated by spaces..."></textarea>
+        placeholder="Enter your 12 recovery words separated by spaces..."
+        aria-label="Recovery phrase"></textarea>
       <div id="recovery-error" class="text-sm mb-4 hidden text-center text-expense">Invalid recovery phrase</div>
       <div class="flex gap-3">
         <button id="cancel-recovery-btn" class="flex-1 px-4 py-3 rounded-lg font-bold text-sm" style="background: var(--bg-input); color: var(--text-primary);">
@@ -103,7 +109,7 @@
   <!-- ==========================================
        ONBOARDING OVERLAY (Feature 12 - Enhanced)
        ========================================== -->
-  <div id="onboarding-overlay" class="onboarding-overlay">
+  <div id="onboarding-overlay" class="onboarding-overlay" role="dialog" aria-modal="true" aria-label="Welcome tour">
     <!-- Semi-transparent backdrop that dims everything -->
     <div id="onboarding-backdrop" class="onboarding-backdrop"></div>
 
@@ -137,7 +143,7 @@
   <!-- ==========================================
        CELEBRATION OVERLAY (Feature 4 - Gamification)
        ========================================== -->
-  <div id="celebration-overlay" class="modal-overlay" style="z-index: 90;">
+  <div id="celebration-overlay" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="celebration-title" style="z-index: 90;">
     <div class="text-center p-8 celebration-badge">
       <div id="celebration-emoji" class="text-8xl mb-4">🏆</div>
       <h2 id="celebration-title" class="text-2xl font-black mb-2 text-primary">Achievement Unlocked!</h2>
@@ -174,8 +180,8 @@
     </div>
 
     <!-- Premium Header -->
-    <header class="sticky top-0 z-40" style="background: var(--bg-header); border-bottom: 1px solid var(--border-input);">
-      <div class="w-full px-4 md:px-8 py-4">
+    <header class="sticky top-0 z-40 app-shell" style="background: var(--bg-header); border-bottom: 1px solid var(--border-input);">
+      <div class="w-full px-4 md:px-8 py-3">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-3">
             <div class="w-10 h-10 rounded-xl flex items-center justify-center font-bold text-xl" style="background: linear-gradient(135deg, var(--color-accent), var(--color-accent2)); box-shadow: 0 4px 12px rgba(6, 182, 212, 0.3);">
@@ -185,31 +191,29 @@
               <h1 id="app-title" class="text-2xl font-black" style="color: var(--text-primary); letter-spacing: -0.5px;">Budget Tracker Elite</h1>
             </div>
           </div>
-          <div class="flex items-center gap-2">
+          <div class="app-shell-actions flex items-center gap-2">
             <div id="streak-widget" class="streak-widget hidden">🔥 <span id="streak-count">0</span></div>
-            <button id="open-analytics" class="nav-tab touch-btn text-sm font-bold py-1.5 px-3 rounded-lg btn-primary" aria-label="Open analytics">📈 Analytics</button>
-            <button id="open-settings" class="nav-tab touch-btn text-lg text-secondary" aria-label="Open settings">⚙️</button>
+            <button id="open-analytics" class="nav-tab touch-btn text-sm font-bold py-1.5 px-3 rounded-lg app-shell-action app-shell-action--secondary" aria-label="Open analytics">📈 Analytics</button>
+            <button id="open-settings" class="nav-tab touch-btn text-lg text-secondary app-shell-action app-shell-action--icon" aria-label="Open settings">⚙️</button>
           </div>
         </div>
-        <div class="flex gap-1 mt-3 p-1 rounded-xl" style="background: var(--bg-tab);" role="tablist" aria-label="Main navigation">
+        <div class="flex gap-1 mt-3 p-1 rounded-xl app-shell-tabs" style="background: var(--bg-tab);" role="tablist" aria-label="Main navigation">
           <button id="tab-dashboard-btn" class="main-tab flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all btn-primary" data-tab="dashboard" role="tab" aria-selected="true" aria-controls="tab-dashboard">📊 Dashboard</button>
           <button id="tab-budget-btn" class="main-tab flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all btn-secondary" data-tab="budget" role="tab" aria-selected="false" aria-controls="tab-budget">🎯 Budget</button>
           <button id="tab-transactions-btn" class="main-tab flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all btn-secondary" data-tab="transactions" role="tab" aria-selected="false" aria-controls="tab-transactions">💸 Transactions</button>
         </div>
+        <section class="app-shell-month flex items-center justify-between mt-3 pt-3" aria-label="Month navigation">
+          <button id="prev-month" class="month-nav-btn" aria-label="Previous month">◀</button>
+          <div class="text-center app-shell-month__label">
+            <h2 id="current-month-label" class="text-lg font-black text-primary"></h2>
+            <p class="text-xs text-secondary">Budget Period</p>
+          </div>
+          <button id="next-month" class="month-nav-btn" aria-label="Next month">▶</button>
+        </section>
       </div>
     </header>
 
     <main class="flex-1 w-full px-4 md:px-8 py-6 pb-24">
-
-      <!-- Month Navigator (Feature 2) — always visible -->
-      <section class="flex items-center justify-between mb-6 sticky top-0 z-40 py-3 -mx-4 px-4 md:-mx-8 md:px-8" style="background: var(--bg-main);">
-        <button id="prev-month" class="month-nav-btn" aria-label="Previous month">◀</button>
-        <div class="text-center">
-          <h2 id="current-month-label" class="text-lg font-black text-primary"></h2>
-          <p class="text-xs text-secondary">Budget Period</p>
-        </div>
-        <button id="next-month" class="month-nav-btn" aria-label="Next month">▶</button>
-      </section>
 
       <!-- ===== TAB: DASHBOARD ===== -->
       <div id="tab-dashboard" role="tabpanel" aria-labelledby="tab-dashboard-btn">
@@ -226,7 +230,7 @@
       <section class="hero-dashboard-grid mb-6">
 
         <!-- HERO CARD: Daily Allowance (2-column span) -->
-        <div class="hero-card rounded-2xl p-8 hover-lift card-shadow" style="background: linear-gradient(135deg, #1a4a3a 0%, #1e6d52 100%); border: 2px solid var(--border-card-savings);">
+        <div id="hero-dashboard-card" class="hero-card rounded-2xl p-8 hover-lift card-shadow" style="background: linear-gradient(135deg, #1a4a3a 0%, #1e6d52 100%); border: 2px solid var(--border-card-savings);">
 
           <!-- Header -->
           <div class="flex items-center justify-between mb-6">
@@ -249,7 +253,7 @@
             <p id="hero-daily-amount" class="text-6xl lg:text-7xl font-black mb-2" style="color: var(--color-income); line-height: 1;">
               $0.00
             </p>
-            <p class="text-sm font-semibold text-secondary">
+            <p id="hero-amount-caption" class="text-sm font-semibold text-secondary">
               Available to spend per day
             </p>
           </div>
@@ -257,13 +261,32 @@
           <!-- Progress Visualization -->
           <div class="mb-5">
             <div class="flex items-center justify-between mb-2">
-              <span class="text-xs font-bold text-secondary">MONTH PROGRESS</span>
+              <span class="text-xs font-bold text-secondary">MONTH ELAPSED</span>
               <span id="hero-progress-pct" class="text-xs font-bold text-accent">0%</span>
             </div>
             <div class="w-full h-4 rounded-full overflow-hidden" style="background: var(--bg-input);">
               <div id="hero-progress-bar" class="h-full rounded-full transition-all duration-500" style="width: 0%; background: linear-gradient(90deg, var(--color-income), var(--color-accent2));" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
               </div>
             </div>
+          </div>
+
+          <div class="hero-pace-panel mb-5">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-xs font-bold text-secondary">SPENDING PACE</span>
+              <span id="pace-label" class="text-xs font-bold text-secondary">—</span>
+            </div>
+            <p class="text-xs text-tertiary mb-2">
+              Compares how much you've spent with how far the month has progressed
+            </p>
+            <div class="w-full h-3 rounded-full" style="background: rgba(15, 23, 42, 0.35);">
+              <div id="pace-bar" class="h-3 rounded-full transition-all" style="width: 0%; background: var(--color-income);" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Monthly spending pace"></div>
+            </div>
+            <div class="flex justify-between mt-2">
+              <span class="text-xs text-tertiary">Day 1</span>
+              <span id="pace-day-marker" class="text-xs font-bold text-secondary">—</span>
+              <span class="text-xs text-tertiary">Month End</span>
+            </div>
+            <div id="spending-pace-indicator" class="spending-pace-indicator pace-neutral mt-3" aria-live="polite"></div>
           </div>
 
           <!-- Secondary Metrics Grid -->
@@ -283,14 +306,18 @@
             <p id="hero-motivation" class="text-sm font-semibold text-center text-secondary">
               Keep tracking to stay on budget!
             </p>
+            <div class="hero-action-row mt-4">
+              <button type="button" id="hero-primary-action" class="hero-action-btn hero-action-btn--primary">Add Transaction</button>
+              <button type="button" id="hero-secondary-action" class="hero-action-btn hero-action-btn--secondary">Review Budget</button>
+            </div>
           </div>
         </div>
 
-        <!-- SIDEBAR: 3 Summary Cards -->
-        <div class="hero-sidebar space-y-4">
+        <!-- SIDEBAR: Compact Summary Rail -->
+        <div class="hero-sidebar hero-sidebar--compact space-y-4">
 
           <!-- Total Income -->
-          <div class="rounded-2xl p-5 hover-lift card-shadow" style="background: var(--bg-card-1); border: 1px solid var(--border-card-1);">
+          <div class="rounded-2xl p-5 hover-lift card-shadow dashboard-support-card dashboard-support-card--income" style="background: var(--bg-card-1); border: 1px solid var(--border-card-1);">
             <div class="flex items-center justify-between mb-3">
               <span class="text-3xl">💵</span>
               <span class="stat-badge stat-positive text-xs">Live</span>
@@ -301,7 +328,7 @@
           </div>
 
           <!-- Total Expenses -->
-          <div class="rounded-2xl p-5 hover-lift card-shadow" style="background: var(--bg-card-2); border: 1px solid var(--border-card-2);">
+          <div class="rounded-2xl p-5 hover-lift card-shadow dashboard-support-card dashboard-support-card--expense" style="background: var(--bg-card-2); border: 1px solid var(--border-card-2);">
             <div class="flex items-center justify-between mb-3">
               <span class="text-3xl">💸</span>
               <span class="stat-badge stat-negative text-xs">Track</span>
@@ -312,7 +339,7 @@
           </div>
 
           <!-- Balance -->
-          <div class="rounded-2xl p-5 hover-lift card-shadow" style="background: var(--bg-card-4); border: 1px solid var(--border-card-4);">
+          <div class="rounded-2xl p-5 hover-lift card-shadow dashboard-support-card dashboard-support-card--balance" style="background: var(--bg-card-4); border: 1px solid var(--border-card-4);">
             <div class="flex items-center justify-between mb-3">
               <span class="text-3xl">📊</span>
               <span id="balance-badge" class="stat-badge stat-positive text-xs">Healthy</span>
@@ -320,21 +347,6 @@
             <p class="text-xs font-semibold mb-1 text-secondary">BALANCE</p>
             <p id="total-balance" class="summary-amount text-2xl font-black text-income">$0.00</p>
             <p class="text-xs mt-1 text-tertiary">Income - Expenses</p>
-          </div>
-
-          <!-- Daily Allowance Card -->
-          <div id="daily-allowance-card" class="rounded-2xl p-5 hover-lift card-shadow" style="background: var(--bg-card-3); border: 1px solid var(--border-card-3);">
-            <div class="flex items-center justify-between mb-3">
-              <span class="text-3xl">💰</span>
-              <span id="allowance-badge" class="stat-badge stat-neutral text-xs">Daily</span>
-            </div>
-            <p class="text-xs font-semibold mb-1 text-secondary">SPEND TODAY</p>
-            <p id="daily-allowance" class="summary-amount text-2xl font-black" style="color: var(--color-accent);">—</p>
-            <p id="allowance-subtitle" class="text-xs mt-1 text-tertiary">Set a budget to see</p>
-            <div id="spending-pace-indicator" class="spending-pace-indicator pace-neutral mt-3">
-              <span class="pace-icon">—</span>
-              <span class="pace-text">No budget set</span>
-            </div>
           </div>
 
         </div>
@@ -348,58 +360,15 @@
         <div id="budget-gauge-container" class="flex justify-center"></div>
       </section>
 
-      <!-- Spending Pace Bar -->
-      <section class="mb-6">
-        <div class="flex items-center justify-between mb-2">
-          <span class="text-xs font-bold text-secondary">MONTHLY PACE</span>
-          <span id="pace-label" class="text-xs font-bold text-secondary">—</span>
-        </div>
-        <div class="w-full h-3 rounded-full" style="background: var(--bg-input);">
-          <div id="pace-bar" class="h-3 rounded-full transition-all" style="width: 0%; background: var(--color-income);" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Monthly spending pace"></div>
-        </div>
-        <div class="flex justify-between mt-1">
-          <span class="text-xs text-tertiary">Day 1</span>
-          <span id="pace-day-marker" class="text-xs font-bold text-secondary">—</span>
-          <span class="text-xs text-tertiary">Month End</span>
-        </div>
-      </section>
-
-      <!-- Smart Insights Dashboard (Feature 3, 19) -->
-      <section id="insights-dashboard" class="mb-6">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="text-sm font-bold text-secondary-uppercase">✨ Smart Insights</h2>
-        </div>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div class="rounded-2xl p-4 hover-lift card-shadow insight-card" style="background: var(--insight-bg-1); border: 1px solid var(--insight-border-1);">
-            <div class="flex items-center gap-2 mb-2">
-              <span class="text-xl">📊</span>
-              <p class="text-xs font-bold" style="color: var(--color-accent2); text-transform: uppercase;">Trend</p>
-            </div>
-            <p id="insight-1" class="text-sm font-semibold leading-relaxed text-primary">Add transactions to unlock insights</p>
-          </div>
-          <div class="rounded-2xl p-4 hover-lift card-shadow insight-card" style="background: var(--insight-bg-2); border: 1px solid var(--insight-border-2);">
-            <div class="flex items-center gap-2 mb-2">
-              <span class="text-xl">🔮</span>
-              <p class="text-xs font-bold" style="color: var(--color-warning); text-transform: uppercase;">Forecast</p>
-            </div>
-            <p id="insight-2" class="text-sm font-semibold leading-relaxed text-primary">Your spending patterns</p>
-          </div>
-          <div class="rounded-2xl p-4 hover-lift card-shadow insight-card" style="background: var(--insight-bg-3); border: 1px solid var(--insight-border-3);">
-            <div class="flex items-center gap-2 mb-2">
-              <span class="text-xl">💡</span>
-              <p class="text-xs font-bold" style="color: var(--color-pink); text-transform: uppercase;">Tip</p>
-            </div>
-            <p id="insight-3" class="text-sm font-semibold leading-relaxed text-primary">Keep tracking! 🌟</p>
-          </div>
-        </div>
-      </section>
-
       <!-- Analytics & Charts Section (Features 3, 8) -->
-      <div id="analytics-section" class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+      <div id="analytics-section" data-component="charts" class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6 dashboard-analytics-grid">
         <!-- Spending Trend Chart -->
-        <div class="lg:col-span-2 section-card">
+        <div class="lg:col-span-2 section-card dashboard-analytics-primary">
           <div class="flex items-center justify-between mb-4">
-            <p class="text-sm font-bold section-label">📊 Income vs Expenses</p>
+            <div>
+              <p class="text-sm font-bold section-label">📊 Income vs Expenses</p>
+              <p class="text-xs mt-1 text-tertiary">The one chart that explains how the month is unfolding.</p>
+            </div>
             <div id="trend-range-selector" class="flex gap-1 p-0.5 rounded-lg" style="background: var(--bg-tab);">
               <button class="trend-range-btn px-2 py-1 rounded text-xs font-bold text-tertiary" data-months="3">3M</button>
               <button class="trend-range-btn px-2 py-1 rounded text-xs font-bold active btn-primary" data-months="6">6M</button>
@@ -409,96 +378,145 @@
           <div id="trend-chart-container" class="overflow-hidden"></div>
         </div>
         <!-- Category Donut (Feature 8) -->
-        <div class="section-card">
-          <p class="text-sm font-bold mb-4 section-label">🏆 Category Breakdown<span id="category-breakdown-badge"></span></p>
+        <div class="section-card dashboard-analytics-secondary">
+          <div class="mb-4">
+            <p class="text-sm font-bold section-label">🏆 Category Breakdown<span id="category-breakdown-badge"></span></p>
+            <p class="text-xs mt-1 text-tertiary">Where your expense pressure is coming from this month.</p>
+          </div>
           <div id="donut-chart-container"></div>
           <!-- Category Trend Mini-Chart (hidden until category clicked) -->
           <div id="category-trend-section" class="hidden mt-4 pt-4 border-t" style="border-color: var(--border-input);">
             <div class="flex items-center justify-between mb-2">
               <p id="category-trend-title" class="text-xs font-bold text-secondary-uppercase">📈 6-Month Trend</p>
-              <button id="close-category-trend" class="text-xs px-2 py-1 rounded text-tertiary">✕</button>
+              <button id="close-category-trend" class="text-xs px-2 py-1 rounded text-tertiary" aria-label="Close category trend">✕</button>
             </div>
             <div id="category-trend-chart" class="overflow-hidden"></div>
           </div>
         </div>
       </div>
 
-      <!-- Budget vs Actual (Features 1, 8) -->
-      <div id="budget-vs-actual-section" class="section-card mb-6 hidden">
-        <p class="text-sm font-bold mb-4 section-label">📊 Budget vs Actual<span id="budget-actual-badge"></span></p>
-        <div id="budget-actual-chart" class="overflow-hidden"></div>
-      </div>
-
-      <!-- Calendar View -->
-      <section class="section-card mb-6">
-        <p class="text-sm font-bold mb-3 section-label">🗓️ Calendar<span id="calendar-badge"></span></p>
-        <div class="cal-legend">
-          <div class="cal-legend-item"><span class="cal-dot" style="background: var(--color-expense);"></span> Expense</div>
-          <div class="cal-legend-item"><span class="cal-dot" style="background: var(--color-income);"></span> Income</div>
-          <div class="cal-legend-item"><span class="cal-dot" style="background: var(--color-warning); box-shadow: 0 0 4px var(--color-warning);"></span> Recurring Bill</div>
+      <!-- Smart Insights Dashboard (Feature 3, 19) -->
+      <section id="insights-dashboard" class="mb-6">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-sm font-bold text-secondary-uppercase">✨ Smart Insights</h2>
+          <p class="text-xs text-tertiary">Three clear signals worth acting on right now.</p>
         </div>
-        <div id="spending-heatmap" class="overflow-hidden"></div>
-        <div id="cal-detail-panel"></div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div class="rounded-2xl p-4 hover-lift card-shadow insight-card" style="background: var(--insight-bg-1); border: 1px solid var(--insight-border-1);">
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-xl">📊</span>
+              <p class="text-xs font-bold" style="color: var(--color-accent2); text-transform: uppercase;">Trend</p>
+            </div>
+            <div id="insight-1" class="text-sm font-semibold leading-relaxed text-primary" aria-live="polite"></div>
+          </div>
+          <div class="rounded-2xl p-4 hover-lift card-shadow insight-card" style="background: var(--insight-bg-2); border: 1px solid var(--insight-border-2);">
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-xl">🔮</span>
+              <p class="text-xs font-bold" style="color: var(--color-warning); text-transform: uppercase;">Forecast</p>
+            </div>
+            <div id="insight-2" class="text-sm font-semibold leading-relaxed text-primary" aria-live="polite"></div>
+          </div>
+          <div class="rounded-2xl p-4 hover-lift card-shadow insight-card" style="background: var(--insight-bg-3); border: 1px solid var(--insight-border-3);">
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-xl">💡</span>
+              <p class="text-xs font-bold" style="color: var(--color-pink); text-transform: uppercase;">Action</p>
+            </div>
+            <div id="insight-3" class="text-sm font-semibold leading-relaxed text-primary" aria-live="polite"></div>
+          </div>
+        </div>
       </section>
 
-      <!-- Month Comparison -->
-      <section class="section-card mb-6">
-        <p class="text-sm font-bold mb-3 section-label">📈 Month vs Last Month<span id="month-comparison-badge"></span></p>
-        <div id="month-comparison"></div>
-      </section>
+      <details id="dashboard-more-analysis" class="section-card mb-6 dashboard-more-analysis">
+        <summary class="dashboard-more-analysis__summary">
+          <div>
+            <p class="text-sm font-bold section-label">🧠 More Analysis</p>
+            <p class="text-xs mt-1 text-tertiary">Open the deeper monthly views when you need them.</p>
+          </div>
+          <span class="dashboard-more-analysis__toggle text-xs font-bold text-accent" aria-hidden="true"></span>
+        </summary>
+        <div class="dashboard-more-analysis__body">
+          <!-- Budget vs Actual (Features 1, 8) -->
+          <div id="budget-vs-actual-section" class="dashboard-analysis-panel hidden">
+            <p class="text-sm font-bold mb-4 section-label">📊 Budget vs Actual<span id="budget-actual-badge"></span></p>
+            <div id="budget-actual-chart" class="overflow-hidden"></div>
+          </div>
+
+          <!-- Calendar View -->
+          <section class="dashboard-analysis-panel" data-component="calendar">
+            <p class="text-sm font-bold mb-3 section-label">🗓️ Calendar<span id="calendar-badge"></span></p>
+            <div class="cal-legend">
+              <div class="cal-legend-item"><span class="cal-dot" style="background: var(--color-expense);"></span> Expense</div>
+              <div class="cal-legend-item"><span class="cal-dot" style="background: var(--color-income);"></span> Income</div>
+              <div class="cal-legend-item"><span class="cal-dot" style="background: var(--color-warning); box-shadow: 0 0 4px var(--color-warning);"></span> Recurring Bill</div>
+            </div>
+            <div id="spending-heatmap" class="overflow-hidden"></div>
+            <div id="cal-detail-panel"></div>
+          </section>
+
+          <!-- Month Comparison -->
+          <section class="dashboard-analysis-panel">
+            <p class="text-sm font-bold mb-3 section-label">📈 Month vs Last Month<span id="month-comparison-badge"></span></p>
+            <div id="month-comparison"></div>
+          </section>
+        </div>
+      </details>
 
       </div><!-- /tab-dashboard -->
 
       <!-- ===== TAB: BUDGET ===== -->
       <div id="tab-budget" role="tabpanel" aria-labelledby="tab-budget-btn" style="display:none;">
 
-      <!-- Envelope Budget Section (Feature 1) -->
-      <section id="envelope-section" class="section-card mb-6 hidden">
-        <div class="flex items-center justify-between mb-4">
-          <div>
-            <h2 class="text-lg font-black text-primary">📋 Budget Allocation</h2>
-            <p class="text-xs mt-1 text-secondary">Assign every dollar a job</p>
+      <div class="budget-top-grid mb-6">
+        <!-- Envelope Budget Section (Feature 1) -->
+        <section id="envelope-section" class="section-card budget-panel hidden">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <h2 class="text-lg font-black text-primary">📋 Budget Allocation</h2>
+              <p class="text-xs mt-1 text-secondary">Assign every dollar a job</p>
+            </div>
+            <div class="budget-panel-header-actions">
+              <div class="text-right">
+                <p class="text-xs font-bold text-secondary">UNASSIGNED</p>
+                <p id="unassigned-amount" class="text-xl font-black text-accent">$0.00</p>
+              </div>
+              <button id="open-plan-budget" class="btn btn-primary budget-panel-btn text-xs">✏️ Plan Budget</button>
+            </div>
           </div>
-          <div class="text-right">
-            <p class="text-xs font-bold text-secondary">UNASSIGNED</p>
-            <p id="unassigned-amount" class="text-xl font-black text-accent">$0.00</p>
-          </div>
-        </div>
-        <div id="envelope-grid" class="space-y-2"></div>
-        <button id="open-plan-budget" class="w-full mt-4 py-3 rounded-lg font-bold text-sm btn-primary">✏️ Plan Budget</button>
-      </section>
+          <div id="envelope-grid" class="space-y-2"></div>
+        </section>
 
-      <!-- Savings Goals (planning tool - grouped with Envelope) -->
-      <section id="savings-goals-section" class="rounded-2xl p-6 card-shadow mb-6 savings-card-bg">
-        <div class="flex items-center justify-between mb-4">
-          <div>
-            <h2 class="text-lg font-black text-primary">💚 Savings Goals</h2>
-            <p class="text-xs mt-1 text-secondary">Track progress toward financial targets</p>
+        <!-- Savings Goals (planning tool - grouped with Envelope) -->
+        <section id="savings-goals-section" class="rounded-2xl p-6 card-shadow budget-panel savings-card-bg">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <h2 class="text-lg font-black text-primary">💚 Savings Goals</h2>
+              <p class="text-xs mt-1 text-secondary">Track progress toward financial targets</p>
+            </div>
+            <button id="add-savings-goal-btn" class="btn budget-panel-btn budget-panel-btn--income text-xs">+ New Goal</button>
           </div>
-          <button id="add-savings-goal-btn" class="px-3 py-2 rounded-lg text-xs font-semibold" style="background: var(--color-income); color: white;">+ New Goal</button>
-        </div>
-        <div id="savings-goals-list" class="space-y-3"></div>
-      </section>
+          <div id="savings-goals-list" class="space-y-2"></div>
+        </section>
+      </div>
 
       <!-- Debt Payoff Planner -->
-      <section id="debt-planner-section" class="rounded-2xl p-6 card-shadow mb-6" style="background: linear-gradient(135deg, var(--bg-card-section) 0%, color-mix(in srgb, var(--color-expense) 8%, var(--bg-card-section)) 100%); border: 1px solid var(--border-section);">
+      <section id="debt-planner-section" class="rounded-2xl p-6 card-shadow budget-panel mb-6" style="background: linear-gradient(135deg, var(--bg-card-section) 0%, color-mix(in srgb, var(--color-expense) 8%, var(--bg-card-section)) 100%); border: 1px solid var(--border-section);">
         <div class="flex items-center justify-between mb-4">
           <div>
             <h2 class="text-lg font-black" style="color: var(--text-primary);">💳 Debt Payoff Planner</h2>
             <p class="text-xs mt-1" style="color: var(--text-secondary);">Track debts and payoff strategies</p>
           </div>
-          <button id="add-debt-btn" class="px-3 py-2 rounded-lg text-xs font-semibold" style="background: var(--color-expense); color: white;">+ Add Debt</button>
+          <button id="add-debt-btn" class="btn budget-panel-btn budget-panel-btn--expense text-xs">+ Add Debt</button>
         </div>
 
         <!-- Debt Summary Cards -->
         <div id="debt-summary-cards" class="grid grid-cols-2 gap-3 mb-4">
-          <div class="p-3 rounded-lg" style="background: var(--bg-input);">
-            <p class="text-xs font-bold" style="color: var(--text-tertiary); text-transform: uppercase;">Total Debt</p>
-            <p id="total-debt" class="text-xl font-black" style="color: var(--color-expense);">$0.00</p>
+          <div class="debt-summary-card">
+            <p class="debt-summary-card__label">Total Debt</p>
+            <p id="total-debt" class="debt-summary-card__value debt-summary-card__value--danger">$0.00</p>
           </div>
-          <div class="p-3 rounded-lg" style="background: var(--bg-input);">
-            <p class="text-xs font-bold" style="color: var(--text-tertiary); text-transform: uppercase;">Monthly Payments</p>
-            <p id="monthly-debt-payments" class="text-xl font-black" style="color: var(--text-primary);">$0.00</p>
+          <div class="debt-summary-card">
+            <p class="debt-summary-card__label">Monthly Payments</p>
+            <p id="monthly-debt-payments" class="debt-summary-card__value">$0.00</p>
           </div>
         </div>
 
@@ -506,64 +524,56 @@
         <div id="debts-list" class="space-y-3 mb-4"></div>
 
         <!-- Strategy Comparison Button -->
-        <button id="compare-strategies-btn" class="w-full py-2 rounded-lg text-sm font-semibold hidden" style="background: var(--bg-input); color: var(--text-secondary); border: 1px dashed var(--border-input);">📊 Compare Payoff Strategies</button>
+        <button id="compare-strategies-btn" class="btn btn-secondary budget-panel-btn budget-panel-btn--ghost w-full text-sm hidden">📊 Compare Payoff Strategies</button>
       </section>
 
-      <!-- Recurring vs Variable Breakdown (analysis) -->
-      <section id="recurring-breakdown-section" class="section-card mb-6">
-        <div class="flex items-center justify-between mb-4">
-          <div>
-            <h2 class="text-lg font-black text-primary">↻ Spending Breakdown<span id="recurring-breakdown-badge"></span></h2>
-            <p class="text-xs mt-1 text-secondary">Recurring vs variable expenses</p>
+      <div class="budget-analysis-grid">
+        <!-- Recurring vs Variable Breakdown (analysis) -->
+        <section id="recurring-breakdown-section" class="section-card budget-analysis-card budget-analysis-card--tertiary">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <h2 class="text-lg font-black text-primary">↻ Spending Breakdown<span id="recurring-breakdown-badge"></span></h2>
+              <p class="text-xs mt-1 text-secondary">Recurring vs variable expenses</p>
+            </div>
           </div>
-        </div>
-        <div id="recurring-breakdown-chart" class="overflow-hidden"></div>
-      </section>
+          <div id="recurring-breakdown-chart" class="overflow-hidden"></div>
+        </section>
 
-      <!-- Weekly Spending Rollup (analysis) -->
-      <section id="weekly-rollup-section" class="section-card mb-6">
-        <div class="flex items-center justify-between mb-3">
-          <div>
-            <h2 class="text-lg font-black text-primary">📆 Weekly Spending<span id="weekly-rollup-badge"></span></h2>
-            <p class="text-xs mt-1 text-secondary">Spending pattern by week</p>
+        <!-- Weekly Spending Rollup (analysis) -->
+        <section id="weekly-rollup-section" class="section-card budget-analysis-card budget-analysis-card--tertiary">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <h2 class="text-lg font-black text-primary">📆 Weekly Spending<span id="weekly-rollup-badge"></span></h2>
+              <p class="text-xs mt-1 text-secondary">Spending pattern by week</p>
+            </div>
           </div>
-        </div>
-        <div id="weekly-rollup-chart" class="overflow-hidden"></div>
-      </section>
+          <div id="weekly-rollup-chart" class="overflow-hidden"></div>
+        </section>
+      </div>
 
       </div><!-- /tab-budget -->
 
       <!-- ===== TAB: TRANSACTIONS ===== -->
-      <div id="tab-transactions" role="tabpanel" aria-labelledby="tab-transactions-btn" style="display:none;">
+      <div id="tab-transactions" class="transactions-shell" role="tabpanel" aria-labelledby="tab-transactions-btn" style="display:none;">
 
-      <!-- Quick Add Shortcuts -->
-      <section class="mb-6">
-        <h2 class="text-sm font-bold mb-3 text-secondary-uppercase">⚡ Quick Add</h2>
-        <div id="quick-shortcuts" class="grid grid-cols-3 md:grid-cols-6 gap-2"></div>
-      </section>
+      <div class="transactions-workspace-grid">
+        <div class="transactions-column transactions-column--entry">
+          <!-- Quick Add Form -->
+          <section id="form-section" class="transactions-entry-card rounded-2xl p-6 card-shadow" style="background: var(--bg-card-form); border: 1px solid var(--border-card-3);">
+        <div class="transactions-entry-header">
+          <div class="mb-4">
+            <p id="form-title" class="text-lg font-black text-primary">➕ Add Transaction</p>
+            <p class="text-xs mt-1 text-secondary">Fast entry first. Add details only when you need them.</p>
+          </div>
 
-      <!-- Transaction Templates -->
-      <section class="mb-6">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="text-sm font-bold text-secondary-uppercase">📋 Templates</h2>
-          <button id="save-as-template-btn" class="px-3 py-1.5 rounded-lg text-xs font-semibold"
-            style="background: color-mix(in srgb, var(--color-purple) 15%, transparent); color: var(--color-purple);">+ Save Current</button>
-        </div>
-        <div id="templates-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
-          <p class="text-xs text-tertiary">No templates yet</p>
-        </div>
-      </section>
-
-      <!-- Quick Add Form -->
-      <section id="form-section" class="rounded-2xl p-6 card-shadow mb-6" style="background: var(--bg-card-form); border: 1px solid var(--border-card-3);">
-        <p id="form-title" class="text-lg font-black mb-4 text-primary">➕ Add Transaction</p>
-
-        <div class="flex gap-1 mb-4 p-1 rounded-xl" style="background: var(--bg-tab);">
-          <button id="tab-expense" class="flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all" style="background: var(--color-expense); color: white;">💸 Expense</button>
-          <button id="tab-income" class="flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all btn-secondary">💰 Income</button>
+          <div class="flex gap-1 mb-4 p-1 rounded-xl transactions-type-toggle" style="background: var(--bg-tab);">
+            <button type="button" id="tab-expense" class="flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all btn-danger">💸 Expense</button>
+            <button type="button" id="tab-income" class="flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all btn-secondary">💰 Income</button>
+          </div>
         </div>
 
-        <form id="transaction-form" class="space-y-4" onsubmit="return false;" action="javascript:void(0)">
+        <div class="transactions-entry-body">
+          <form id="transaction-form" class="space-y-4" onsubmit="return false;" action="javascript:void(0)" novalidate>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
               <label for="amount" class="block text-xs font-bold mb-1 text-secondary">AMOUNT</label>
@@ -577,6 +587,16 @@
               <div id="amount-error" class="text-xs mt-1 hidden text-expense">Please enter an amount</div>
             </div>
             <div>
+              <label for="description" class="block text-xs font-bold mb-1 text-secondary">DESCRIPTION <span id="desc-char-count" class="font-normal text-tertiary"></span></label>
+              <input type="text" id="description" class="w-full px-3 py-2 rounded-lg text-sm" maxlength="500"
+                style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);"
+                placeholder="What was this for?" autocomplete="off">
+              <div id="description-error" class="text-xs mt-1 hidden text-expense">Description is too long (max 500 characters)</div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
               <label for="date" class="block text-xs font-bold mb-1 text-secondary">DATE</label>
               <input type="date" id="date" required class="w-full px-3 py-2 rounded-lg text-sm"
                 style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
@@ -585,92 +605,113 @@
           </div>
 
           <div>
-            <label class="block text-xs font-bold mb-2 text-secondary">CATEGORY</label>
-            <div id="category-chips" class="flex flex-wrap gap-2"></div>
+            <span id="category-label" class="block text-xs font-bold mb-2 text-secondary">CATEGORY</span>
+            <div id="category-chips" class="flex flex-wrap gap-2" role="group" aria-labelledby="category-label"></div>
             <div id="category-error" class="text-xs mt-1 hidden text-expense">Please select a category</div>
           </div>
 
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label for="description" class="block text-xs font-bold mb-1 text-secondary">DESCRIPTION <span id="desc-char-count" class="font-normal text-tertiary"></span></label>
-              <input type="text" id="description" class="w-full px-3 py-2 rounded-lg text-sm" maxlength="500"
-                style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);"
-                placeholder="What was this for?" autocomplete="off">
-              <div id="description-error" class="text-xs mt-1 hidden text-expense">Description is too long (max 500 characters)</div>
-            </div>
-            <div>
-              <label for="tags" class="block text-xs font-bold mb-1 text-secondary">TAGS</label>
-              <input type="text" id="tags" class="w-full px-3 py-2 rounded-lg text-sm"
-                style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);"
-                placeholder="work, personal, urgent">
-            </div>
-          </div>
-
-          <div>
-            <label for="tx-notes" class="block text-xs font-bold mb-1 text-secondary">NOTES <span id="notes-char-count" class="font-normal text-tertiary"></span></label>
-            <textarea id="tx-notes" rows="2" class="w-full px-3 py-2 rounded-lg text-sm" maxlength="500"
-              style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input); resize: none;"
-              placeholder="Additional notes..."></textarea>
-            <div id="notes-error" class="text-xs mt-1 hidden text-expense">Notes are too long (max 500 characters)</div>
-          </div>
-
-          <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" id="recurring-toggle" class="w-4 h-4 accent-purple">
-            <span class="text-sm font-bold text-secondary">↻ Make Recurring</span>
-          </label>
-
-          <div id="recurring-section" class="hidden space-y-3 pt-3 border-t" style="border-color: var(--border-input);">
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <details id="transaction-details" class="rounded-xl border p-4" style="border-color: var(--border-input); background: color-mix(in srgb, var(--bg-input) 55%, transparent);">
+            <summary class="flex items-center justify-between cursor-pointer list-none">
               <div>
-                <label for="recurring-type" class="block text-xs font-bold mb-1 text-secondary">REPEAT</label>
-                <select id="recurring-type" class="w-full px-3 py-2 rounded-lg text-sm cursor-pointer"
-                  style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
-                  <option value="daily">Daily</option>
-                  <option value="weekly">Weekly</option>
-                  <option value="biweekly">Bi-weekly</option>
-                  <option value="monthly" selected>Monthly</option>
-                  <option value="quarterly">Quarterly</option>
-                  <option value="yearly">Yearly</option>
-                </select>
+                <p class="text-sm font-bold text-primary">More Details</p>
+                <p class="text-xs text-secondary">Tags, notes, and recurring setup</p>
               </div>
+              <span class="text-xs font-bold text-tertiary">Optional</span>
+            </summary>
+
+            <div class="pt-4 space-y-4">
               <div>
-                <label for="recurring-end" class="block text-xs font-bold mb-1 text-secondary">END DATE</label>
-                <input type="date" id="recurring-end" class="w-full px-3 py-2 rounded-lg text-sm"
-                  style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
+                <label for="tags" class="block text-xs font-bold mb-1 text-secondary">TAGS</label>
+                <input type="text" id="tags" class="w-full px-3 py-2 rounded-lg text-sm"
+                  style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);"
+                  placeholder="work, personal, urgent">
+              </div>
+
+              <div>
+                <label for="tx-notes" class="block text-xs font-bold mb-1 text-secondary">NOTES <span id="notes-char-count" class="font-normal text-tertiary"></span></label>
+                <textarea id="tx-notes" rows="2" class="w-full px-3 py-2 rounded-lg text-sm" maxlength="500"
+                  style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input); resize: none;"
+                  placeholder="Additional notes..."></textarea>
+                <div id="notes-error" class="text-xs mt-1 hidden text-expense">Notes are too long (max 500 characters)</div>
+              </div>
+
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" id="recurring-toggle" class="w-4 h-4 accent-purple">
+                <span class="text-sm font-bold text-secondary">↻ Make Recurring</span>
+              </label>
+
+              <div id="recurring-section" class="hidden space-y-3 pt-3 border-t" style="border-color: var(--border-input);">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label for="recurring-type" class="block text-xs font-bold mb-1 text-secondary">REPEAT</label>
+                    <select id="recurring-type" class="w-full px-3 py-2 rounded-lg text-sm cursor-pointer"
+                      style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="biweekly">Bi-weekly</option>
+                      <option value="monthly" selected>Monthly</option>
+                      <option value="quarterly">Quarterly</option>
+                      <option value="yearly">Yearly</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="recurring-end" class="block text-xs font-bold mb-1 text-secondary">END DATE</label>
+                    <input type="date" id="recurring-end" class="w-full px-3 py-2 rounded-lg text-sm"
+                      style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
+                  </div>
+                </div>
+                <div id="recurring-preview" class="hidden p-3 rounded-lg text-xs" style="background: var(--bg-input);">
+                  <p id="recurring-preview-text" class="text-secondary"></p>
+                  <p id="recurring-preview-warning" class="hidden mt-1 font-bold text-warning"></p>
+                </div>
               </div>
             </div>
-            <div id="recurring-preview" class="hidden p-3 rounded-lg text-xs" style="background: var(--bg-input);">
-              <p id="recurring-preview-text" class="text-secondary"></p>
-              <p id="recurring-preview-warning" class="hidden mt-1 font-bold text-warning"></p>
-            </div>
+          </details>
+          </form>
+        </div>
+        <div class="flex gap-2 transactions-form-actions">
+          <button type="submit" form="transaction-form" id="submit-btn"
+            class="flex-1 py-3 rounded-lg font-black text-white text-sm transition-all hover:opacity-90 disabled:opacity-50"
+            style="background: linear-gradient(135deg, var(--color-income), var(--color-income-dark)); text-transform: uppercase; letter-spacing: 0.5px;">
+            Add Transaction
+          </button>
+          <button type="button" id="cancel-edit-btn" hidden class="py-3 px-5 rounded-lg font-black text-sm"
+            style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
+            Cancel
+          </button>
+        </div>
+          </section>
+        </div>
+
+        <div class="transactions-column transactions-column--ledger">
+          <div class="transactions-support-grid">
+            <!-- Transaction Templates -->
+            <section class="transactions-templates-panel section-card transactions-templates-panel--secondary">
+              <div class="transactions-panel-head transactions-panel-head--split">
+                <div>
+                  <h2 class="text-sm font-bold text-secondary-uppercase">📋 Templates</h2>
+                  <p class="text-xs text-secondary">Reusable presets for repeated transaction patterns.</p>
+                </div>
+                <button id="save-as-template-btn" class="px-3 py-1.5 rounded-lg text-xs font-semibold"
+                  style="background: color-mix(in srgb, var(--color-purple) 12%, transparent); color: var(--color-purple);">+ Save Current</button>
+              </div>
+              <div id="templates-list" class="transactions-template-grid"></div>
+            </section>
           </div>
 
-          <div class="flex gap-2">
-            <button type="submit" id="submit-btn"
-              class="flex-1 py-3 rounded-lg font-black text-white text-sm transition-all hover:opacity-90 disabled:opacity-50"
-              style="background: linear-gradient(135deg, var(--color-income), var(--color-income-dark)); text-transform: uppercase; letter-spacing: 0.5px;">
-              Add Transaction
-            </button>
-            <button type="button" id="cancel-edit-btn" hidden class="py-3 px-5 rounded-lg font-black text-sm"
-              style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
-              Cancel
-            </button>
-          </div>
-        </form>
-      </section>
-
-      <!-- Transactions List -->
-      <section class="section-card">
-        <div class="flex items-center justify-between mb-4">
+          <!-- Transactions List -->
+          <section class="section-card transactions-ledger-card">
+        <div class="transactions-ledger-header mb-4">
           <div>
             <h2 class="text-lg font-black text-primary">📋 Transactions</h2>
-            <div class="flex items-center gap-2 mt-1">
+            <p id="tx-results-summary" class="text-xs mt-1 text-secondary">Search, sort, and refine your ledger.</p>
+            <div class="transaction-summary-controls">
               <p class="text-xs text-secondary"><span id="tx-display-count">0</span> shown</p>
               <label class="flex items-center gap-1 cursor-pointer">
                 <input type="checkbox" id="tx-show-all-months" class="" style="width:14px; height:14px;">
                 <span class="text-xs text-tertiary">All months</span>
               </label>
-              <select id="tx-sort" class="px-2 py-1 rounded text-xs cursor-pointer"
+              <select id="tx-sort" aria-label="Sort transactions" class="px-2 py-1 rounded text-xs cursor-pointer"
                 style="background: var(--bg-input); color: var(--text-secondary); border: 1px solid var(--border-input);">
                 <option value="date-desc">Newest first</option>
                 <option value="date-asc">Oldest first</option>
@@ -680,26 +721,26 @@
               </select>
             </div>
           </div>
-          <div class="flex gap-2">
-            <button id="export-json-btn" class="px-3 py-2 rounded-lg text-xs font-semibold" style="background: color-mix(in srgb, var(--color-accent) 15%, transparent); color: var(--color-accent);">📤 JSON</button>
-            <button id="export-csv-btn" class="px-3 py-2 rounded-lg text-xs font-semibold" style="background: color-mix(in srgb, var(--color-purple) 15%, transparent); color: var(--color-purple);">📄 CSV</button>
-            <button id="import-data-btn" class="px-3 py-1 rounded-lg text-xs font-semibold" style="background: color-mix(in srgb, var(--color-accent2) 15%, transparent); color: var(--color-accent2);">📥 Import</button>
+          <div class="transactions-toolbar-actions transactions-toolbar-actions--tertiary">
+            <button id="export-json-btn" class="px-3 py-2 rounded-lg text-xs font-semibold" style="background: color-mix(in srgb, var(--color-accent) 11%, transparent); color: var(--color-accent);">📤 JSON</button>
+            <button id="export-csv-btn" class="px-3 py-2 rounded-lg text-xs font-semibold" style="background: color-mix(in srgb, var(--color-purple) 11%, transparent); color: var(--color-purple);">📄 CSV</button>
+            <button id="import-data-btn" class="px-3 py-2 rounded-lg text-xs font-semibold" style="background: color-mix(in srgb, var(--color-accent2) 11%, transparent); color: var(--color-accent2);">📥 Import</button>
             <input type="file" id="import-file" accept=".json" style="display: none;">
           </div>
         </div>
         <!-- Search & Filter (with collapsible advanced section) -->
         <div class="mb-4 space-y-2">
           <!-- BASIC FILTERS (Always visible) -->
-          <div id="basic-filters" class="space-y-2">
+          <div id="basic-filters" class="transaction-filter-grid">
             <!-- Search -->
-            <div>
+            <div class="transaction-filter-grid__search">
               <label for="search-text" class="block text-xs font-bold mb-1 text-secondary-uppercase">Search</label>
               <input type="text" id="search-text" placeholder="Search descriptions, categories..."
                 class="w-full px-3 py-2 rounded-lg text-sm"
                 style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
             </div>
             <!-- Type & Quick Date -->
-            <div class="grid grid-cols-2 gap-2">
+            <div class="transaction-filter-grid__primary">
               <div>
                 <label for="filter-type" class="block text-xs font-bold mb-1 text-secondary-uppercase">Type</label>
                 <select id="filter-type" class="w-full px-3 py-2 rounded-lg text-sm cursor-pointer"
@@ -740,13 +781,11 @@
 
           <!-- ADVANCED FILTERS (Collapsible) -->
           <div id="advanced-filters" class="filter-collapsible overflow-hidden">
-            <div class="pt-2 space-y-2">
+            <div class="transaction-advanced-grid">
               <!-- Saved Filter Presets -->
               <div id="saved-presets-section">
                 <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Saved Presets</label>
-                <div id="saved-presets-list" class="max-h-24 overflow-y-auto">
-                  <p class="text-xs text-tertiary">No saved presets</p>
-                </div>
+                <div id="saved-presets-list" class="max-h-24 overflow-y-auto"></div>
               </div>
 
               <!-- Custom Date Range (shown when "Custom" selected) -->
@@ -810,7 +849,7 @@
               </div>
 
               <!-- Toggle Filters -->
-              <div class="flex items-center gap-4">
+              <div class="transaction-advanced-grid__toggles">
                 <label class="flex items-center gap-2 cursor-pointer">
                   <input type="checkbox" id="filter-recurring" class="w-4 h-4 ">
                   <span class="text-xs font-bold text-secondary">Recurring only</span>
@@ -822,7 +861,7 @@
               </div>
 
               <!-- Filter Actions -->
-              <div class="flex flex-wrap items-center gap-2 pt-2">
+              <div class="transaction-advanced-grid__actions">
                 <span id="unreconciled-badge" class="hidden px-2 py-1 rounded text-xs font-bold" style="background: var(--color-warning); color: white;"></span>
                 <button id="clear-filters-btn" class="px-3 py-2 rounded-lg text-xs font-semibold touch-btn"
                   style="background: var(--bg-input); color: var(--text-secondary); border: 1px solid var(--border-input);">✕ Clear All</button>
@@ -834,13 +873,13 @@
         </div>
         <hr class="mb-4" style="border-color: var(--border-input);">
 
-        <div id="transactions-list" class="space-y-2">
-          <p class="text-center py-8 text-tertiary">Start adding transactions to build your financial profile</p>
-        </div>
+        <div id="transactions-list" class="space-y-2"></div>
 
-        <!-- Pagination Controls -->
-        <div id="pagination-controls" class="flex justify-center items-center gap-2 mt-4"></div>
-      </section>
+            <!-- Pagination Controls -->
+            <div id="pagination-controls" class="flex justify-center items-center gap-2 mt-4"></div>
+          </section>
+        </div>
+      </div>
 
       </div><!-- /tab-transactions -->
 
@@ -859,18 +898,13 @@
     <!-- All static modals removed - now rendered dynamically via mount-modals.ts -->
 
 
-  <!-- Undo Toast -->
-  <div id="undo-toast" class="undo-toast" role="status" aria-live="polite">
-    <span id="undo-msg">Action completed</span>
-    <button id="undo-btn">Undo</button>
-    <button id="undo-dismiss-btn" aria-label="Dismiss">✕</button>
-    <div id="undo-timer-bar" class="undo-timer-bar"></div>
-  </div>
+  <!-- Undo toasts are created dynamically by ui.ts showUndoToast() into #toast-container -->
 
   <!-- Chart Tooltip (must be before app.js loads) -->
   <div id="chart-tooltip" class="fixed hidden px-3 py-2 rounded-lg shadow-lg text-sm pointer-events-none z-50" style="background: var(--bg-card); border: 1px solid var(--border-section);"></div>
 
-  <script type="module" src="app.js"></script>
+  <link rel="modulepreload" href="app.ts">
+  <script type="module" src="app.ts"></script>
 
   <!-- Toast Container -->
   <div id="toast-container" class="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 pointer-events-none"></div>

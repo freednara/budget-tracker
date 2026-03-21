@@ -9,22 +9,23 @@
 
 import { SK, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
-import { getPrevMonthKey } from '../../core/utils.js';
-import { getMonthExpByCat, getMonthTx, getEffectiveIncome, calcTotals, getMonthlySavings } from '../financial/calculations.js';
+import { getPrevMonthKey, toCents, toDollars } from '../../core/utils.js';
+import { calculateMonthlyTotalsWithCacheSync } from '../../core/monthly-totals-cache.js';
+import { isTrackedExpenseTransaction } from '../../core/transaction-classification.js';
+import { getMonthlySavings } from '../financial/calculations.js';
 import { ACHIEVEMENTS, showCelebration } from './celebration.js';
 import DOM from '../../core/dom-cache.js';
-import { html, render, repeat, classMap, styleMap } from '../../core/lit-helpers.js';
-import type { Transaction, EarnedAchievement, StreakData } from '../../../types/index.js';
+import { html, render, repeat, classMap, styleMap, nothing } from '../../core/lit-helpers.js';
+import { on } from '../../core/event-bus.js';
+import { effect } from '@preact/signals-core';
+import { FeatureEvents } from '../../core/feature-event-interface.js';
+import type { Transaction, EarnedAchievement, StreakData, LegacySavingsGoal } from '../../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
 // ==========================================
 
-interface LegacySavingsGoal {
-  name: string;
-  target_amount: number;
-  saved_amount: number;
-}
+// Using LegacySavingsGoal from central types
 
 // ==========================================
 // ACHIEVEMENT FUNCTIONS
@@ -40,47 +41,54 @@ export function awardAchievement(key: string): void {
   signals.achievements.value = { ...achievements, [key]: { earned: true, date: new Date().toISOString() } };
   persist(SK.ACHIEVE, signals.achievements.value);
   showCelebration(key);
-  renderBadges();
-}
-
+  }
 /**
- * Render achievement badges in the badges container
+ * Mount achievement badges with reactive updates
  */
-export function renderBadges(): void {
+export function mountBadges(): () => void {
   const sec = DOM.get('badges-section');
   const el = DOM.get('badges-container');
-  if (!sec || !el) return;
+  if (!sec || !el) return () => {};
 
-  const achievements = signals.achievements.value as Record<string, EarnedAchievement>;
+  const cleanup = effect(() => {
+    const achievements = signals.achievements.value as Record<string, EarnedAchievement>;
+    const earnedCount = Object.keys(achievements).length;
 
-  sec.classList.remove('hidden');
+    // Reactively show/hide section
+    if (earnedCount > 0) {
+      sec.classList.remove('hidden');
+    } else {
+      sec.classList.add('hidden');
+    }
 
-  render(html`
-    ${repeat(ACHIEVEMENTS, a => a.id, a => {
-      const earned = achievements[a.id];
-      return html`
-        <div class=${classMap({ 'badge-card': true, 'earned': !!earned, 'locked': !earned })}
-             title=${a.desc}>
-          <div class="text-2xl mb-1">${a.emoji}</div>
-          <div class="text-xs font-bold"
-               style=${styleMap({ color: earned ? 'var(--color-warning)' : 'var(--text-tertiary)' })}>
-            ${a.name}
+    render(html`
+      ${repeat(ACHIEVEMENTS, a => a.id, a => {
+        const earned = achievements[a.id];
+        return html`
+          <div class=${classMap({ 'badge-card': true, 'earned': !!earned, 'locked': !earned })}
+               title=${a.desc}>
+            <div class="text-2xl mb-1">${a.emoji}</div>
+            <div class="text-xs font-bold"
+                 style=${styleMap({ color: earned ? 'var(--color-warning)' : 'var(--text-tertiary)' })}>
+              ${a.name}
+            </div>
           </div>
-        </div>
-      `;
-    })}
-  `, el);
+        `;
+      })}
+    `, el);
+  });
+
+  return cleanup;
 }
 
 /**
  * Check all achievement conditions and award any newly earned
+ * FIXED: Now fully optimized with cached totals
  */
 export function checkAchievements(): void {
-  const achievements = signals.achievements.value as Record<string, EarnedAchievement>;
   const streak = signals.streak.value as StreakData;
-  const monthlyAlloc = signals.monthlyAlloc.value as Record<string, Record<string, number>>;
+  const monthlyAlloc = signals.monthlyAlloc.value;
   const savingsGoals = signals.savingsGoals.value as unknown as Record<string, LegacySavingsGoal>;
-  const transactions = signals.transactions.value as Transaction[];
   const currentMonth = signals.currentMonth.value;
 
   // First Budget
@@ -91,10 +99,10 @@ export function checkAchievements(): void {
   if (streak.current >= 30) awardAchievement('month_master');
   if (streak.current >= 365) awardAchievement('year_strong');
 
-  // Savings achievements
-  const totalSaved = Object.values(savingsGoals).reduce((s, g) => s + (g.saved_amount || 0), 0);
-  if (totalSaved >= 1000) awardAchievement('savers_club');
-  if (totalSaved >= 5000) awardAchievement('big_saver');
+  // Savings achievements (using cents-first math)
+  const totalSavedCents = Object.values(savingsGoals).reduce((sum, g) => sum + toCents(g.saved_amount || 0), 0);
+  if (totalSavedCents >= 100000) awardAchievement('savers_club');
+  if (totalSavedCents >= 500000) awardAchievement('big_saver');
 
   // Goal Getter: Any completed savings goal
   const hasCompletedGoal = Object.values(savingsGoals).some(g => g.saved_amount >= g.target_amount);
@@ -103,26 +111,55 @@ export function checkAchievements(): void {
   // Budget Boss: All allocated categories under budget
   const alloc = monthlyAlloc[currentMonth] || {};
   const allocCats = Object.keys(alloc);
-  const totalSpentInAlloc = allocCats.reduce((s, c) => s + getMonthExpByCat(c, currentMonth), 0);
-  if (allocCats.length > 0 && totalSpentInAlloc > 0 && allocCats.every(c => getMonthExpByCat(c, currentMonth) <= alloc[c])) {
+  const expensesByCategory = signals.expensesByCategory.value;
+  if (allocCats.length > 0 && allocCats.every(c => (expensesByCategory[c] || 0) <= alloc[c])) {
     awardAchievement('budget_boss');
   }
 
-  // Diversified: 5+ categories used in a month
-  const monthTx = getMonthTx() as Transaction[];
-  const usedCats = new Set(monthTx.filter(t => t.type === 'expense').map(t => t.category));
+  // Diversified: 5+ categories used in current month
+  const usedCats = new Set(
+    signals.currentMonthTx.value
+      .filter((t: Transaction) => isTrackedExpenseTransaction(t))
+      .map((t: Transaction) => t.category)
+  );
   if (usedCats.size >= 5) awardAchievement('diversified');
 
   // Century Club: 100+ transactions
-  if (transactions.length >= 100) awardAchievement('century_club');
+  if (signals.transactionCount.value >= 100) awardAchievement('century_club');
 
-  // Penny Pincher: Previous month had positive balance
+  // Time-based achievements
+  const hour = new Date().getHours();
+  if (hour < 9 && signals.transactionCount.value > 0) awardAchievement('early_bird');
+  if (hour >= 22 && signals.transactionCount.value > 0) awardAchievement('night_owl');
+
+  // Penny Pincher: Previous month had positive net balance
   const prevMonth = getPrevMonthKey(currentMonth);
-  const prevIncome = getEffectiveIncome(prevMonth);
-  const prevTx = getMonthTx(prevMonth) as Transaction[];
-  const prevExpenses = calcTotals(prevTx).expenses;
+  const prevTotals = calculateMonthlyTotalsWithCacheSync(prevMonth);
   const prevSavings = getMonthlySavings(prevMonth);
-  if (prevIncome > 0 && prevIncome - prevExpenses - prevSavings > 0) {
-    awardAchievement('penny_pincher');
+  
+  if (prevTotals.income > 0) {
+    const netBalance = toCents(prevTotals.income) - toCents(prevTotals.expenses) - toCents(prevSavings);
+    if (netBalance > 0) {
+      awardAchievement('penny_pincher');
+    }
   }
+}
+
+// ==========================================
+// INITIALIZATION
+// ==========================================
+
+/**
+ * Initialize achievements module and register feature event listeners
+ */
+export function initAchievements(): void {
+  // Action: Check achievements
+  on(FeatureEvents.CHECK_ACHIEVEMENTS, () => {
+    checkAchievements();
+  });
+
+  // Action: Award achievement
+  on(FeatureEvents.AWARD_ACHIEVEMENT, (id: string) => {
+    awardAchievement(id);
+  });
 }

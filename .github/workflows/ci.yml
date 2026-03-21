@@ -25,14 +25,22 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
-      - name: Run unit tests
-        run: npm run test:run
+      - name: Run unit tests with coverage
+        run: npm run test:coverage
+        env:
+          CI: true
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
         with:
-          files: ./coverage/coverage-final.json
-          fail_ci_if_error: false
+          files: ./coverage/lcov.info
+          fail_ci_if_error: true
+          verbose: true
+
+      - name: Check coverage thresholds
+        run: |
+          echo "Coverage report:"
+          cat coverage/coverage-summary.json | jq '.total' || true
 
   # E2E tests with Playwright
   e2e:

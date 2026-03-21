@@ -16,10 +16,19 @@ const VIEWPORTS = [
 ] as const;
 
 // Helper to set up app state
-async function setupApp(page: typeof import('@playwright/test').Page, theme: 'dark' | 'light') {
-  await page.addInitScript((t) => {
+async function setupApp(page: import('@playwright/test').Page, theme: 'dark' | 'light') {
+  await page.goto('/');
+  await page.evaluate((t: string) => {
+    localStorage.clear();
     localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
-    // Set theme preference
+    localStorage.setItem('budget_tracker_migration_status', JSON.stringify({ completed: true, timestamp: Date.now(), version: '2.7', itemCount: 0 }));
+    localStorage.setItem('budget_tracker_theme', JSON.stringify(t));
+    document.documentElement.setAttribute('data-theme', t);
+  }, theme);
+  await page.reload();
+  await page.waitForFunction(() => !!(window as any).__APP_INITIALIZED__, { timeout: 15000 });
+  // Ensure theme is applied
+  await page.evaluate((t: string) => {
     document.documentElement.setAttribute('data-theme', t);
   }, theme);
 }
@@ -30,7 +39,6 @@ test.describe('Visual Regression - Dashboard', () => {
       test(`dashboard - ${theme} - ${viewport.name}`, async ({ page }) => {
         await page.setViewportSize({ width: viewport.width, height: viewport.height });
         await setupApp(page, theme);
-        await page.goto('/');
 
         // Wait for dashboard to be fully rendered
         await page.waitForSelector('#total-income', { state: 'visible' });
@@ -50,7 +58,6 @@ test.describe('Visual Regression - Transactions Tab', () => {
       test(`transactions - ${theme} - ${viewport.name}`, async ({ page }) => {
         await page.setViewportSize({ width: viewport.width, height: viewport.height });
         await setupApp(page, theme);
-        await page.goto('/');
 
         // Navigate to transactions tab
         await page.locator('#tab-transactions-btn').click();
@@ -71,7 +78,6 @@ test.describe('Visual Regression - Budget Tab', () => {
       test(`budget - ${theme} - ${viewport.name}`, async ({ page }) => {
         await page.setViewportSize({ width: viewport.width, height: viewport.height });
         await setupApp(page, theme);
-        await page.goto('/');
 
         // Navigate to budget tab
         await page.locator('#tab-budget-btn').click();
@@ -90,7 +96,6 @@ test.describe('Visual Regression - Settings Modal', () => {
     test(`settings modal - ${theme}`, async ({ page }) => {
       await page.setViewportSize({ width: 768, height: 1024 });
       await setupApp(page, theme);
-      await page.goto('/');
 
       // Open settings
       await page.locator('#open-settings').click();
@@ -109,7 +114,6 @@ test.describe('Visual Regression - Category Chips', () => {
     test(`category chips - ${theme}`, async ({ page }) => {
       await page.setViewportSize({ width: 768, height: 1024 });
       await setupApp(page, theme);
-      await page.goto('/');
 
       // Navigate to transactions to see category chips
       await page.locator('#tab-transactions-btn').click();
@@ -131,7 +135,6 @@ test.describe('Visual Regression - Form Inputs', () => {
     test(`form inputs - ${theme}`, async ({ page }) => {
       await page.setViewportSize({ width: 768, height: 1024 });
       await setupApp(page, theme);
-      await page.goto('/');
 
       // Navigate to transactions
       await page.locator('#tab-transactions-btn').click();
@@ -154,10 +157,12 @@ test.describe('Visual Regression - Onboarding', () => {
       await page.setViewportSize({ width: 768, height: 1024 });
 
       // Clear localStorage to trigger onboarding
-      await page.addInitScript(() => {
+      await page.goto('/');
+      await page.evaluate(() => {
         localStorage.clear();
       });
-      await page.goto('/');
+      await page.reload();
+      await page.waitForFunction(() => !!(window as any).__APP_INITIALIZED__, { timeout: 15000 });
 
       // Wait for onboarding to appear
       await page.waitForSelector('#onboarding-overlay.active', { timeout: 10000 });
@@ -173,10 +178,12 @@ test.describe('Visual Regression - Onboarding', () => {
 test.describe('Visual Regression - Toast Notifications', () => {
   test('toast notification - dark', async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 });
-    await page.addInitScript(() => {
+    await page.goto('/');
+    await page.evaluate(() => {
       localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
     });
-    await page.goto('/');
+    await page.reload();
+    await page.waitForFunction(() => !!(window as any).__APP_INITIALIZED__, { timeout: 15000 });
 
     // Navigate to transactions and submit a form to trigger toast
     await page.locator('#tab-transactions-btn').click();
@@ -199,10 +206,12 @@ test.describe('Visual Regression - Toast Notifications', () => {
 test.describe('Accessibility - Focus States', () => {
   test('button focus states visible', async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 });
-    await page.addInitScript(() => {
+    await page.goto('/');
+    await page.evaluate(() => {
       localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
     });
-    await page.goto('/');
+    await page.reload();
+    await page.waitForFunction(() => !!(window as any).__APP_INITIALIZED__, { timeout: 15000 });
 
     // Tab to navigation buttons
     await page.keyboard.press('Tab');
@@ -215,10 +224,12 @@ test.describe('Accessibility - Focus States', () => {
 
   test('input focus states visible', async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 });
-    await page.addInitScript(() => {
+    await page.goto('/');
+    await page.evaluate(() => {
       localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
     });
-    await page.goto('/');
+    await page.reload();
+    await page.waitForFunction(() => !!(window as any).__APP_INITIALIZED__, { timeout: 15000 });
 
     // Navigate to transactions
     await page.locator('#tab-transactions-btn').click();
@@ -241,10 +252,12 @@ test.describe('Accessibility - Focus States', () => {
 test.describe('Accessibility - Touch Targets', () => {
   test('buttons meet minimum touch target size (44px)', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 });
-    await page.addInitScript(() => {
+    await page.goto('/');
+    await page.evaluate(() => {
       localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
     });
-    await page.goto('/');
+    await page.reload();
+    await page.waitForFunction(() => !!(window as any).__APP_INITIALIZED__, { timeout: 15000 });
 
     // Check navigation buttons
     const settingsBtn = page.locator('#open-settings');
@@ -262,10 +275,12 @@ test.describe('Accessibility - Touch Targets', () => {
 
   test('month navigation buttons meet minimum touch target size', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 });
-    await page.addInitScript(() => {
+    await page.goto('/');
+    await page.evaluate(() => {
       localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
     });
-    await page.goto('/');
+    await page.reload();
+    await page.waitForFunction(() => !!(window as any).__APP_INITIALIZED__, { timeout: 15000 });
 
     const prevMonth = page.locator('#prev-month');
     const nextMonth = page.locator('#next-month');
@@ -283,10 +298,12 @@ test.describe('Accessibility - Touch Targets', () => {
 test.describe('Accessibility - Contrast Ratios', () => {
   test('primary text has sufficient contrast in dark mode', async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 });
-    await page.addInitScript(() => {
+    await page.goto('/');
+    await page.evaluate(() => {
       localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
     });
-    await page.goto('/');
+    await page.reload();
+    await page.waitForFunction(() => !!(window as any).__APP_INITIALIZED__, { timeout: 15000 });
 
     // Set theme after page load
     await page.evaluate(() => {
@@ -307,10 +324,12 @@ test.describe('Accessibility - Contrast Ratios', () => {
 
   test('primary text has sufficient contrast in light mode', async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 });
-    await page.addInitScript(() => {
+    await page.goto('/');
+    await page.evaluate(() => {
       localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
     });
-    await page.goto('/');
+    await page.reload();
+    await page.waitForFunction(() => !!(window as any).__APP_INITIALIZED__, { timeout: 15000 });
 
     // Set theme after page load
     await page.evaluate(() => {
@@ -333,10 +352,12 @@ test.describe('Accessibility - Contrast Ratios', () => {
 test.describe('Responsive Layout', () => {
   test('hero card stacks on mobile', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 });
-    await page.addInitScript(() => {
+    await page.goto('/');
+    await page.evaluate(() => {
       localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
     });
-    await page.goto('/');
+    await page.reload();
+    await page.waitForFunction(() => !!(window as any).__APP_INITIALIZED__, { timeout: 15000 });
 
     // The hero grid should be single column on mobile
     const heroGrid = page.locator('.hero-dashboard-grid');
@@ -351,10 +372,12 @@ test.describe('Responsive Layout', () => {
 
   test('hero card uses 2-column layout on desktop', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.addInitScript(() => {
+    await page.goto('/');
+    await page.evaluate(() => {
       localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
     });
-    await page.goto('/');
+    await page.reload();
+    await page.waitForFunction(() => !!(window as any).__APP_INITIALIZED__, { timeout: 15000 });
 
     // The hero grid should have 2 columns on desktop
     const heroGrid = page.locator('.hero-dashboard-grid');

@@ -12,7 +12,7 @@ import { SK, lsGet } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
 import { emit, Events } from '../../core/event-bus.js';
 import { showToast } from '../core/ui.js';
-import { setTheme } from '../../features/personalization/theme.js';
+import { setTheme } from '../../core/feature-event-interface.js';
 import { shouldShowPinLock, showPinLock } from '../widgets/pin-ui-handlers.js';
 import { DOM } from '../../core/dom-cache.js';
 import type { Theme, CustomCategory, CurrencySettings, RolloverSettings, AlertPrefs, StreakData, SavingsGoal, SavingsContribution, FilterPreset, TxTemplate } from '../../../types/index.js';
@@ -41,6 +41,9 @@ interface StorageEventCallbacks {
 
 let callbacks: StorageEventCallbacks | null = null;
 
+// Store previous handler for cleanup on re-init
+let _storageHandler: ((e: StorageEvent) => void) | null = null;
+
 // ==========================================
 // PUBLIC API
 // ==========================================
@@ -51,7 +54,12 @@ let callbacks: StorageEventCallbacks | null = null;
 export function initStorageEvents(cb: StorageEventCallbacks): void {
   callbacks = cb;
 
-  window.addEventListener('storage', (e: StorageEvent) => {
+  // Remove previous handler to prevent accumulation on re-init
+  if (_storageHandler) {
+    window.removeEventListener('storage', _storageHandler);
+  }
+
+  _storageHandler = (e: StorageEvent) => {
     if (!e.key || !Object.values(SK).includes(e.key)) return;
 
     switch (e.key) {
@@ -155,5 +163,7 @@ export function initStorageEvents(cb: StorageEventCallbacks): void {
         cb.renderTemplates();
         break;
     }
-  });
+  };
+
+  window.addEventListener('storage', _storageHandler);
 }

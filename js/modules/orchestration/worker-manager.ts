@@ -6,6 +6,7 @@
  */
 'use strict';
 
+import { isTrackedExpenseTransaction } from '../core/transaction-classification.js';
 import type { Transaction, TransactionFilters } from '../../types/index.js';
 
 // ==========================================
@@ -55,6 +56,7 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timeoutId: ReturnType<typeof setTimeout>;
+  abortController?: AbortController;
 }
 
 interface WorkerStatus {
@@ -68,8 +70,10 @@ interface WorkerStatus {
 // CONFIGURATION
 // ==========================================
 
-const WORKER_THRESHOLD = 5000; // Use worker when transactions exceed this count
-const REQUEST_TIMEOUT = 30000; // 30 second timeout for worker requests
+const WORKER_THRESHOLD = 1000; // FIXED: Lowered from 5000 to prevent mobile stuttering
+const REQUEST_TIMEOUT = 8000; // 8 second timeout for worker requests (faster fallback to sync)
+const MAX_PENDING_REQUESTS = 100; // Reject new requests if queue exceeds this size
+const ALWAYS_USE_WORKER_FOR = ['aggregate', 'yearStats', 'allTimeStats']; // Expensive operations
 
 // ==========================================
 // MODULE STATE
@@ -79,6 +83,7 @@ const REQUEST_TIMEOUT = 30000; // 30 second timeout for worker requests
 let workerInstance: Worker | null = null;
 let requestIdCounter = 0;
 const pendingRequests = new Map<number, PendingRequest>();
+let isDatasetInitialized = false;
 
 // ==========================================
 // WORKER SUPPORT
@@ -98,6 +103,13 @@ export function shouldUseWorker(transactionCount: number): boolean {
   return isWorkerSupported() && transactionCount >= WORKER_THRESHOLD;
 }
 
+/**
+ * Check if the worker dataset is initialized
+ */
+export function isWorkerReady(): boolean {
+  return workerInstance !== null && isDatasetInitialized;
+}
+
 // ==========================================
 // WORKER LIFECYCLE
 // ==========================================
@@ -108,8 +120,9 @@ export function shouldUseWorker(transactionCount: number): boolean {
 function getWorker(): Worker | null {
   if (!workerInstance && isWorkerSupported()) {
     try {
+      // Use optimized filter worker for better performance
       workerInstance = new Worker(
-        new URL('../../workers/filter-worker.ts', import.meta.url),
+        new URL('../../workers/filter-worker-optimized.ts', import.meta.url),
         { type: 'module' }
       );
 
@@ -130,7 +143,7 @@ function getWorker(): Worker | null {
       };
 
       workerInstance.onerror = (e: ErrorEvent) => {
-        console.error('Worker error:', e.message);
+        if (import.meta.env.DEV) console.error('Worker error:', e.message);
         // Reject all pending requests
         pendingRequests.forEach((pending) => {
           clearTimeout(pending.timeoutId);
@@ -142,7 +155,7 @@ function getWorker(): Worker | null {
       };
 
     } catch (err) {
-      console.warn('Failed to create worker:', err);
+      if (import.meta.env.DEV) console.warn('Failed to create worker:', err);
       workerInstance = null;
     }
   }
@@ -158,6 +171,11 @@ export function terminateWorker(): void {
     workerInstance.terminate();
     workerInstance = null;
   }
+  // Reject all pending requests and clear their timeouts before clearing the map
+  pendingRequests.forEach((pending) => {
+    clearTimeout(pending.timeoutId);
+    pending.reject(new Error('Worker terminated'));
+  });
   pendingRequests.clear();
 }
 
@@ -166,9 +184,13 @@ export function terminateWorker(): void {
 // ==========================================
 
 /**
- * Send a request to the worker
+ * Send a request to the worker with optional cancellation
  */
-function sendWorkerRequest<T>(type: WorkerMessage['type'], payload: unknown): Promise<T> {
+function sendWorkerRequest<T>(
+  type: WorkerMessage['type'] | 'update', 
+  payload: unknown,
+  abortController?: AbortController
+): Promise<T> {
   return new Promise((resolve, reject) => {
     const worker = getWorker();
 
@@ -177,20 +199,65 @@ function sendWorkerRequest<T>(type: WorkerMessage['type'], payload: unknown): Pr
       return;
     }
 
+    // Reject if too many pending requests to prevent unbounded queue growth
+    if (pendingRequests.size >= MAX_PENDING_REQUESTS) {
+      reject(new Error(`Worker queue full (${pendingRequests.size} pending requests)`));
+      return;
+    }
+
     const requestId = ++requestIdCounter;
+
+    // Handle external cancellation
+    if (abortController?.signal.aborted) {
+      reject(new Error('Request aborted'));
+      return;
+    }
+
     const timeoutId = setTimeout(() => {
       pendingRequests.delete(requestId);
+      // Send abort message to worker so it can cancel in-progress work
+      try { worker.postMessage({ type: 'abort', requestId }); } catch (_) { /* worker may be terminated */ }
       reject(new Error('Worker request timeout'));
     }, REQUEST_TIMEOUT);
 
-    pendingRequests.set(requestId, {
+    const pending: PendingRequest = {
       resolve: resolve as (value: unknown) => void,
       reject,
-      timeoutId
-    });
+      timeoutId,
+      abortController
+    };
+
+    pendingRequests.set(requestId, pending);
+
+    // Register abort listener
+    abortController?.signal.addEventListener('abort', () => {
+      clearTimeout(timeoutId);
+      pendingRequests.delete(requestId);
+      reject(new Error('Request aborted'));
+    }, { once: true });
 
     worker.postMessage({ type, payload, requestId });
   });
+}
+
+/**
+ * Explicitly update the worker's in-memory dataset
+ * This reduces data transfer for subsequent filter/aggregate calls
+ */
+export async function syncWorkerDataset(
+  transactions: Transaction[], 
+  categories?: Record<string, any>
+): Promise<void> {
+  if (!isWorkerSupported()) return;
+  
+  try {
+    await sendWorkerRequest('update', { transactions, categories });
+    isDatasetInitialized = true;
+  } catch (err) {
+    if (import.meta.env.DEV) console.error('Failed to sync worker dataset:', err);
+    isDatasetInitialized = false;
+    throw err;
+  }
 }
 
 // ==========================================
@@ -201,41 +268,49 @@ function sendWorkerRequest<T>(type: WorkerMessage['type'], payload: unknown): Pr
  * Filter transactions using worker (async)
  */
 export async function filterTransactionsAsync(
-  transactions: Transaction[],
+  transactions: Transaction[] | null, // Pass null if already synced
   filters: TransactionFilters,
-  options: FilterOptions = {}
+  options: FilterOptions = {},
+  abortController?: AbortController
 ): Promise<FilterResult> {
   const { sortBy = 'date', sortDir = 'desc', page = 0, pageSize = 50 } = options;
 
   return sendWorkerRequest<FilterResult>('filter', {
-    transactions,
+    transactions, // Worker will use in-memory if null
     filters,
     sortBy,
     sortDir,
     page,
     pageSize
-  });
+  }, abortController);
 }
 
 /**
  * Calculate aggregations using worker (async)
+ * FIXED: Always use worker for aggregations regardless of count
  */
 export async function aggregateTransactionsAsync(
-  transactions: Transaction[],
-  filters: TransactionFilters = {}
+  transactions: Transaction[] | null,
+  filters: TransactionFilters = {},
+  abortController?: AbortController
 ): Promise<WorkerAggregations> {
-  return sendWorkerRequest<WorkerAggregations>('aggregate', { transactions, filters });
+  // Always use worker for expensive aggregations
+  return sendWorkerRequest<WorkerAggregations>('aggregate', { 
+    transactions, 
+    filters 
+  }, abortController);
 }
 
 /**
  * Search transactions using worker (async)
  */
 export async function searchTransactionsAsync(
-  transactions: Transaction[],
+  transactions: Transaction[] | null,
   query: string,
-  limit: number = 50
+  limit: number = 50,
+  abortController?: AbortController
 ): Promise<Transaction[]> {
-  return sendWorkerRequest<Transaction[]>('search', { transactions, query, limit });
+  return sendWorkerRequest<Transaction[]>('search', { transactions, query, limit }, abortController);
 }
 
 // ==========================================
@@ -251,6 +326,7 @@ export function filterTransactionsSync(
   options: FilterOptions = {}
 ): FilterResult {
   const { sortBy = 'date', sortDir = 'desc', page = 0, pageSize = 50 } = options;
+  const normalizedFilters = filters as TransactionFilters & { search?: string; tagsFilter?: string };
 
   // Apply filters
   let filtered = transactions.filter(tx => {
@@ -260,13 +336,24 @@ export function filterTransactionsSync(
       type,
       category,
       searchQuery,
+      search,
+      tags,
+      tagsFilter,
       dateFrom,
       dateTo,
       minAmount,
       maxAmount,
       recurringOnly,
       reconciled
-    } = filters;
+    } = normalizedFilters;
+    const query = (searchQuery || search)?.toLowerCase().trim();
+    const tagsQuery = (
+      tagsFilter ||
+      (Array.isArray(tags) ? tags.join(' ') : typeof tags === 'string' ? tags : '')
+    )?.toLowerCase().trim();
+    const tagsText = Array.isArray(tx.tags)
+      ? tx.tags.join(' ').toLowerCase()
+      : (typeof tx.tags === 'string' ? tx.tags.toLowerCase() : '');
 
     // Month filter
     if (!showAllMonths && monthKey) {
@@ -282,18 +369,17 @@ export function filterTransactionsSync(
     if (category && category !== 'all' && tx.category !== category) return false;
 
     // Search query
-    if (searchQuery) {
-      const query = searchQuery.toLowerCase();
+    if (query) {
       const desc = (tx.description || '').toLowerCase();
       const notes = (tx.notes || '').toLowerCase();
-      // Handle tags as either array or string
-      const tags = Array.isArray(tx.tags)
-        ? tx.tags.join(' ').toLowerCase()
-        : (typeof tx.tags === 'string' ? tx.tags.toLowerCase() : '');
-      if (!desc.includes(query) && !notes.includes(query) && !tags.includes(query)) {
+      const categoryText = (tx.category || '').toLowerCase();
+      if (!desc.includes(query) && !notes.includes(query) && !tagsText.includes(query) && !categoryText.includes(query)) {
         return false;
       }
     }
+
+    // Tags filter
+    if (tagsQuery && !tagsText.includes(tagsQuery)) return false;
 
     // Date range
     if (dateFrom && tx.date < dateFrom) return false;
@@ -343,7 +429,7 @@ export function filterTransactionsSync(
     if (tx.type === 'income') {
       acc.totalIncome += amt;
       acc.incomeCount++;
-    } else if (tx.type === 'expense') {
+    } else if (isTrackedExpenseTransaction(tx)) {
       acc.totalExpenses += amt;
       acc.expenseCount++;
       acc.categoryTotals[tx.category] = (acc.categoryTotals[tx.category] || 0) + amt;
@@ -386,13 +472,19 @@ export function filterTransactionsSync(
 export async function filterTransactions(
   transactions: Transaction[],
   filters: TransactionFilters,
-  options: FilterOptions = {}
+  options: FilterOptions = {},
+  abortController?: AbortController
 ): Promise<FilterResult> {
   if (shouldUseWorker(transactions.length)) {
     try {
-      return await filterTransactionsAsync(transactions, filters, options);
+      // If worker is already ready, we can skip sending the full array
+      const txToPass = isWorkerReady() ? null : transactions;
+      return await filterTransactionsAsync(txToPass, filters, options, abortController);
     } catch (err) {
-      console.warn('Worker filtering failed, falling back to sync:', err);
+      if (err instanceof Error && err.message === 'Request aborted') {
+        throw err; // Re-throw aborts
+      }
+      if (import.meta.env.DEV) console.warn('Worker filtering failed, falling back to sync:', err);
       return filterTransactionsSync(transactions, filters, options);
     }
   }

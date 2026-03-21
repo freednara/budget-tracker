@@ -10,14 +10,31 @@
 
 import { html, render, nothing, styleMap, type LitTemplate } from '../core/lit-helpers.js';
 import { parseLocalDate } from '../core/utils.js';
-import type { Transaction, CategoryChild } from '../../types/index.js';
+import type { Transaction, CategoryChild, TransactionType } from '../../types/index.js';
 
 // ==========================================
 // TYPES
 // ==========================================
 
 export type CurrencyFormatter = (value: number) => string;
-export type CategoryInfoGetter = (type: string, catId: string) => CategoryChild;
+export type CategoryInfoGetter = (type: TransactionType, catId: string) => CategoryChild;
+
+// ==========================================
+// CATEGORY LOOKUP CACHE
+// ==========================================
+
+/**
+ * Module-level cache for category lookups to avoid repeated computation.
+ * Call clearCatInfoCache() when categories change.
+ */
+const catInfoCache = new Map<string, CategoryChild>();
+
+/**
+ * Clear the category info cache (call when categories are updated)
+ */
+export function clearCatInfoCache(): void {
+  catInfoCache.clear();
+}
 
 // ==========================================
 // TRANSACTION ROW TEMPLATE
@@ -32,7 +49,12 @@ export function transactionRowTemplate(
   getCatInfo: CategoryInfoGetter,
   fmtCur: CurrencyFormatter
 ): LitTemplate {
-  const cat = getCatInfo(t.type, t.category);
+  const cacheKey = `${t.type}:${t.category}`;
+  let cat = catInfoCache.get(cacheKey);
+  if (!cat) {
+    cat = getCatInfo(t.type, t.category);
+    catInfoCache.set(cacheKey, cat);
+  }
   const isExp = t.type === 'expense';
   const noteIcon = t.notes ? '📝' : '';
   const splitIcon = t.splits ? '✂️' : '';

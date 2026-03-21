@@ -12,9 +12,12 @@
 import { effect, computed } from '@preact/signals-core';
 import * as signals from '../core/signals.js';
 import { html, render, styleMap } from '../core/lit-helpers.js';
+import { mountEffects, unmountEffects } from '../core/effect-manager.js';
 import { fmtCur, getPrevMonthKey, toCents, toDollars } from '../core/utils.js';
 import { getEffectiveIncome, calcTotals, getMonthTx } from '../features/financial/calculations.js';
+import { calculateMonthlyTotalsWithCacheSync } from '../core/monthly-totals-cache.js';
 import DOM from '../core/dom-cache.js';
+import { animateValue as animateValueById } from '../orchestration/dashboard-animations.js';
 
 // ==========================================
 // COMPUTED SIGNALS FOR TRENDS
@@ -26,10 +29,9 @@ import DOM from '../core/dom-cache.js';
 const prevMonthData = computed(() => {
   const currentMk = signals.currentMonth.value;
   const prevMk = getPrevMonthKey(currentMk);
-  const prevTx = getMonthTx(prevMk);
-  const prevTotals = calcTotals(prevTx);
-  const prevIncome = getEffectiveIncome(prevMk);
-  return { income: prevIncome, expenses: prevTotals.expenses };
+  // Use cached totals (O(1) cache hit) instead of scanning all transactions O(N)
+  const cached = calculateMonthlyTotalsWithCacheSync(prevMk);
+  return { income: cached.income, expenses: cached.expenses };
 });
 
 /**
@@ -74,24 +76,14 @@ function getRecurringIncome(): number {
 }
 
 /**
- * Animate a numeric value with easing
+ * Animate a numeric value on an element (delegates to shared animation utility)
  */
-function animateValue(el: HTMLElement, target: number, duration: number = 400): void {
-  const current = parseFloat(el.textContent?.replace(/[^0-9.-]/g, '') || '0') || 0;
-  if (Math.abs(current - target) < 0.01) {
+function animateValue(el: HTMLElement, target: number): void {
+  if (!el.id) {
     el.textContent = fmtCur(target);
     return;
   }
-  const start = performance.now();
-  const animate = (now: number): void => {
-    const elapsed = now - start;
-    const progress = Math.min(elapsed / duration, 1);
-    const eased = 1 - Math.pow(1 - progress, 3); // ease-out cubic
-    const val = current + (target - current) * eased;
-    el.textContent = fmtCur(val);
-    if (progress < 1) requestAnimationFrame(animate);
-  };
-  requestAnimationFrame(animate);
+  animateValueById(el.id, target);
 }
 
 /**
@@ -126,46 +118,42 @@ export function mountSummaryCards(): () => void {
   let lastIncome = 0;
   let lastExpenses = 0;
 
-  // Effect for income updates
-  const cleanupIncome = effect(() => {
-    const currentMk = signals.currentMonth.value;
-    const income = getEffectiveIncome(currentMk);
+  mountEffects('summary-cards', [
+    // Effect for income updates
+    () => effect(() => {
+      const currentMk = signals.currentMonth.value;
+      const income = getEffectiveIncome(currentMk);
 
-    if (incomeEl && income !== lastIncome) {
-      animateValue(incomeEl, income);
-      lastIncome = income;
-    }
-  });
+      if (incomeEl && income !== lastIncome) {
+        animateValue(incomeEl, income);
+        lastIncome = income;
+      }
+    }),
 
-  // Effect for expenses updates
-  const cleanupExpenses = effect(() => {
-    const expenses = signals.currentMonthTotals.value.expenses;
+    // Effect for expenses updates
+    () => effect(() => {
+      const expenses = signals.currentMonthTotals.value.expenses;
 
-    if (expensesEl && expenses !== lastExpenses) {
-      animateValue(expensesEl, expenses);
-      lastExpenses = expenses;
-    }
-  });
+      if (expensesEl && expenses !== lastExpenses) {
+        animateValue(expensesEl, expenses);
+        lastExpenses = expenses;
+      }
+    }),
 
-  // Effect for income trend
-  const cleanupIncomeTrend = effect(() => {
-    if (incomeTrendEl) {
-      updateTrendEl(incomeTrendEl, incomeTrend.value);
-    }
-  });
+    // Effect for income trend
+    () => effect(() => {
+      if (incomeTrendEl) {
+        updateTrendEl(incomeTrendEl, incomeTrend.value);
+      }
+    }),
 
-  // Effect for expense trend
-  const cleanupExpenseTrend = effect(() => {
-    if (expenseTrendEl) {
-      updateTrendEl(expenseTrendEl, expenseTrend.value);
-    }
-  });
+    // Effect for expense trend
+    () => effect(() => {
+      if (expenseTrendEl) {
+        updateTrendEl(expenseTrendEl, expenseTrend.value);
+      }
+    }),
+  ]);
 
-  // Return cleanup function
-  return () => {
-    cleanupIncome();
-    cleanupExpenses();
-    cleanupIncomeTrend();
-    cleanupExpenseTrend();
-  };
+  return () => unmountEffects('summary-cards');
 }

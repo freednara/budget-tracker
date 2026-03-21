@@ -11,33 +11,101 @@
  */
 'use strict';
 
-import { SK, lsGet, persist } from '../../core/state.js';
+import { SK, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
 import { pagination, data } from '../../core/state-actions.js';
 import { formatDateForInput } from '../../core/utils.js';
 import { showToast } from '../core/ui.js';
 import DOM from '../../core/dom-cache.js';
-import { html, render, repeat, nothing } from '../../core/lit-helpers.js';
-import type { FilterPreset, FilterState, DatePresetRange } from '../../../types/index.js';
-
-// ==========================================
-// TYPE DEFINITIONS
-// ==========================================
-
-type FilterChangeCallback = () => void;
-
-// ==========================================
-// MODULE STATE
-// ==========================================
-
-// Callback for re-rendering transactions (set by app.js)
-let onFilterChange: FilterChangeCallback | null = null;
+import { html, render, repeat, classMap, nothing } from '../../core/lit-helpers.js';
+import { effect } from '@preact/signals-core';
+import type { FilterPreset, DatePresetRange } from '../../../types/index.js';
 
 /**
- * Set the callback function to call when filters change
+ * Mount the reactive filter panel component
+ * Handles active count badge and expanded/collapsed state
  */
-export function setFilterChangeCallback(callback: FilterChangeCallback): void {
-  onFilterChange = callback;
+export function mountFilterPanel(): () => void {
+  const badgeContainer = DOM.get('active-filter-count');
+  const panel = DOM.get('advanced-filters');
+  const chevron = DOM.get('filter-chevron');
+  const toggle = DOM.get('toggle-advanced-filters');
+  let normalizedInitialExpansion = false;
+
+  if (!badgeContainer || !panel || !toggle) return () => {};
+
+  const cleanup = effect(() => {
+    const count = signals.activeFilterCount.value;
+    const f = signals.filters.value;
+    const hasAdvancedFiltersActive = Boolean(
+      f.category ||
+      f.tags ||
+      f.dateFrom ||
+      f.dateTo ||
+      f.minAmount ||
+      f.maxAmount ||
+      f.reconciled !== 'all' ||
+      f.recurring
+    );
+
+    if (!normalizedInitialExpansion) {
+      normalizedInitialExpansion = true;
+      if (signals.filtersExpanded.value && !hasAdvancedFiltersActive) {
+        signals.filtersExpanded.value = false;
+        persist(SK.FILTER_EXPANDED, false);
+      }
+    }
+
+    const isExpanded = signals.filtersExpanded.value;
+
+    // 1. Update Badge
+    if (count > 0) {
+      badgeContainer.textContent = String(count);
+      badgeContainer.classList.remove('hidden');
+    } else {
+      badgeContainer.classList.add('hidden');
+    }
+
+    // 2. Update Panel Expansion
+    panel.classList.toggle('expanded', isExpanded);
+    chevron?.classList.toggle('rotated', isExpanded);
+    toggle.setAttribute('aria-expanded', String(isExpanded));
+
+    // 3. Sync inputs if needed (for preset loading)
+    syncFilterInputsFromSignal();
+  });
+
+  return cleanup;
+}
+
+/**
+ * Synchronize DOM inputs with signal state
+ * Use this when signal changes from external source (like presets)
+ */
+function syncFilterInputsFromSignal(): void {
+  const f = signals.filters.value;
+  
+  const setVal = (id: string, val: string | boolean) => {
+    const el = DOM.get(id) as HTMLInputElement | HTMLSelectElement | null;
+    if (!el) return;
+    if (el.type === 'checkbox') (el as HTMLInputElement).checked = !!val;
+    else el.value = String(val);
+  };
+
+  setVal('search-text', f.searchText);
+  setVal('filter-type', f.type);
+  setVal('filter-category', f.category);
+  setVal('filter-tags', f.tags);
+  setVal('filter-from', f.dateFrom);
+  setVal('filter-to', f.dateTo);
+  setVal('filter-min-amt', f.minAmount);
+  setVal('filter-max-amt', f.maxAmount);
+  // Sync the unreconciled checkbox (checked when reconciled filter is 'no')
+  const unreconciledEl = DOM.get('filter-unreconciled') as HTMLInputElement | null;
+  if (unreconciledEl) unreconciledEl.checked = f.reconciled === 'no';
+  setVal('filter-recurring', f.recurring);
+  setVal('tx-show-all-months', f.showAllMonths);
+  setVal('tx-sort', f.sortBy);
 }
 
 /**
@@ -112,152 +180,15 @@ export function getDatePresetRange(preset: string): DatePresetRange {
 }
 
 /**
- * Clear date preset button selection styles
- */
-export function clearDatePresetSelection(): void {
-  document.querySelectorAll('.date-preset-btn').forEach(btn => {
-    btn.classList.remove('btn-primary');
-    btn.classList.add('form-input-secondary');
-  });
-}
-
-/**
- * Initialize the advanced filter panel with collapse/expand functionality
- */
-export function initFilterPanel(): void {
-  const toggle = DOM.get('toggle-advanced-filters');
-  const panel = DOM.get('advanced-filters');
-  const chevron = DOM.get('filter-chevron');
-
-  if (!toggle || !panel) return;
-
-  // Restore saved preference
-  const wasExpanded = lsGet(SK.FILTER_EXPANDED, false) as boolean;
-  if (wasExpanded) {
-    panel.classList.add('expanded');
-    chevron?.classList.add('rotated');
-    toggle.setAttribute('aria-expanded', 'true');
-  }
-
-  toggle.addEventListener('click', () => {
-    const isExpanded = panel.classList.contains('expanded');
-    panel.classList.toggle('expanded');
-    chevron?.classList.toggle('rotated');
-    toggle.setAttribute('aria-expanded', String(!isExpanded));
-    persist(SK.FILTER_EXPANDED, !isExpanded);
-  });
-
-  // Initial count update
-  updateActiveFilterCount();
-}
-
-/**
- * Update the badge showing count of active filters
- */
-export function updateActiveFilterCount(): void {
-  const badge = DOM.get('active-filter-count');
-  if (!badge) return;
-
-  let count = 0;
-  const categoryEl = DOM.get('filter-category') as HTMLSelectElement | null;
-  const tagsEl = DOM.get('filter-tags') as HTMLInputElement | null;
-  const minAmtEl = DOM.get('filter-min-amt') as HTMLInputElement | null;
-  const maxAmtEl = DOM.get('filter-max-amt') as HTMLInputElement | null;
-  const recurringEl = DOM.get('filter-recurring') as HTMLInputElement | null;
-  const unreconciledEl = DOM.get('filter-unreconciled') as HTMLInputElement | null;
-  const fromEl = DOM.get('filter-from') as HTMLInputElement | null;
-  const toEl = DOM.get('filter-to') as HTMLInputElement | null;
-
-  if (categoryEl?.value) count++;
-  if (tagsEl?.value) count++;
-  if (minAmtEl?.value) count++;
-  if (maxAmtEl?.value) count++;
-  if (recurringEl?.checked) count++;
-  if (unreconciledEl?.checked) count++;
-  if (fromEl?.value) count++;
-  if (toEl?.value) count++;
-
-  if (count > 0) {
-    badge.textContent = String(count);
-    badge.classList.remove('hidden');
-  } else {
-    badge.classList.add('hidden');
-  }
-}
-
-/**
- * Get current state of all filter controls
- */
-export function getCurrentFilterState(): FilterState {
-  const typeEl = DOM.get('filter-type') as HTMLSelectElement | null;
-  const categoryEl = DOM.get('filter-category') as HTMLSelectElement | null;
-  const searchEl = DOM.get('search-text') as HTMLInputElement | null;
-  const tagsEl = DOM.get('filter-tags') as HTMLInputElement | null;
-  const fromEl = DOM.get('filter-from') as HTMLInputElement | null;
-  const toEl = DOM.get('filter-to') as HTMLInputElement | null;
-  const minAmtEl = DOM.get('filter-min-amt') as HTMLInputElement | null;
-  const maxAmtEl = DOM.get('filter-max-amt') as HTMLInputElement | null;
-  const recurringEl = DOM.get('filter-recurring') as HTMLInputElement | null;
-  const unreconciledEl = DOM.get('filter-unreconciled') as HTMLInputElement | null;
-  const showAllEl = DOM.get('tx-show-all-months') as HTMLInputElement | null;
-
-  return {
-    type: typeEl?.value || 'all',
-    category: categoryEl?.value || '',
-    search: searchEl?.value || '',
-    tags: tagsEl?.value || '',
-    from: fromEl?.value || '',
-    to: toEl?.value || '',
-    minAmt: minAmtEl?.value || '',
-    maxAmt: maxAmtEl?.value || '',
-    recurring: recurringEl?.checked || false,
-    unreconciled: unreconciledEl?.checked || false,
-    showAllMonths: showAllEl?.checked || false
-  };
-}
-
-/**
- * Apply a filter preset to the filter controls
- */
-export function applyFilterPreset(preset: FilterState): void {
-  const typeEl = DOM.get('filter-type') as HTMLSelectElement | null;
-  const categoryEl = DOM.get('filter-category') as HTMLSelectElement | null;
-  const searchEl = DOM.get('search-text') as HTMLInputElement | null;
-  const tagsEl = DOM.get('filter-tags') as HTMLInputElement | null;
-  const fromEl = DOM.get('filter-from') as HTMLInputElement | null;
-  const toEl = DOM.get('filter-to') as HTMLInputElement | null;
-  const minAmtEl = DOM.get('filter-min-amt') as HTMLInputElement | null;
-  const maxAmtEl = DOM.get('filter-max-amt') as HTMLInputElement | null;
-  const recurringEl = DOM.get('filter-recurring') as HTMLInputElement | null;
-  const unreconciledEl = DOM.get('filter-unreconciled') as HTMLInputElement | null;
-  const showAllEl = DOM.get('tx-show-all-months') as HTMLInputElement | null;
-
-  if (typeEl) typeEl.value = preset.type || 'all';
-  if (categoryEl) categoryEl.value = preset.category || '';
-  if (searchEl) searchEl.value = preset.search || '';
-  if (tagsEl) tagsEl.value = preset.tags || '';
-  if (fromEl) fromEl.value = preset.from || '';
-  if (toEl) toEl.value = preset.to || '';
-  if (minAmtEl) minAmtEl.value = preset.minAmt || '';
-  if (maxAmtEl) maxAmtEl.value = preset.maxAmt || '';
-  if (recurringEl) recurringEl.checked = preset.recurring || false;
-  if (unreconciledEl) unreconciledEl.checked = preset.unreconciled || false;
-  // Restore "All months" setting from preset (default to true for backwards compatibility)
-  if (showAllEl) showAllEl.checked = preset.showAllMonths ?? true;
-
-  clearDatePresetSelection();
-  updateActiveFilterCount();
-  pagination.resetPage();
-  // Call the registered callback to re-render transactions
-  if (onFilterChange) onFilterChange();
-}
-
-/**
  * Save current filter state as a preset
  */
 export function saveFilterPreset(name: string): void {
-  const state = getCurrentFilterState();
-  const preset: FilterPreset = { id: `preset_${Date.now()}`, name, filters: state };
+  const preset: FilterPreset = { 
+    id: `preset_${Date.now()}`, 
+    name, 
+    filters: { ...signals.filters.value } as any
+  };
+  
   data.setFilterPresets([...signals.filterPresets.value, preset]);
   persist(SK.FILTER_PRESETS, signals.filterPresets.value);
   renderFilterPresets();
@@ -284,29 +215,31 @@ export function renderFilterPresets(): void {
   const presets = signals.filterPresets.value;
 
   if (!presets.length) {
-    render(html`<p class="text-xs" style="color: var(--text-tertiary);">No saved presets</p>`, container);
+    render(html`
+      <div class="filter-empty-state">
+        <p class="text-sm font-semibold text-primary">No saved presets yet</p>
+        <p class="text-xs text-tertiary">Save a filter set once you have a ledger view worth revisiting.</p>
+      </div>
+    `, container);
     return;
   }
 
-  const handleLoadPreset = (presetId: string) => {
-    const preset = presets.find(p => p.id === presetId);
-    if (preset) applyFilterPreset(preset.filters);
-  };
-
-  const handleDeletePreset = (presetId: string) => {
-    deleteFilterPreset(presetId);
+  const handleLoadPreset = (preset: FilterPreset) => {
+    signals.filters.value = { ...preset.filters as any };
+    pagination.resetPage();
+    showToast(`Filter preset "${preset.name}" applied`);
   };
 
   render(html`
     ${repeat(presets, p => p.id, p => html`
       <div class="flex items-center gap-2 mb-1">
         <button class="load-preset-btn flex-1 px-2 py-1.5 rounded text-xs font-semibold text-left transition-all"
-          @click=${() => handleLoadPreset(p.id)}
+          @click=${() => handleLoadPreset(p)}
           style="background: var(--bg-input); color: var(--text-secondary); border: 1px solid var(--border-input);">
           ${p.name}
         </button>
         <button class="delete-preset-btn px-2 py-1.5 rounded text-xs"
-          @click=${() => handleDeletePreset(p.id)}
+          @click=${() => deleteFilterPreset(p.id)}
           style="color: var(--color-expense);"
           title="Delete preset">✕</button>
       </div>

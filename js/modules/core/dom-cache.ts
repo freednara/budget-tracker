@@ -1,275 +1,181 @@
 /**
  * DOM Cache Module
- * Caches frequently accessed DOM elements to improve performance
+ * 
+ * High-performance, lightweight caching for frequently accessed DOM elements.
+ * Uses WeakRef to prevent memory leaks while avoiding redundant getElementById calls.
+ * 
+ * @module dom-cache
  */
 
 import type { SafeMockElement } from '../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
+// = :=========================================
+
+type ElementCache = Map<string, WeakRef<HTMLElement>>;
+
+// ==========================================
+// SAFE MOCK SINGLETON
 // ==========================================
 
-interface FilterValuesResult {
-  showAll: boolean;
-  type: string;
-  category: string;
-  search: string;
-  tags: string;
-  fromDate: string;
-  toDate: string;
-  recurring: boolean;
-  unreconciled: boolean;
-  minAmount: number;
-  maxAmount: number;
-  sort: string;
-}
-
-interface FormValuesResult {
-  amount: string;
-  description: string;
-  date: string;
-  tags: string;
-  notes: string;
-  recurring: boolean;
-  recurringType: string;
-  recurringEnd: string;
-}
-
-type ElementCache = Record<string, HTMLElement | null>;
-type ElementUpdateFn = (element: HTMLElement) => void;
+/**
+ * Module-level singleton mock element returned by getSafe() when element is not found.
+ * Avoids allocating a new object on every miss.
+ */
+const SAFE_MOCK: SafeMockElement = {
+  value: '',
+  checked: false,
+  textContent: '',
+  innerHTML: '',
+  style: new Proxy({} as Record<string, string>, { get: () => '', set: () => true }),
+  classList: {
+    add: () => {},
+    remove: () => {},
+    toggle: () => {},
+    contains: () => false
+  },
+  setAttribute: () => {},
+  getAttribute: () => null,
+  addEventListener: () => {},
+  removeEventListener: () => {},
+  focus: () => {},
+  blur: () => {},
+  click: () => {},
+  scrollIntoView: () => {},
+  querySelector: () => null,
+  querySelectorAll: () => [],
+  closest: () => null,
+  getBoundingClientRect: () => new DOMRect(),
+  offsetHeight: 0,
+  offsetWidth: 0,
+  scrollTop: 0,
+  scrollHeight: 0,
+  clientHeight: 0
+} as unknown as SafeMockElement;
 
 // ==========================================
 // DOM CACHE CLASS
 // ==========================================
 
-class DOMCache {
-  private cache: ElementCache;
-  private initialized: boolean;
+export class DOMCache {
+  private cache: ElementCache = new Map();
+  private registry: FinalizationRegistry<string>;
+  private registered: WeakSet<HTMLElement> = new WeakSet();
+
+  /**
+   * Fast-path cache for known static elements that never leave the DOM.
+   * These bypass WeakRef overhead and store direct references.
+   */
+  private staticCache: Map<string, HTMLElement> = new Map();
+  private staticIds: Set<string>;
 
   constructor() {
-    this.cache = {};
-    this.initialized = false;
+    // Automatically clean up cache keys when elements are garbage collected
+    this.registry = new FinalizationRegistry((id: string) => {
+      this.cache.delete(id);
+    });
+
+    // Known static element IDs that persist for the app lifetime
+    this.staticIds = new Set([
+      'app', 'main-content', 'dashboard-view', 'transactions-view',
+      'budget-view', 'nav-dashboard', 'nav-transactions', 'nav-budget',
+      'month-display', 'summary-cards', 'transaction-list',
+      'total-income', 'total-expenses', 'total-balance',
+      'budget-gauge', 'daily-allowance', 'spending-pace'
+    ]);
   }
 
   /**
-   * Initialize DOM cache after document is ready
+   * Get an element by ID, using cache if available.
+   * Static elements use a direct-reference fast path (no WeakRef overhead).
    */
-  init(): void {
-    if (this.initialized) return;
+  get<T extends HTMLElement = HTMLElement>(id: string): T | null {
+    // Fast path for known static elements
+    if (this.staticIds.has(id)) {
+      const cached = this.staticCache.get(id);
+      if (cached) return cached as T;
 
-    // Transaction elements
-    this.cache.transactionList = document.getElementById('transactions-list');
-    this.cache.txShowAllMonths = document.getElementById('tx-show-all-months');
-    this.cache.filterType = document.getElementById('filter-type');
-    this.cache.filterCategory = document.getElementById('filter-category');
-    this.cache.searchText = document.getElementById('search-text');
-    this.cache.filterTags = document.getElementById('filter-tags');
-    this.cache.filterFrom = document.getElementById('filter-from');
-    this.cache.filterTo = document.getElementById('filter-to');
-    this.cache.filterRecurring = document.getElementById('filter-recurring');
-    this.cache.filterUnreconciled = document.getElementById('filter-unreconciled');
-    this.cache.filterMinAmt = document.getElementById('filter-min-amt');
-    this.cache.filterMaxAmt = document.getElementById('filter-max-amt');
-    this.cache.txSort = document.getElementById('tx-sort');
-    this.cache.activeFilterCount = document.getElementById('active-filter-count');
-    this.cache.clearFiltersBtn = document.getElementById('clear-filters-btn');
-
-    // Dashboard hero elements (actual IDs from HTML)
-    this.cache.heroDailyAmount = document.getElementById('hero-daily-amount');
-    this.cache.heroLeftToSpend = document.getElementById('hero-left-to-spend');
-    this.cache.heroTodaySpent = document.getElementById('hero-today-spent');
-    this.cache.heroMotivation = document.getElementById('hero-motivation');
-
-    // Form elements (corrected IDs to match actual HTML)
-    this.cache.txForm = document.getElementById('transaction-form');
-    this.cache.txAmount = document.getElementById('amount');
-    this.cache.txDescription = document.getElementById('description');
-    this.cache.txDate = document.getElementById('date');
-    this.cache.txTags = document.getElementById('tags');
-    this.cache.txNotes = document.getElementById('tx-notes');
-    this.cache.recurringToggle = document.getElementById('recurring-toggle');
-    this.cache.recurringType = document.getElementById('recurring-type');
-    this.cache.recurringEnd = document.getElementById('recurring-end');
-    this.cache.recurringPreview = document.getElementById('recurring-preview');
-    this.cache.recurringPreviewText = document.getElementById('recurring-preview-text');
-    this.cache.recurringPreviewWarning = document.getElementById('recurring-preview-warning');
-
-    // Modal elements (specific modal IDs that exist in HTML)
-    this.cache.deleteModal = document.getElementById('delete-modal');
-    this.cache.pinModal = document.getElementById('pin-modal');
-    this.cache.settingsModal = document.getElementById('settings-modal');
-    this.cache.analyticsModal = document.getElementById('analytics-modal');
-
-    // Alert elements
-    this.cache.alertBanner = document.getElementById('alert-banner');
-    this.cache.alertText = document.getElementById('alert-text');
-
-    // Tab elements (corrected IDs to match actual HTML)
-    this.cache.dashboardTab = document.getElementById('tab-dashboard');
-    this.cache.transactionsTab = document.getElementById('tab-transactions');
-    this.cache.budgetTab = document.getElementById('tab-budget');
-
-    this.initialized = true;
-  }
-
-  /**
-   * Get cached element or query if not cached
-   */
-  get(id: string): HTMLElement | null {
-    if (!this.cache[id]) {
-      this.cache[id] = document.getElementById(id);
+      const element = document.getElementById(id);
+      if (element) {
+        this.staticCache.set(id, element);
+        return element as T;
+      }
+      return null;
     }
-    return this.cache[id];
+
+    // Standard WeakRef path for dynamic elements
+    const ref = this.cache.get(id);
+
+    if (ref) {
+      const element = ref.deref();
+      if (element) return element as T;
+    }
+
+    // Not in cache or stale, query and store
+    const element = document.getElementById(id);
+    if (element) {
+      this.cache.set(id, new WeakRef(element));
+      // Only register once per element to avoid stale finalization callbacks
+      if (!this.registered.has(element)) {
+        this.registry.register(element, id);
+        this.registered.add(element);
+      }
+      return element as T;
+    }
+
+    return null;
   }
 
   /**
    * Get cached element with null safety (returns mock element if not found)
+   * Prevents runtime crashes in non-critical rendering paths.
    */
-  getSafe(id: string): HTMLElement | SafeMockElement {
-    const element = this.get(id);
+  getSafe<T extends HTMLElement = HTMLElement>(id: string): T | SafeMockElement {
+    const element = this.get<T>(id);
     if (element) return element;
 
-    // Return a safe mock element that won't crash on property access
-    return {
-      value: '',
-      checked: false,
-      textContent: '',
-      innerHTML: '',
-      style: new Proxy({} as Record<string, string>, { get: () => '', set: () => true }),
-      classList: {
-        add: () => {},
-        remove: () => {},
-        toggle: () => {},
-        contains: () => false
-      },
-      setAttribute: () => {},
-      getAttribute: () => null,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      focus: () => {},
-      blur: () => {},
-      click: () => {},
-      scrollIntoView: () => {},
-      querySelector: () => null,
-      querySelectorAll: () => [],
-      closest: () => null,
-      getBoundingClientRect: () => new DOMRect(),
-      offsetHeight: 0,
-      offsetWidth: 0,
-      scrollTop: 0,
-      scrollHeight: 0,
-      clientHeight: 0
-    };
+    // Return the module-level singleton mock to avoid allocating a new object each time
+    return SAFE_MOCK;
   }
 
   /**
-   * Get cached element by selector (not cached, direct query)
+   * Direct wrapper for querySelector (uncached)
    */
   query<T extends HTMLElement = HTMLElement>(selector: string): T | null {
     return document.querySelector<T>(selector);
   }
 
   /**
-   * Get all elements by selector (not cached, direct query)
+   * Direct wrapper for querySelectorAll (uncached)
    */
   queryAll<T extends HTMLElement = HTMLElement>(selector: string): NodeListOf<T> {
     return document.querySelectorAll<T>(selector);
   }
 
   /**
-   * Clear specific cached element
+   * Clear an entry from the cache
    */
   clear(id: string): void {
-    delete this.cache[id];
+    this.cache.delete(id);
+    this.staticCache.delete(id);
   }
 
   /**
-   * Clear all cached elements
+   * Clear all entries from the cache
    */
   clearAll(): void {
-    this.cache = {};
-    this.initialized = false;
+    this.cache.clear();
+    this.staticCache.clear();
   }
 
   /**
-   * Refresh cache for dynamically created elements
+   * Legacy support - No-op in new implementation
    */
-  refresh(...ids: string[]): void {
-    ids.forEach(id => {
-      this.cache[id] = document.getElementById(id);
-    });
-  }
-
-  /**
-   * Get filter values from cached elements
-   */
-  getFilterValues(): FilterValuesResult {
-    const txShowAllMonths = this.cache.txShowAllMonths as HTMLInputElement | null;
-    const filterType = this.cache.filterType as HTMLSelectElement | null;
-    const filterCategory = this.cache.filterCategory as HTMLSelectElement | null;
-    const searchText = this.cache.searchText as HTMLInputElement | null;
-    const filterTags = this.cache.filterTags as HTMLInputElement | null;
-    const filterFrom = this.cache.filterFrom as HTMLInputElement | null;
-    const filterTo = this.cache.filterTo as HTMLInputElement | null;
-    const filterRecurring = this.cache.filterRecurring as HTMLInputElement | null;
-    const filterUnreconciled = this.cache.filterUnreconciled as HTMLInputElement | null;
-    const filterMinAmt = this.cache.filterMinAmt as HTMLInputElement | null;
-    const filterMaxAmt = this.cache.filterMaxAmt as HTMLInputElement | null;
-    const txSort = this.cache.txSort as HTMLSelectElement | null;
-
-    return {
-      showAll: txShowAllMonths?.checked || false,
-      type: filterType?.value || 'all',
-      category: filterCategory?.value || '',
-      search: searchText?.value?.toLowerCase() || '',
-      tags: filterTags?.value?.toLowerCase() || '',
-      fromDate: filterFrom?.value || '',
-      toDate: filterTo?.value || '',
-      recurring: filterRecurring?.checked || false,
-      unreconciled: filterUnreconciled?.checked || false,
-      minAmount: parseFloat(filterMinAmt?.value || '') || 0,
-      maxAmount: parseFloat(filterMaxAmt?.value || '') || 0,
-      sort: txSort?.value || 'date-desc'
-    };
-  }
-
-  /**
-   * Get transaction form values from cached elements
-   */
-  getFormValues(): FormValuesResult {
-    const txAmount = this.cache.txAmount as HTMLInputElement | null;
-    const txDescription = this.cache.txDescription as HTMLInputElement | null;
-    const txDate = this.cache.txDate as HTMLInputElement | null;
-    const txTags = this.cache.txTags as HTMLInputElement | null;
-    const txNotes = this.cache.txNotes as HTMLTextAreaElement | null;
-    const recurringToggle = this.cache.recurringToggle as HTMLInputElement | null;
-    const recurringType = this.cache.recurringType as HTMLSelectElement | null;
-    const recurringEnd = this.cache.recurringEnd as HTMLInputElement | null;
-
-    return {
-      amount: txAmount?.value || '',
-      description: txDescription?.value || '',
-      date: txDate?.value || '',
-      tags: txTags?.value || '',
-      notes: txNotes?.value || '',
-      recurring: recurringToggle?.checked || false,
-      recurringType: recurringType?.value || 'monthly',
-      recurringEnd: recurringEnd?.value || ''
-    };
-  }
-
-  /**
-   * Batch update multiple elements efficiently
-   */
-  batchUpdate(updates: Record<string, ElementUpdateFn>): void {
-    requestAnimationFrame(() => {
-      Object.entries(updates).forEach(([id, updateFn]) => {
-        const element = this.cache[id] || this.get(id);
-        if (element && typeof updateFn === 'function') {
-          updateFn(element);
-        }
-      });
-    });
+  init(): void {}
+  refresh(): void {}
+  refreshAll(): void {
+    this.clearAll();
   }
 }
 
@@ -277,15 +183,5 @@ class DOMCache {
 // SINGLETON INSTANCE
 // ==========================================
 
-// Create and export singleton instance
-const DOM = new DOMCache();
-
-// Auto-initialize when DOM is ready
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => DOM.init());
-} else {
-  DOM.init();
-}
-
+export const DOM = new DOMCache();
 export default DOM;
-export { DOM };

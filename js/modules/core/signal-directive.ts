@@ -62,12 +62,21 @@ class SignalDirective extends AsyncDirective {
       this.cleanup();
     }
 
+    let isInitialCall = true;
+
     // Set up new effect to track signal changes
     this.cleanup = effect(() => {
       // Read the signal value to establish tracking
       const value = sig.value;
 
-      // Only setValue if we're connected (after initial render)
+      // Skip the very first call from effect() because lit-html 
+      // already uses the return value from update() for the first render
+      if (isInitialCall) {
+        isInitialCall = false;
+        return;
+      }
+
+      // Only setValue if we're connected
       if (this._connected) {
         this.setValue(value);
       }

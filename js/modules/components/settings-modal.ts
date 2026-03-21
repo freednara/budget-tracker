@@ -3,12 +3,14 @@
  *
  * Lit template for the settings modal with all configuration options.
  * Maintains existing element IDs for backward compatibility.
+ * Enhanced with announcer integration for accessibility.
  *
  * @module components/settings-modal
  */
 'use strict';
 
 import { html, type TemplateResult } from '../core/lit-helpers.js';
+import { announcer } from '../core/accessibility.js';
 
 // ==========================================
 // SETTINGS MODAL
@@ -126,12 +128,12 @@ export function renderSettingsModal(): TemplateResult {
         <p class="text-xs font-black mb-3" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Security</p>
         <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
           <label class="block text-xs font-bold mb-2 text-secondary-uppercase">PIN Lock</label>
-          <div class="flex items-center gap-3">
+          <form class="flex items-center gap-3">
             <input type="password" id="settings-pin" maxlength="6" inputmode="numeric" pattern="[0-9]*" class="w-32 px-3 py-2 rounded-lg text-sm"
               style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);" placeholder="Set PIN">
-            <button id="save-pin-btn" class="px-3 py-2 rounded-lg text-sm font-bold btn-primary">Set PIN</button>
-            <button id="clear-pin-btn" class="px-3 py-2 rounded-lg text-sm font-bold" style="background: var(--color-expense); color: white;">Remove</button>
-          </div>
+            <button type="button" id="save-pin-btn" class="px-3 py-2 rounded-lg text-sm font-bold btn-primary">Set PIN</button>
+            <button type="button" id="clear-pin-btn" class="px-3 py-2 rounded-lg text-sm font-bold" style="background: var(--color-expense); color: white;">Remove</button>
+          </form>
         </div>
 
         <!-- Keyboard Shortcuts -->
@@ -154,15 +156,44 @@ export function renderSettingsModal(): TemplateResult {
         <p class="text-xs font-black mb-3" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Data</p>
         <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
           <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Data Management</label>
+          <p class="text-xs mb-3" style="color: var(--text-tertiary);">
+            Clears transactions, budgets, goals, debts, templates, recurring templates, categories, and settings on this device.
+            Backup retention is chosen in the confirmation step.
+          </p>
           <div class="flex gap-2">
             <button id="load-sample-data" class="flex-1 py-2 rounded-lg text-xs font-semibold" style="background: var(--bg-input); color: var(--text-secondary); border: 1px solid var(--border-input);">📊 Load Sample Data</button>
-            <button id="clear-all-data" class="flex-1 py-2 rounded-lg text-xs font-semibold" style="background: color-mix(in srgb, var(--color-expense) 15%, transparent); color: var(--color-expense);">🗑️ Clear All Data</button>
+            <button id="clear-all-data" class="flex-1 py-2 rounded-lg text-xs font-semibold" style="background: color-mix(in srgb, var(--color-expense) 15%, transparent); color: var(--color-expense);">🗑️ Clear All App Data</button>
           </div>
         </div>
 
         <div class="flex gap-3">
           <button id="cancel-settings" class="flex-1 py-3 rounded-lg font-bold btn-secondary">Cancel</button>
           <button id="close-settings" class="flex-1 py-3 rounded-lg font-bold btn-primary">Save Settings</button>
+        </div>
+      </div>
+    </div>
+    <div id="reset-app-data-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="reset-app-data-title" style="z-index: 80;">
+      <div class="rounded-2xl p-6 max-w-md w-full card-shadow" style="background: var(--bg-card-section); border: 1px solid var(--border-section);">
+        <h3 id="reset-app-data-title" class="text-xl font-black mb-2 text-primary">Clear App Data</h3>
+        <p class="text-sm mb-3 text-secondary">
+          This is irreversible. App data will be reset to a first-use state on this device.
+        </p>
+        <div class="p-3 rounded-xl mb-4" style="background: color-mix(in srgb, var(--color-expense) 8%, var(--bg-input)); border: 1px solid color-mix(in srgb, var(--color-expense) 25%, var(--border-input));">
+          <p class="text-xs font-bold mb-1" style="color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.05em;">Choose Backup Behavior</p>
+          <p class="text-sm text-secondary">
+            You can keep stored backups for later restore, or wipe backups too for a full local reset.
+          </p>
+        </div>
+        <div class="space-y-2">
+          <button id="confirm-reset-keep-backups" class="w-full py-3 rounded-lg font-bold text-sm btn-primary">
+            Clear App Data Only
+          </button>
+          <button id="confirm-reset-clear-backups" class="w-full py-3 rounded-lg font-bold text-sm" style="background: var(--color-expense); color: white;">
+            Clear App Data + Backups
+          </button>
+          <button id="cancel-reset-app-data" class="w-full py-3 rounded-lg font-bold text-sm btn-secondary">
+            Cancel
+          </button>
         </div>
       </div>
     </div>

@@ -10,38 +10,17 @@
 
 import { SK, persist, lsSet } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
-import { modal, form, settings } from '../../core/state-actions.js';
+import { modal, form, settings, savingsGoals as savingsActions } from '../../core/state-actions.js';
 import { openModal, closeModal, showToast, showUndoToast } from '../core/ui.js';
-import { parseAmount, generateId, getTodayStr } from '../../core/utils.js';
+import { parseAmount, generateId, getTodayStr, fmtCur } from '../../core/utils.js';
 import { dataSdk } from '../../data/data-manager.js';
-import {
-  getRolloverSettings,
-  setRolloverEnabled,
-  setRolloverMode,
-  setNegativeHandling,
-  setMaxRollover
-} from '../../features/financial/rollover.js';
-import { startOnboarding } from '../../features/personalization/onboarding.js';
-import { checkAchievements } from '../../features/gamification/achievements.js';
-import {
-  setAnalyticsCurrentPeriod,
-  renderAnalytics,
-  renderYearComparisonChart,
-  renderYearOverYearComparison,
-  renderCategoryTrendsChart,
-  updateTrendingSummary
-} from '../../orchestration/analytics.js';
-import { setTheme } from '../../features/personalization/theme.js';
-import { dismissAlert } from '../../features/personalization/alerts.js';
 import { CONFIG, CURRENCY_MAP } from '../../core/config.js';
 import DOM from '../../core/dom-cache.js';
-import type { Transaction, SavingsContribution, InsightPersonality, AlertPrefs, CurrencySettings, RolloverMode, NegativeHandling, Theme } from '../../../types/index.js';
+import type { Transaction, SavingsContribution, InsightPersonality, AlertPrefs, CurrencySettings, RolloverMode, NegativeHandling, Theme, LegacySavingsGoal, CurrencyFormatter } from '../../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
 // ==========================================
-
-type CurrencyFormatter = (value: number) => string;
 
 interface ModalEventCallbacks {
   fmtCur?: CurrencyFormatter;
@@ -49,29 +28,42 @@ interface ModalEventCallbacks {
   updateSummary?: () => void;
   renderCustomCatsList?: () => void;
   refreshAll?: () => void;
+  resetForm?: () => void | Promise<void>;
   startEditing?: (tx: Transaction) => void;
-  loadSampleData?: () => void;
+  loadSampleData?: () => boolean | Promise<boolean>;
 }
 
-interface LegacySavingsGoal {
-  name: string;
-  target_amount: number;
-  saved_amount: number;
-  deadline?: string;
-}
+// Using LegacySavingsGoal from central types
 
 // ==========================================
 // MODULE STATE
 // ==========================================
 
 // Configurable callbacks
-let fmtCurFn: CurrencyFormatter = (v) => '$' + v.toFixed(2);
+let fmtCurFn: CurrencyFormatter = fmtCur;
 let renderSavingsGoalsFn: (() => void) | null = null;
 let updateSummaryFn: (() => void) | null = null;
 let renderCustomCatsListFn: (() => void) | null = null;
 let refreshAllFn: (() => void) | null = null;
+let resetFormFn: (() => void | Promise<void>) | null = null;
 let startEditingFn: ((tx: Transaction) => void) | null = null;
-let loadSampleDataFn: (() => void) | null = null;
+let loadSampleDataFn: (() => boolean | Promise<boolean>) | null = null;
+
+function loadFeatureEventInterface() {
+  return import('../../core/feature-event-interface.js');
+}
+
+function loadRolloverModule() {
+  return import('../../features/financial/rollover.js');
+}
+
+function loadAnalyticsModule() {
+  return import('../../orchestration/analytics.js');
+}
+
+function loadAppResetModule() {
+  return import('../../orchestration/app-reset.js');
+}
 
 // ==========================================
 // INITIALIZATION
@@ -86,6 +78,7 @@ export function initModalEvents(callbacks: ModalEventCallbacks): void {
   if (callbacks.updateSummary) updateSummaryFn = callbacks.updateSummary;
   if (callbacks.renderCustomCatsList) renderCustomCatsListFn = callbacks.renderCustomCatsList;
   if (callbacks.refreshAll) refreshAllFn = callbacks.refreshAll;
+  if (callbacks.resetForm) resetFormFn = callbacks.resetForm;
   if (callbacks.startEditing) startEditingFn = callbacks.startEditing;
   if (callbacks.loadSampleData) loadSampleDataFn = callbacks.loadSampleData;
 
@@ -97,12 +90,43 @@ export function initModalEvents(callbacks: ModalEventCallbacks): void {
   setupThemeButtons();
   setupAlertAndCelebration();
   setupSampleData();
+  setupSyncConflictModal();
 }
+
+/**
+ * Set up sync conflict modal handlers
+ */
+function setupSyncConflictModal(): void {
+  DOM.get('sync-accept-remote')?.addEventListener('click', () => {
+    window.dispatchEvent(new CustomEvent('sync-conflict-resolution', { 
+      detail: { action: 'accept' } 
+    }));
+    closeModal('sync-conflict-modal');
+  });
+
+  DOM.get('sync-keep-local')?.addEventListener('click', () => {
+    window.dispatchEvent(new CustomEvent('sync-conflict-resolution', { 
+      detail: { action: 'reject' } 
+    }));
+    closeModal('sync-conflict-modal');
+  });
+
+  DOM.get('sync-merge-changes')?.addEventListener('click', () => {
+    window.dispatchEvent(new CustomEvent('sync-conflict-resolution', { 
+      detail: { action: 'merge' } 
+    }));
+    closeModal('sync-conflict-modal');
+  });
+}
+
+// Track theme at time of opening settings so Cancel can revert
+let _themeOnOpen: string = '';
 
 /**
  * Open settings modal (exported for keyboard shortcut)
  */
-export function openSettingsModal(): void {
+export async function openSettingsModal(): Promise<void> {
+  _themeOnOpen = signals.theme.value;
   const showEnvelope = DOM.get('show-envelope') as HTMLInputElement | null;
   const settingsCurrency = DOM.get('settings-currency') as HTMLSelectElement | null;
   const insightPersonality = DOM.get('insight-personality') as HTMLSelectElement | null;
@@ -119,14 +143,22 @@ export function openSettingsModal(): void {
   if (showEnvelope) showEnvelope.checked = sections.envelope;
   if (settingsCurrency) settingsCurrency.value = currency.home;
   if (insightPersonality) insightPersonality.value = signals.insightPers.value as string;
-  if (alertBudgetExceed) alertBudgetExceed.checked = alerts.budgetThreshold !== null && alerts.budgetThreshold <= 0.8;
+  // Checkbox reflects whether budget alerts are active (any non-null threshold)
+  if (alertBudgetExceed) alertBudgetExceed.checked = alerts.budgetThreshold !== null && alerts.budgetThreshold !== undefined;
 
   // Rollover settings
-  const rolloverSettings = getRolloverSettings();
+  const { getRolloverSettings } = await loadFeatureEventInterface();
+  const rolloverSettings = await getRolloverSettings() as { enabled: boolean; mode: string; negativeHandling: string; maxRollover?: number };
   if (rolloverEnabled) rolloverEnabled.checked = rolloverSettings.enabled;
   if (rolloverMode) rolloverMode.value = rolloverSettings.mode;
   if (negativeHandling) negativeHandling.value = rolloverSettings.negativeHandling;
   if (maxRollover) maxRollover.value = rolloverSettings.maxRollover?.toString() || '';
+
+  // Update visibility of rollover options
+  const rolloverOptions = DOM.get('rollover-options');
+  if (rolloverOptions) {
+    rolloverOptions.classList.toggle('hidden', !rolloverSettings.enabled);
+  }
 
   renderCustomCatsListFn?.();
   openModal('settings-modal');
@@ -175,7 +207,7 @@ function setupDeleteModal(): void {
               const undoResult = await dataSdk.create(backup);
               if (!undoResult.isOk) showToast('Undo failed', 'error');
             } catch (e) {
-              console.error('Undo failed:', e);
+              if (import.meta.env.DEV) console.error('Undo failed:', e);
               showToast('Undo failed', 'error');
             }
           });
@@ -184,7 +216,7 @@ function setupDeleteModal(): void {
             btn.textContent = 'Delete';
             btn.disabled = false;
           }
-          console.error('Delete failed:', e);
+          if (import.meta.env.DEV) console.error('Delete failed:', e);
           showToast('Failed to delete transaction', 'error');
           return;
         }
@@ -276,10 +308,19 @@ function setupSavingsGoalModals(): void {
       nameEl?.focus();
       hasError = true;
     }
-    if (amt < 5) {
+    if (amt <= 0) {
       if (amtEl) amtEl.style.borderColor = 'var(--color-expense)';
       if (amtErr) {
-        amtErr.textContent = amt > 0 && amt < 5 ? 'Target amount must be at least $5.00' : 'Please enter a valid amount';
+        amtErr.textContent = 'Please enter a valid amount';
+        amtErr.classList.remove('hidden');
+      }
+      if (!hasError) amtEl?.focus();
+      hasError = true;
+    }
+    if (amt > 0 && amt < 5) {
+      if (amtEl) amtEl.style.borderColor = 'var(--color-expense)';
+      if (amtErr) {
+        amtErr.textContent = `Target amount must be at least ${fmtCurFn(5)}`;
         amtErr.classList.remove('hidden');
       }
       if (!hasError) amtEl?.focus();
@@ -297,11 +338,9 @@ function setupSavingsGoalModals(): void {
 
     if (hasError) return;
 
-    const savingsGoals = signals.savingsGoals.value as unknown as Record<string, LegacySavingsGoal>;
-    savingsGoals[`sg_${generateId()}`] = { name, target_amount: amt, saved_amount: 0, deadline };
-    persist(SK.SAVINGS, signals.savingsGoals.value);
-    renderSavingsGoalsFn?.();
-    updateSummaryFn?.();
+    savingsActions.addGoal({ name, target_amount: amt, deadline });
+    
+    // UI updates are handled automatically via signal effects
     closeModal('savings-goal-modal');
     showToast('Savings goal created');
   });
@@ -312,7 +351,7 @@ function setupSavingsGoalModals(): void {
     modal.clearAddSavingsGoalId();
   });
 
-  DOM.get('confirm-add-savings')?.addEventListener('click', () => {
+  DOM.get('confirm-add-savings')?.addEventListener('click', async () => {
     const amtEl = DOM.get('add-savings-amount') as HTMLInputElement | null;
     const amtErr = DOM.get('add-savings-amount-error');
     const amt = parseAmount(amtEl?.value || '');
@@ -337,20 +376,18 @@ function setupSavingsGoalModals(): void {
       return;
     }
 
-    const savingsGoals = signals.savingsGoals.value as unknown as Record<string, LegacySavingsGoal>;
     const goalId = signals.addSavingsGoalId.value;
-    if (goalId && savingsGoals[goalId]) {
-      savingsGoals[goalId].saved_amount = (savingsGoals[goalId].saved_amount || 0) + amt;
-      persist(SK.SAVINGS, signals.savingsGoals.value);
-      // Track contribution with date for balance calculations
-      const contribs = [...signals.savingsContribs.value];
-      contribs.push({ id: generateId(), date: getTodayStr(), goalId, amount: amt });
-      signals.savingsContribs.value = contribs;
-      persist(SK.SAVINGS_CONTRIB, signals.savingsContribs.value);
-      renderSavingsGoalsFn?.();
-      updateSummaryFn?.();
-      checkAchievements();
-      showToast('Contribution added');
+    if (goalId) {
+      const goalName = signals.savingsGoals.value[goalId]?.name || 'Savings goal';
+      const success = await savingsActions.addContribution(goalId, amt);
+      if (success) {
+        void loadFeatureEventInterface().then(({ checkAchievements }) => {
+          checkAchievements();
+        });
+        showToast(`Added ${fmtCurFn(amt)} to ${goalName}`);
+      } else {
+        showToast('Failed to add contribution', 'error');
+      }
     }
     closeModal('add-savings-modal');
     modal.clearAddSavingsGoalId();
@@ -367,13 +404,28 @@ function setupSavingsGoalModals(): void {
 function setupSettingsModal(): void {
   DOM.get('open-settings')?.addEventListener('click', openSettingsModal);
 
-  // Cancel without saving - just close the modal
+  // Toggle rollover options visibility
+  DOM.get('rollover-enabled')?.addEventListener('change', (e) => {
+    const target = e.target as HTMLInputElement;
+    const options = DOM.get('rollover-options');
+    if (options) {
+      options.classList.toggle('hidden', !target.checked);
+    }
+  });
+
+  // Clear PIN handler is in pin-ui-handlers.ts — no duplicate here
+
+  // Cancel without saving - revert theme if changed, then close
   DOM.get('cancel-settings')?.addEventListener('click', () => {
+    // Revert theme if it was changed during this settings session
+    if (_themeOnOpen && signals.theme.value !== _themeOnOpen) {
+      signals.theme.value = _themeOnOpen as any;
+    }
     closeModal('settings-modal');
   });
 
   // Save settings and close
-  DOM.get('close-settings')?.addEventListener('click', () => {
+  DOM.get('close-settings')?.addEventListener('click', async () => {
     const showEnvelope = DOM.get('show-envelope') as HTMLInputElement | null;
     const settingsCurrency = DOM.get('settings-currency') as HTMLSelectElement | null;
     const insightPersonality = DOM.get('insight-personality') as HTMLSelectElement | null;
@@ -407,6 +459,13 @@ function setupSettingsModal(): void {
     }
 
     // Save rollover settings
+    const {
+      setRolloverEnabled,
+      setRolloverMode,
+      setNegativeHandling,
+      setMaxRollover
+    } = await loadRolloverModule();
+
     setRolloverEnabled(rolloverEnabledEl?.checked || false);
     setRolloverMode((rolloverModeEl?.value || 'all') as RolloverMode);
     setNegativeHandling((negativeHandlingEl?.value || 'zero') as NegativeHandling);
@@ -422,7 +481,11 @@ function setupSettingsModal(): void {
   DOM.get('restart-onboarding')?.addEventListener('click', () => {
     lsSet(SK.ONBOARD, { completed: false, step: 0 });
     closeModal('settings-modal');
-    setTimeout(() => startOnboarding(), 300);
+    setTimeout(() => {
+      void loadFeatureEventInterface().then(({ startOnboarding }) => {
+        startOnboarding();
+      });
+    }, 300);
   });
 }
 
@@ -434,45 +497,24 @@ function setupSettingsModal(): void {
  * Set up analytics modal handlers
  */
 function setupAnalyticsModal(): void {
-  function openAnalyticsModalHandler(): void {
-    setAnalyticsCurrentPeriod('all-time');
-    openModal('analytics-modal');
-    setTimeout(() => renderAnalytics(), CONFIG.TIMING.UI_DELAY);
+  async function renderAnalyticsModalNow(): Promise<void> {
+    const { renderAnalyticsModal } = await loadAnalyticsModule();
+    renderAnalyticsModal();
   }
 
-  DOM.get('open-analytics')?.addEventListener('click', openAnalyticsModalHandler);
+  async function openAnalyticsModalHandler(): Promise<void> {
+    const { setAnalyticsCurrentPeriod } = await loadAnalyticsModule();
+    setAnalyticsCurrentPeriod('all-time');
+    openModal('analytics-modal');
+    setTimeout(() => {
+      void renderAnalyticsModalNow();
+    }, CONFIG.TIMING.UI_DELAY);
+  }
+
+  DOM.get('open-analytics')?.addEventListener('click', () => {
+    void openAnalyticsModalHandler();
+  });
   DOM.get('close-analytics')?.addEventListener('click', () => closeModal('analytics-modal'));
-
-  // Year-over-Year selectors
-  DOM.get('yoy-year1')?.addEventListener('change', () => {
-    const y1El = DOM.get('yoy-year1') as HTMLSelectElement | null;
-    const y2El = DOM.get('yoy-year2') as HTMLSelectElement | null;
-    const y1 = y1El?.value;
-    const y2 = y2El?.value;
-    if (y1 && y2) {
-      renderYearComparisonChart('yoy-comparison-chart', y1, y2);
-      renderYearOverYearComparison(y1, y2);
-    }
-  });
-
-  DOM.get('yoy-year2')?.addEventListener('change', () => {
-    const y1El = DOM.get('yoy-year1') as HTMLSelectElement | null;
-    const y2El = DOM.get('yoy-year2') as HTMLSelectElement | null;
-    const y1 = y1El?.value;
-    const y2 = y2El?.value;
-    if (y1 && y2) {
-      renderYearComparisonChart('yoy-comparison-chart', y1, y2);
-      renderYearOverYearComparison(y1, y2);
-    }
-  });
-
-  // Category trend period selector
-  DOM.get('trend-period-select')?.addEventListener('change', (e: Event) => {
-    const target = e.target as HTMLSelectElement;
-    const months = parseInt(target.value);
-    renderCategoryTrendsChart('category-trends-chart', months);
-    updateTrendingSummary('category-trends-chart', months);
-  });
 }
 
 // ==========================================
@@ -484,7 +526,11 @@ function setupAnalyticsModal(): void {
  */
 function setupThemeButtons(): void {
   document.querySelectorAll<HTMLButtonElement>('.theme-btn').forEach(btn => {
-    btn.addEventListener('click', () => setTheme((btn.dataset.theme || 'system') as Theme));
+    btn.addEventListener('click', () => {
+      void loadFeatureEventInterface().then(({ setTheme }) => {
+        setTheme((btn.dataset.theme || 'system') as Theme);
+      });
+    });
   });
 }
 
@@ -495,12 +541,17 @@ function setupAlertAndCelebration(): void {
   DOM.get('dismiss-alert')?.addEventListener('click', () => {
     const alertText = DOM.get('alert-text');
     const txt = alertText?.textContent || '';
-    dismissAlert(txt);
+    void loadFeatureEventInterface().then(({ dismissAlert }) => {
+      dismissAlert(txt);
+    });
   });
 
-  DOM.get('celebration-close')?.addEventListener('click', () => {
+  const closeCelebration = (): void => {
     closeModal('celebration-overlay');
-  });
+  };
+
+  DOM.get('celebration-close')?.addEventListener('click', closeCelebration);
+  DOM.get('close-celebration')?.addEventListener('click', closeCelebration);
 }
 
 // ==========================================
@@ -511,15 +562,79 @@ function setupAlertAndCelebration(): void {
  * Set up sample data handlers
  */
 function setupSampleData(): void {
-  DOM.get('load-sample-data')?.addEventListener('click', () => {
-    loadSampleDataFn?.();
+  DOM.get('load-sample-data')?.addEventListener('click', async () => {
+    const loaded = await Promise.resolve(loadSampleDataFn?.() ?? false);
+    if (!loaded) return;
+
+    closeModal('settings-modal');
+    const { switchMainTab } = await import('../core/ui-navigation.js');
+    switchMainTab('dashboard');
   });
 
-  DOM.get('clear-all-data')?.addEventListener('click', () => {
-    if (confirm('Clear ALL data? This cannot be undone.')) {
-      Object.values(SK).forEach(k => localStorage.removeItem(k as string));
-      localStorage.removeItem('budget_tracker_active_tab');
-      location.reload();
+  const runReset = async (clearBackups: boolean): Promise<void> => {
+    const keepBtn = DOM.get('confirm-reset-keep-backups') as HTMLButtonElement | null;
+    const clearBtn = DOM.get('confirm-reset-clear-backups') as HTMLButtonElement | null;
+    const cancelBtn = DOM.get('cancel-reset-app-data') as HTMLButtonElement | null;
+    const buttons = [keepBtn, clearBtn, cancelBtn].filter(Boolean) as HTMLButtonElement[];
+    const originalTexts = buttons.map((btn) => btn.textContent || '');
+
+    buttons.forEach((btn) => {
+      btn.disabled = true;
+    });
+    if (clearBtn) clearBtn.textContent = clearBackups ? 'Clearing...' : originalTexts[1] || clearBtn.textContent || '';
+    if (keepBtn) keepBtn.textContent = clearBackups ? originalTexts[0] || keepBtn.textContent || '' : 'Clearing...';
+
+    try {
+      const { resetAppData } = await loadAppResetModule();
+      const result = await resetAppData({ clearBackups });
+
+      if (!result.ok) {
+        showToast('Reset failed. Please try again.', 'error');
+        return;
+      }
+
+      closeModal('reset-app-data-modal');
+      closeModal('settings-modal');
+
+      const { switchMainTab, switchTab } = await import('../core/ui-navigation.js');
+      switchMainTab('dashboard');
+      switchTab('expense');
+
+      await Promise.resolve(resetFormFn?.());
+      const { renderTransactionsList } = await import('../../data/transaction-renderer.js');
+      await renderTransactionsList(true);
+      refreshAllFn?.();
+      renderCustomCatsListFn?.();
+      updateSummaryFn?.();
+
+      showToast(
+        clearBackups ? 'App data and backups cleared' : 'App data cleared. Stored backups were kept.',
+        'success'
+      );
+    } catch (error) {
+      if (import.meta.env.DEV) console.warn('Failed to reset app data:', error);
+      showToast('Reset failed. Please try again.', 'error');
+    } finally {
+      buttons.forEach((btn, index) => {
+        btn.disabled = false;
+        btn.textContent = originalTexts[index];
+      });
     }
+  };
+
+  DOM.get('clear-all-data')?.addEventListener('click', () => {
+    openModal('reset-app-data-modal');
+  });
+
+  DOM.get('cancel-reset-app-data')?.addEventListener('click', () => {
+    closeModal('reset-app-data-modal');
+  });
+
+  DOM.get('confirm-reset-keep-backups')?.addEventListener('click', () => {
+    void runReset(false);
+  });
+
+  DOM.get('confirm-reset-clear-backups')?.addEventListener('click', () => {
+    void runReset(true);
   });
 }

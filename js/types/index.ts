@@ -50,6 +50,7 @@ export interface DebtPayment {
   principal: number;
   interest: number;
   transactionId: string;
+  description?: string;
 }
 
 export interface Debt {
@@ -64,16 +65,6 @@ export interface Debt {
   createdAt: string;
   payments: DebtPayment[];
   isActive: boolean;
-}
-
-// Simplified Debt for backwards compatibility
-export interface DebtSimple {
-  id: string;
-  name: string;
-  balance: number;
-  rate: number; // APR as percentage
-  minPayment: number;
-  dueDay?: number;
 }
 
 export interface PayoffInfo {
@@ -100,6 +91,8 @@ export interface PayoffScheduleEntry {
   month: number;
   totalBalance: number;
   interest: number;
+  availableExtra?: number;
+  releasedThisMonth?: number;
 }
 
 export interface PayoffStrategyResult {
@@ -107,6 +100,8 @@ export interface PayoffStrategyResult {
   totalInterest: number;
   order: DebtPayoffOrder[];
   schedule: PayoffScheduleEntry[];
+  totalReleased?: number;
+  paymentAcceleration?: number;
 }
 
 export interface StrategyComparison {
@@ -115,6 +110,11 @@ export interface StrategyComparison {
   interestSaved: number;
   timeDiff: number;
   recommended: 'avalanche' | 'snowball';
+  rolloverImpact?: {
+    snowballAcceleration: number;
+    avalancheAcceleration: number;
+    accelerationDifference: number;
+  };
 }
 
 export interface DebtProgress {
@@ -163,7 +163,31 @@ export interface SavingsContribution {
   amount: number;
   date: string;
   note?: string;
+  transactionId?: string;
 }
+
+// Legacy savings goal structure (from state)
+export interface LegacySavingsGoal {
+  name: string;
+  target_amount: number;
+  saved_amount: number;
+  deadline?: string;
+}
+
+// Goal forecast types
+export interface GoalForecastComplete {
+  completed: true;
+}
+
+export interface GoalForecastInProgress {
+  completed: false;
+  projectedDate: Date;
+  daysToComplete: number;
+  dailyRate: number;
+  onTrack: boolean | null;
+}
+
+export type GoalForecast = GoalForecastComplete | GoalForecastInProgress;
 
 // ==========================================
 // BUDGET ALLOCATION
@@ -238,7 +262,11 @@ export interface CustomCategory {
 // FILTER PRESET
 // ==========================================
 
-export interface FilterState {
+/**
+ * @deprecated Use FilterState from signals.ts instead.
+ * Kept for backward compatibility with filter presets stored in localStorage.
+ */
+export interface LegacyFilterState {
   type: string;
   category: string;
   search: string;
@@ -255,7 +283,7 @@ export interface FilterState {
 export interface FilterPreset {
   id: string;
   name: string;
-  filters: FilterState;
+  filters: LegacyFilterState;
 }
 
 // ==========================================
@@ -269,6 +297,15 @@ export interface TxTemplate {
   category: string;
   amount?: number;
   description?: string;
+  // Extended fields for full template support
+  tags?: string;
+  recurring?: boolean;
+  recurringType?: 'daily' | 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'yearly';
+  recurringEnd?: string;
+  // Future extensibility
+  merchant?: string;
+  location?: string;
+  notes?: string;
 }
 
 // ==========================================
@@ -356,6 +393,13 @@ export interface StorageKeys {
   FILTER_EXPANDED: string;
   ROLLOVER_SETTINGS: string;
   DEBTS: string;
+  BUDGET_PLANS: string;
+  ATTACHMENTS: string;
+  USER_SETTINGS: string;
+  SYNC_STATE: string;
+  RECURRING: string;
+  APP_STATS: string;
+  HAS_ONBOARDED: string;
 }
 
 // ==========================================
@@ -535,15 +579,17 @@ export interface MonthSummary {
 // ==========================================
 
 export interface TransactionFilters {
+  /** Search query text */
   search?: string;
+  /** @deprecated Use search instead */
   searchQuery?: string;
   type?: TransactionType | 'all';
   category?: string;
   dateFrom?: string;
   dateTo?: string;
-  amountMin?: number | string;
-  amountMax?: number | string;
+  /** Minimum amount filter */
   minAmount?: number | string;
+  /** Maximum amount filter */
   maxAmount?: number | string;
   tags?: string[] | string;
   reconciled?: boolean | 'all' | 'yes' | 'no';
@@ -681,6 +727,7 @@ export interface Totals {
   income: number;
   expenses: number;
   balance: number;
+  categoryTotals?: Record<string, number>;
 }
 
 export interface VelocityData {
@@ -848,10 +895,7 @@ export interface SwipeConfig {
   resistance: number;
 }
 
-export interface SwipeCallbacks {
-  onSwipeLeft?: (element: HTMLElement) => void;
-  onSwipeRight?: (element: HTMLElement) => void;
-}
+// SwipeCallbacks is declared above (line ~613) — not duplicated here
 
 // ==========================================
 // UI TIMING TYPES
@@ -874,6 +918,8 @@ export interface EmptyStateAction {
   id: string;
   label: string;
 }
+
+export type CurrencyFormatter = (value: number) => string;
 
 // ==========================================
 // PHASE E: FEATURE MODULE TYPES
@@ -957,8 +1003,8 @@ export interface TransactionRenderOptions {
   preserveScroll?: boolean;
 }
 
-// Savings goal forecast
-export interface GoalForecast {
+// Savings goal forecast data (different from internal GoalForecast)
+export interface SavingsGoalForecastData {
   goalId: string;
   currentAmount: number;
   targetAmount: number;
@@ -995,29 +1041,33 @@ export interface SeasonalMonthData {
   total: number;
 }
 
+export type Season = 'winter' | 'spring' | 'summer' | 'autumn';
+
+export interface SeasonalCategoryEntry {
+  category: CategoryChild;
+  amount: number;
+  percentage: number;
+}
+
 export interface SeasonalPattern {
-  month: number;
-  monthLabel: string;
-  monthShort: string;
-  average: number;
-  min: number;
-  max: number;
-  dataPoints: number;
-  variance: number;
-  deviationPct: number;
+  season: Season;
+  totalSpent: number;
+  averageTransaction: number;
+  transactionCount: number;
+  topCategories: SeasonalCategoryEntry[];
 }
 
 export interface SeasonalInsight {
-  type: 'high' | 'low';
-  month: string;
+  type: string;
+  season: string;
   message: string;
+  amount: number;
+  comparison?: number;
+  category?: string;
 }
 
 export interface SeasonalPatternData {
   patterns: SeasonalPattern[];
-  yearlyAverage: number;
-  highSpendingMonths: SeasonalPattern[];
-  lowSpendingMonths: SeasonalPattern[];
   insights: SeasonalInsight[];
 }
 
@@ -1027,25 +1077,30 @@ export interface CategoryMonthData {
   amount: number;
 }
 
-export interface CategoryTrendData extends CategoryChild {
+export interface CategoryTrendDirection {
+  direction: 'increasing' | 'decreasing' | 'stable';
+  slope: number;
+  strength: number;
+}
+
+export interface CategoryTrendData {
+  category: CategoryChild;
   monthlyData: CategoryMonthData[];
-  rollingAvg: number[];
   totalSpend: number;
-  avgMonthly: number;
-  trendPct: number;
-  trendDirection: 'growing' | 'shrinking' | 'stable';
+  trend: CategoryTrendDirection;
+  averageMonthly: number;
+  recentAverage: number;
+  percentageChange: number;
 }
 
 export interface CategoryTrendsResult {
-  months: string[];
-  categories: Record<string, CategoryTrendData>;
-  sorted: CategoryTrendData[];
+  trends: CategoryTrendData[];
+  periodMonths: number;
 }
 
 export interface TrendingCategoriesResult {
-  growing: CategoryTrendData[];
-  shrinking: CategoryTrendData[];
-  stable: CategoryTrendData[];
+  increasing: CategoryTrendData[];
+  decreasing: CategoryTrendData[];
 }
 
 export interface CategoryTrendChange {
@@ -1054,7 +1109,6 @@ export interface CategoryTrendChange {
 }
 
 // Chart renderers - Callback types
-export type CurrencyFormatter = (value: number) => string;
 export type ShortCurrencyFormatter = (value: number) => string;
 export type MonthLabelFormatter = (monthKey: string) => string;
 export type VelocityCalculator = () => VelocityData;
@@ -1090,10 +1144,13 @@ export interface BarChartDataset {
 export interface WeekData {
   start: number;
   end: number;
-  total: number;
+  totalCents: number;
   txCount: number;
-  categories: Record<string, number>;
+  categoriesCents: Record<string, number>;
   topCategories?: { cat: string; amt: number }[];
+  // Legacy getters for backward compatibility
+  get total(): number;
+  get categories(): Record<string, number>;
 }
 
 // Insights types
@@ -1184,7 +1241,7 @@ export interface PinCreationResult {
 // ==========================================
 
 // Worker message types
-export type WorkerMessageType = 'filter' | 'aggregate' | 'search';
+export type WorkerMessageType = 'filter' | 'aggregate' | 'search' | 'init' | 'update';
 
 // Sort options for worker
 export type WorkerSortField = 'date' | 'amount' | 'description' | 'category';
@@ -1233,7 +1290,7 @@ export type WorkerPayload = WorkerFilterPayload | WorkerAggregatePayload | Worke
 export interface WorkerMessage {
   type: WorkerMessageType;
   payload: WorkerPayload;
-  requestId: string;
+  requestId: number;
 }
 
 // Aggregation result
@@ -1263,7 +1320,7 @@ export interface WorkerFilterResult extends WorkerPaginatedResult<Transaction> {
 
 // Worker response
 export interface WorkerResponse<T = unknown> {
-  requestId: string;
+  requestId: number;
   success: boolean;
   result?: T;
   error?: string;

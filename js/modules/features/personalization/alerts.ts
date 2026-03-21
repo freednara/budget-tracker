@@ -1,70 +1,92 @@
 /**
  * Budget Alerts Module
- *
- * Checks budget thresholds and displays alert banners.
- *
- * @module alerts
+ * 
+ * Reactive budget threshold monitoring and alert banner.
  */
 'use strict';
 
-import { dismissedAlerts } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
-import { getMonthExpByCat } from '../financial/calculations.js';
-import { getCatInfo } from '../../core/categories.js';
+import { on } from '../../core/event-bus.js';
+import { FeatureEvents } from '../../core/feature-event-interface.js';
 import DOM from '../../core/dom-cache.js';
+import { html, render } from '../../core/lit-helpers.js';
+import { effect } from '@preact/signals-core';
+
+// ==========================================
+// ACTIONS
+// ==========================================
 
 /**
- * Check all budget categories for threshold alerts
- * Shows banner if any category exceeds the user's alert threshold
- */
-export function checkAlerts(): void {
-  const alerts: string[] = [];
-  const alloc = signals.monthlyAlloc.value[signals.currentMonth.value] || {};
-
-  Object.entries(alloc).forEach(([catId, amt]) => {
-    // Skip zero/negative/NaN allocations
-    if (!(amt > 0)) return;
-
-    const spent = getMonthExpByCat(catId, signals.currentMonth.value);
-
-    // Check if spending exceeds user's threshold
-    if (signals.alerts.value.budgetThreshold !== null && spent >= amt * signals.alerts.value.budgetThreshold) {
-      const cat = getCatInfo('expense', catId);
-      alerts.push(`${cat.emoji} ${cat.name}: ${Math.round(spent / amt * 100)}% spent`);
-    }
-  });
-
-  const banner = DOM.get('alert-banner');
-  if (!banner) return;
-
-  // Filter out dismissed alerts (scoped to current month)
-  const visible = alerts.filter(a => !dismissedAlerts.has(`${signals.currentMonth.value}:${a}`));
-
-  if (visible.length) {
-    banner.classList.remove('hidden');
-    const textEl = DOM.get('alert-text');
-    if (textEl) {
-      textEl.textContent = visible[0] + (visible.length > 1 ? ` (+${visible.length - 1} more)` : '');
-    }
-  } else {
-    banner.classList.add('hidden');
-  }
-}
-
-/**
- * Dismiss an alert (won't show again this session)
+ * Dismiss an alert (won't show again this month)
  */
 export function dismissAlert(alertText: string): void {
   // Remove the "(+X more)" suffix if present
   const cleanText = alertText.replace(/ \(\+\d+ more\)$/, '');
-  // Scope dismissal to current month so alerts reappear in new months
-  dismissedAlerts.add(`${signals.currentMonth.value}:${cleanText}`);
-  checkAlerts(); // Re-check to update banner
+  const mk = signals.currentMonth.value;
+  
+  // Update signal to trigger re-render
+  const nextDismissed = new Set(signals.dismissedAlerts.value);
+  nextDismissed.add(`${mk}:${cleanText}`);
+  signals.dismissedAlerts.value = nextDismissed;
+}
+
+// ==========================================
+// RENDERER
+// ==========================================
+
+/**
+ * Mount the reactive alert banner component
+ */
+export function mountAlertBanner(): () => void {
+  const container = DOM.get('alert-banner');
+  if (!container) return () => {};
+
+  const cleanup = effect(() => {
+    const alerts = signals.activeAlerts.value;
+    
+    if (alerts.length === 0) {
+      render(html``, container);
+      return;
+    }
+
+    const firstAlert = alerts[0];
+    const moreCount = alerts.length - 1;
+    const displayText = firstAlert + (moreCount > 0 ? ` (+${moreCount} more)` : '');
+
+    render(html`
+      <div id="alert-banner" class="bg-expense/10 border-b border-expense/20 p-2 text-center flex items-center justify-center gap-3">
+        <span class="text-sm font-bold text-expense flex items-center gap-2">
+          <span class="text-lg">⚠️</span>
+          <span id="alert-text">${displayText}</span>
+        </span>
+        <button @click=${() => dismissAlert(firstAlert)}
+                class="text-xs font-black uppercase tracking-tighter hover:opacity-70 transition-opacity text-secondary">
+          Dismiss
+        </button>
+      </div>
+    `, container);
+  });
+
+  return cleanup;
+}
+
+// ==========================================
+// INITIALIZATION
+// ==========================================
+
+/**
+ * Initialize alert handlers
+ */
+export function initAlerts(): void {
+  // Register Feature Event Listener for external control
+  on(FeatureEvents.DISMISS_ALERT, (data: { id: string }) => {
+    dismissAlert(data.id);
+  });
 }
 
 /**
- * Initialize alerts - check on page load
+ * Legacy support for checkAlerts (now reactive)
  */
-export function initAlerts(): void {
-  checkAlerts();
+export function checkAlerts(): void {
+  // Logic is now automatic via signals.activeAlerts and mountAlertBanner
 }

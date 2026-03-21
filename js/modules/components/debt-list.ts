@@ -13,6 +13,7 @@ import * as signals from '../core/signals.js';
 import { html, render, repeat, styleMap } from '../core/lit-helpers.js';
 import { fmtCur, toCents, toDollars } from '../core/utils.js';
 import { getDebtProgress, DEBT_TYPE_INFO } from '../features/financial/debt-planner.js';
+import { openModal } from '../ui/core/ui.js';
 import DOM from '../core/dom-cache.js';
 import type { Debt, DebtType, DebtTypeInfo } from '../../types/index.js';
 
@@ -24,7 +25,8 @@ import type { Debt, DebtType, DebtTypeInfo } from '../../types/index.js';
  * Active debts computed from debts signal
  */
 const activeDebts = computed((): Debt[] => {
-  return (signals.debts.value as Debt[]).filter(d => d.isActive);
+  // Use !== false to include legacy debts that don't have the isActive field (undefined)
+  return (signals.debts.value as Debt[]).filter(d => d.isActive !== false);
 });
 
 /**
@@ -78,9 +80,12 @@ export function mountDebtList(): () => void {
 
     if (items.length === 0) {
       render(html`
-        <div class="empty-state" style="padding: 2rem; text-align: center; color: var(--text-secondary);">
-          <p>No debts tracked yet.</p>
-          <p style="font-size: 0.875rem; margin-top: 0.5rem;">Add a debt to start planning your payoff strategy.</p>
+        <div class="budget-empty-panel budget-empty-panel--compact">
+          <div>
+            <p class="text-sm font-semibold mb-2" style="color: var(--text-primary);">No debts tracked yet</p>
+            <p class="text-xs mb-3" style="color: var(--text-tertiary);">Add a debt when you want payoff planning and monthly payment pressure in one place.</p>
+            <button class="btn btn-secondary budget-panel-btn budget-panel-btn--ghost text-xs" @click=${() => openModal('debt-modal')}>+ Add Debt</button>
+          </div>
         </div>
       `, container);
 
@@ -93,28 +98,30 @@ export function mountDebtList(): () => void {
 
     render(html`
       ${repeat(items, item => item.debt.id, item => html`
-        <div class="debt-item" data-debt-id=${item.debt.id} style="background: var(--surface); border-radius: 0.75rem; padding: 1rem; margin-bottom: 0.75rem;">
-          <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.75rem;">
-            <div>
-              <span style="font-size: 1.25rem; margin-right: 0.5rem;">${item.typeInfo.emoji}</span>
-              <strong>${item.debt.name}</strong>
-              <span style="color: var(--text-secondary); font-size: 0.875rem; margin-left: 0.5rem;">${item.typeInfo.label}</span>
+        <div class="debt-item" data-debt-id=${item.debt.id}>
+          <div class="debt-item__header">
+            <div class="debt-item__identity">
+              <span class="debt-item__emoji">${item.typeInfo.emoji}</span>
+              <div>
+                <strong class="debt-item__name">${item.debt.name}</strong>
+                <span class="debt-item__type">${item.typeInfo.label}</span>
+              </div>
             </div>
-            <div style="text-align: right;">
-              <div style="font-size: 1.25rem; font-weight: 600; color: var(--danger);">${fmtCur(item.debt.balance)}</div>
-              <div style="font-size: 0.75rem; color: var(--text-secondary);">${(item.debt.interestRate * 100).toFixed(2)}% APR</div>
+            <div class="debt-item__balance-block">
+              <div class="debt-item__balance">${fmtCur(item.debt.balance)}</div>
+              <div class="debt-item__apr">${(item.debt.interestRate * 100).toFixed(2)}% APR</div>
             </div>
           </div>
-          <div style="background: var(--background); border-radius: 0.5rem; height: 0.5rem; overflow: hidden; margin-bottom: 0.5rem;">
-            <div style=${styleMap({ background: 'var(--accent)', height: '100%', width: `${item.progress.percentComplete}%`, transition: 'width 0.3s' })}></div>
+          <div class="debt-item__progress">
+            <div class="debt-item__progress-fill" style=${styleMap({ width: `${item.progress.percentComplete}%` })}></div>
           </div>
-          <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-secondary);">
+          <div class="debt-item__stats">
             <span>${item.progress.percentComplete.toFixed(1)}% paid off</span>
             <span>Min payment: ${fmtCur(item.debt.minimumPayment)}/mo</span>
           </div>
-          <div style="display: flex; gap: 0.5rem; margin-top: 0.75rem;">
-            <button class="btn-secondary debt-edit-btn" style="flex: 1; padding: 0.5rem; font-size: 0.875rem;">Edit</button>
-            <button class="btn-primary debt-payment-btn" style="flex: 1; padding: 0.5rem; font-size: 0.875rem;">Make Payment</button>
+          <div class="debt-item-actions">
+            <button class="btn btn-secondary debt-edit-btn" style="font-size: 0.875rem;">Edit</button>
+            <button class="btn btn-primary debt-payment-btn" style="font-size: 0.875rem;">Make Payment</button>
           </div>
         </div>
       `)}

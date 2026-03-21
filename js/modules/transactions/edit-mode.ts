@@ -1,224 +1,206 @@
 /**
- * Edit Mode
- *
- * Handles transaction editing - start editing, cancel, and recurring preview.
- *
- * @module transactions/edit-mode
+ * Edit Mode Module
+ * 
+ * Reactive transaction editing logic using signals.
+ * Handles starting edits, canceling, and recurring transaction previews.
  */
 'use strict';
 
 import * as signals from '../core/signals.js';
 import { form, navigation } from '../core/state-actions.js';
+import {
+  syncFormWithSignals,
+  formAmount, formDescription, formDate, formTags,
+  formNotes, formRecurring, formRecurringType, formRecurringEnd
+} from './template-manager.js';
+import { getTodayStr, parseLocalDate } from '../core/utils.js';
 import DOM from '../core/dom-cache.js';
 import { html, render } from '../core/lit-helpers.js';
-import type { Transaction, TransactionType } from '../../types/index.js';
+import { effect } from '@preact/signals-core';
+import type { Transaction } from '../../types/index.js';
+import { revealTransactionsForm } from '../ui/core/ui-navigation.js';
 
 // ==========================================
-// TYPES
-// ==========================================
-
-export type SwitchTabCallback = (type: TransactionType) => void;
-export type GetTodayStrCallback = () => string;
-export type RenderCategoriesCallback = () => void;
-
-export interface EditModeConfig {
-  RECURRING_MAX_ENTRIES: number;
-}
-
-// ==========================================
-// CALLBACKS AND CONFIG
-// ==========================================
-
-// Callback for switchTab function
-let switchTabFn: SwitchTabCallback | null = null;
-
-// Callback for getTodayStr function
-let getTodayStrFn: GetTodayStrCallback = (): string => new Date().toISOString().split('T')[0];
-
-// Callback for rendering categories
-let renderCategoriesFn: RenderCategoriesCallback | null = null;
-
-// Configuration
-let editConfig: EditModeConfig = {
-  RECURRING_MAX_ENTRIES: 365
-};
-
-/**
- * Set the switchTab callback
- */
-export function setSwitchTabFn(fn: SwitchTabCallback): void {
-  switchTabFn = fn;
-}
-
-/**
- * Set the getTodayStr callback
- */
-export function setGetTodayStrFn(fn: GetTodayStrCallback): void {
-  getTodayStrFn = fn;
-}
-
-/**
- * Set the renderCategories callback
- */
-export function setEditRenderCategoriesFn(fn: RenderCategoriesCallback): void {
-  renderCategoriesFn = fn;
-}
-
-/**
- * Set edit mode configuration
- */
-export function setEditConfig(config: Partial<EditModeConfig>): void {
-  if (config.RECURRING_MAX_ENTRIES !== undefined) {
-    editConfig.RECURRING_MAX_ENTRIES = config.RECURRING_MAX_ENTRIES;
-  }
-}
-
-// ==========================================
-// EDIT MODE FUNCTIONS
+// ACTIONS
 // ==========================================
 
 /**
  * Start editing a transaction
  */
 export function startEditing(tx: Transaction): void {
-  form.setEditingId(tx.__backendId);
-
-  const amountEl = DOM.get('amount') as HTMLInputElement | null;
-  const descEl = DOM.get('description') as HTMLInputElement | null;
-  const dateEl = DOM.get('date') as HTMLInputElement | null;
-  const tagsEl = DOM.get('tags') as HTMLInputElement | null;
-  const notesEl = DOM.get('tx-notes') as HTMLTextAreaElement | null;
-  const recurringToggle = DOM.get('recurring-toggle') as HTMLInputElement | null;
-  const recurringSection = DOM.get('recurring-section');
-  const recurringTypeEl = DOM.get('recurring-type') as HTMLSelectElement | null;
-  const recurringEndEl = DOM.get('recurring-end') as HTMLInputElement | null;
-  const formTitle = DOM.get('form-title');
-  const submitBtn = DOM.get('submit-btn') as HTMLButtonElement | null;
-  const cancelBtn = DOM.get('cancel-edit-btn');
-  const formSection = DOM.get('form-section');
-
-  if (amountEl) amountEl.value = String(tx.amount);
-  if (descEl) descEl.value = tx.description || '';
-  if (dateEl) dateEl.value = tx.date;
-  if (tagsEl) tagsEl.value = tx.tags || '';
-  if (notesEl) notesEl.value = tx.notes || '';
+  // 1. Update signals (Single Source of Truth)
+  signals.isEditing.value = true;
+  signals.editingId.value = tx.__backendId;
+  signals.formTitle.value = '✏️ Edit Transaction';
+  signals.submitButtonText.value = 'UPDATE TRANSACTION';
+  
+  // 2. Map transaction data to form signals
+  formAmount.value = String(tx.amount);
+  formDescription.value = tx.description || '';
+  formDate.value = tx.date;
+  formTags.value = tx.tags || '';
+  formNotes.value = tx.notes || '';
   form.setSelectedCategory(tx.category);
-  // Set recurring toggle based on transaction
-  if (recurringToggle) recurringToggle.checked = tx.recurring === true;
-  if (recurringSection) recurringSection.classList.toggle('hidden', !tx.recurring);
-  if (switchTabFn) switchTabFn(tx.type);
-  navigation.setCurrentTab(tx.type);
-  form.setSelectedCategory(tx.category);
-  if (renderCategoriesFn) renderCategoriesFn();
+  
+  formRecurring.value = !!tx.recurring;
   if (tx.recurring) {
-    if (recurringTypeEl) recurringTypeEl.value = tx.recurring_type || 'monthly';
-    if (recurringEndEl) recurringEndEl.value = tx.recurring_end || '';
+    formRecurringType.value = tx.recurring_type || 'monthly';
+    formRecurringEnd.value = tx.recurring_end || '';
   }
-  if (formTitle) formTitle.textContent = '✏️ Edit Transaction';
-  if (submitBtn) {
-    submitBtn.textContent = 'UPDATE TRANSACTION';
-    submitBtn.style.background = 'linear-gradient(135deg, var(--color-accent), #1e40af)';
-  }
-  if (cancelBtn) cancelBtn.removeAttribute('hidden');
-  formSection?.scrollIntoView({ behavior: 'smooth' });
+
+  // 3. Update UI state
+  navigation.setCurrentTab(tx.type);
+  
+  // 4. Finalize
+  syncFormWithSignals();
+  revealTransactionsForm('amount', true);
 }
 
 /**
  * Cancel editing and reset the form
  */
 export function cancelEditing(): void {
-  form.clearEditingId();
+  // 1. Reset edit signals
+  signals.isEditing.value = false;
+  signals.editingId.value = null;
+  signals.formTitle.value = '➕ Add Transaction';
+  signals.submitButtonText.value = 'ADD TRANSACTION';
 
-  const formTitle = DOM.get('form-title');
-  const submitBtn = DOM.get('submit-btn') as HTMLButtonElement | null;
-  const cancelBtn = DOM.get('cancel-edit-btn');
-  const amountEl = DOM.get('amount') as HTMLInputElement | null;
-  const descEl = DOM.get('description') as HTMLInputElement | null;
-  const dateEl = DOM.get('date') as HTMLInputElement | null;
-  const tagsEl = DOM.get('tags') as HTMLInputElement | null;
-  const notesEl = DOM.get('tx-notes') as HTMLTextAreaElement | null;
-  const recurringTypeEl = DOM.get('recurring-type') as HTMLSelectElement | null;
-  const recurringEndEl = DOM.get('recurring-end') as HTMLInputElement | null;
-  const recurringToggle = DOM.get('recurring-toggle') as HTMLInputElement | null;
-  const recurringSection = DOM.get('recurring-section');
+  // 2. Reset form signals
+  formAmount.value = '';
+  formDescription.value = '';
+  formDate.value = getTodayStr();
+  formTags.value = '';
+  formNotes.value = '';
+  formRecurring.value = false;
+  formRecurringType.value = 'monthly';
+  formRecurringEnd.value = '';
+  
+  form.setSelectedCategory('');
 
-  if (formTitle) formTitle.textContent = '➕ Add Transaction';
-  if (submitBtn) {
-    submitBtn.textContent = 'ADD TRANSACTION';
-    submitBtn.style.background = 'linear-gradient(135deg, var(--color-income), var(--color-income-dark))';
-  }
-  if (cancelBtn) cancelBtn.setAttribute('hidden', '');
-  if (amountEl) amountEl.value = '';
-  if (descEl) descEl.value = '';
-  if (dateEl) dateEl.value = getTodayStrFn();
-  if (tagsEl) tagsEl.value = '';
-  if (notesEl) notesEl.value = '';
-  if (recurringTypeEl) recurringTypeEl.value = 'monthly';
-  if (recurringEndEl) recurringEndEl.value = '';
-  if (recurringToggle) recurringToggle.checked = false;
-  if (recurringSection) recurringSection.classList.add('hidden');
-  form.clearSelectedCategory();
-  if (switchTabFn) switchTabFn((signals.currentType.value || 'expense') as TransactionType);
+  // 3. Finalize
+  syncFormWithSignals();
 }
 
 /**
  * Update the recurring transaction preview
+ * WATCHES: formDate, formRecurringEnd, formRecurringType, formRecurring
  */
-export function updateRecurringPreview(): void {
-  const preview = DOM.get('recurring-preview');
-  const previewText = DOM.get('recurring-preview-text');
-  const previewWarning = DOM.get('recurring-preview-warning');
-  const dateEl = DOM.get('date') as HTMLInputElement | null;
-  const recurringEndEl = DOM.get('recurring-end') as HTMLInputElement | null;
-  const recurringTypeEl = DOM.get('recurring-type') as HTMLSelectElement | null;
+export function mountRecurringPreview(): () => void {
+  const container = DOM.get('recurring-preview');
+  if (!container) return () => {};
 
-  if (!preview || !previewText) return;
+  const cleanup = effect(() => {
+    const show = formRecurring.value;
+    const start = formDate.value;
+    const end = formRecurringEnd.value;
+    const type = formRecurringType.value;
 
-  const startDate = dateEl?.value || '';
-  const endDate = recurringEndEl?.value || '';
-  const recurringType = recurringTypeEl?.value || 'monthly';
-
-  if (!startDate || !endDate) {
-    preview.classList.add('hidden');
-    return;
-  }
-
-  const start = new Date(startDate);
-  const end = new Date(endDate);
-  if (end < start) {
-    previewText.textContent = 'End date cannot be before start date';
-    previewWarning?.classList.add('hidden');
-    preview.classList.remove('hidden');
-    return;
-  }
-
-  // Calculate number of occurrences
-  let count = 0;
-  const cur = new Date(start);
-  while (cur <= end && count < editConfig.RECURRING_MAX_ENTRIES) {
-    count++;
-    switch (recurringType) {
-      case 'daily': cur.setDate(cur.getDate() + 1); break;
-      case 'weekly': cur.setDate(cur.getDate() + 7); break;
-      case 'biweekly': cur.setDate(cur.getDate() + 14); break;
-      case 'monthly': cur.setMonth(cur.getMonth() + 1); break;
-      case 'quarterly': cur.setMonth(cur.getMonth() + 3); break;
-      case 'yearly': cur.setFullYear(cur.getFullYear() + 1); break;
+    if (!show || !start || !end) {
+      render(html``, container);
+      return;
     }
-  }
 
-  const startStr = start.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-  const endStr = end.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-  render(html`<strong>${count}</strong> transactions will be created<br>From ${startStr} to ${endStr}`, previewText);
+    // Calculate occurrences
+    const startDate = parseLocalDate(start);
+    const endDate = parseLocalDate(end);
+    let count = 0;
+    const MAX = 365;
 
-  if (count >= editConfig.RECURRING_MAX_ENTRIES) {
-    if (previewWarning) {
-      previewWarning.textContent = `⚠️ Capped at ${editConfig.RECURRING_MAX_ENTRIES} transactions`;
-      previewWarning.classList.remove('hidden');
+    if (endDate < startDate) {
+      render(html`
+        <div class="p-3 rounded-xl bg-expense/10 text-expense text-xs font-bold border border-expense/20">
+          ⚠️ End date cannot be before start date
+        </div>
+      `, container);
+      return;
     }
-  } else {
-    previewWarning?.classList.add('hidden');
-  }
 
-  preview.classList.remove('hidden');
+    let cur = new Date(startDate);
+    const originalDay = cur.getDate();
+    while (cur <= endDate && count < MAX) {
+      count++;
+      switch (type) {
+        case 'daily': cur.setDate(cur.getDate() + 1); break;
+        case 'weekly': cur.setDate(cur.getDate() + 7); break;
+        case 'biweekly': cur.setDate(cur.getDate() + 14); break;
+        case 'monthly': {
+          // Prevent day-of-month drift (e.g. Jan 31 → Mar 3)
+          const nextMonth = cur.getMonth() + 1;
+          const nextYear = cur.getFullYear() + (nextMonth > 11 ? 1 : 0);
+          const actualMonth = nextMonth % 12;
+          const maxDay = new Date(nextYear, actualMonth + 1, 0).getDate();
+          cur = new Date(nextYear, actualMonth, Math.min(originalDay, maxDay));
+          break;
+        }
+        case 'quarterly': {
+          const nextMonth = cur.getMonth() + 3;
+          const nextYear = cur.getFullYear() + Math.floor(nextMonth / 12);
+          const actualMonth = nextMonth % 12;
+          const maxDay = new Date(nextYear, actualMonth + 1, 0).getDate();
+          cur = new Date(nextYear, actualMonth, Math.min(originalDay, maxDay));
+          break;
+        }
+        case 'yearly': cur.setFullYear(cur.getFullYear() + 1); break;
+      }
+    }
+
+    render(html`
+      <div class="p-4 rounded-xl bg-income/10 border border-income/20">
+        <p class="text-xs font-bold text-primary mb-1">
+          <strong>${count}</strong> transactions will be created
+        </p>
+        <p class="text-[10px] text-tertiary">
+          From ${startDate.toLocaleDateString()} to ${endDate.toLocaleDateString()}
+        </p>
+        ${count >= MAX ? html`
+          <p class="text-[10px] text-expense font-black uppercase tracking-widest mt-2">
+            ⚠️ Capped at 365 entries
+          </p>
+        ` : ''}
+      </div>
+    `, container);
+  });
+
+  return cleanup;
+}
+
+// ==========================================
+// RENDERERS
+// ==========================================
+
+/**
+ * Mount all edit-mode UI elements
+ */
+export function mountEditUI(): () => void {
+  const titleEl = DOM.get('form-title');
+  const submitBtn = DOM.get('submit-btn');
+  const cancelBtn = DOM.get('cancel-edit-btn');
+
+  const cleanup = effect(() => {
+    const isEditing = signals.isEditing.value;
+    const title = signals.formTitle.value;
+    const btnText = signals.submitButtonText.value;
+
+    if (titleEl) titleEl.textContent = title;
+    if (submitBtn) {
+      submitBtn.textContent = btnText;
+      if (isEditing) {
+        submitBtn.style.background = 'linear-gradient(135deg, var(--color-accent), #1e40af)';
+      } else {
+        submitBtn.style.background = 'linear-gradient(135deg, var(--color-income), var(--color-income-dark))';
+      }
+    }
+    if (cancelBtn) {
+      if (isEditing) cancelBtn.removeAttribute('hidden');
+      else cancelBtn.setAttribute('hidden', '');
+    }
+  });
+
+  const previewCleanup = mountRecurringPreview();
+
+  return () => {
+    cleanup();
+    previewCleanup();
+  };
 }

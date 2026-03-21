@@ -42,11 +42,21 @@ let hiddenInput: HTMLInputElement | null = null;
 let tabsContainer: HTMLElement | null = null;
 let grid: HTMLElement | null = null;
 
+function refreshRefs(): void {
+  trigger = document.getElementById('emoji-picker-trigger');
+  dropdown = document.getElementById('emoji-picker-dropdown');
+  preview = document.getElementById('selected-emoji-preview');
+  hiddenInput = document.getElementById('custom-cat-emoji') as HTMLInputElement | null;
+  tabsContainer = document.getElementById('emoji-category-tabs');
+  grid = document.getElementById('emoji-grid');
+}
+
 // ==========================================
 // RENDERING
 // ==========================================
 
 function renderTabs(): void {
+  refreshRefs();
   if (!tabsContainer) return;
   const categories = Object.keys(EMOJI_PICKER_CATEGORIES);
   tabsContainer.innerHTML = categories.map(cat => {
@@ -59,6 +69,7 @@ function renderTabs(): void {
 }
 
 function renderGrid(): void {
+  refreshRefs();
   if (!grid) return;
   const emojis = EMOJI_PICKER_CATEGORIES[currentCategory] || [];
   grid.innerHTML = emojis.map(emoji =>
@@ -71,16 +82,18 @@ function renderGrid(): void {
 // ==========================================
 
 function handleTriggerClick(): void {
+  refreshRefs();
   if (!dropdown) return;
   const isOpen = !dropdown.classList.contains('hidden');
-  dropdown.classList.toggle('hidden');
-  if (!isOpen) {
-    renderTabs();
-    renderGrid();
+  if (isOpen) {
+    closeDropdown();
+  } else {
+    openDropdown();
   }
 }
 
 function handleTabClick(e: MouseEvent): void {
+  refreshRefs();
   const target = e.target as HTMLElement;
   const tab = target.closest('.emoji-tab') as HTMLElement | null;
   if (!tab) return;
@@ -90,21 +103,47 @@ function handleTabClick(e: MouseEvent): void {
 }
 
 function handleEmojiSelect(e: MouseEvent): void {
+  refreshRefs();
   const target = e.target as HTMLElement;
   const cell = target.closest('.emoji-cell') as HTMLElement | null;
   if (!cell) return;
   selectedEmoji = cell.dataset.emoji || '🎨';
   if (preview) preview.textContent = selectedEmoji;
   if (hiddenInput) hiddenInput.value = selectedEmoji;
-  if (dropdown) dropdown.classList.add('hidden');
+  closeDropdown();
   renderGrid();
 }
 
 function handleOutsideClick(e: MouseEvent): void {
+  refreshRefs();
   const target = e.target as HTMLElement;
   if (!target.closest('#emoji-picker-container') && dropdown) {
-    dropdown.classList.add('hidden');
+    closeDropdown();
   }
+}
+
+function handleKeydown(e: KeyboardEvent): void {
+  refreshRefs();
+  if (e.key === 'Escape' && dropdown && !dropdown.classList.contains('hidden')) {
+    closeDropdown();
+    trigger?.focus();
+  }
+}
+
+function closeDropdown(): void {
+  refreshRefs();
+  if (!dropdown) return;
+  dropdown.classList.add('hidden');
+  if (trigger) trigger.setAttribute('aria-expanded', 'false');
+}
+
+function openDropdown(): void {
+  refreshRefs();
+  if (!dropdown) return;
+  dropdown.classList.remove('hidden');
+  if (trigger) trigger.setAttribute('aria-expanded', 'true');
+  renderTabs();
+  renderGrid();
 }
 
 // ==========================================
@@ -116,9 +155,13 @@ function handleOutsideClick(e: MouseEvent): void {
  */
 export function resetEmojiPicker(): void {
   selectedEmoji = '🎨';
+  currentCategory = 'money';
+  closeDropdown();
+  refreshRefs();
   if (preview) preview.textContent = selectedEmoji;
   if (hiddenInput) hiddenInput.value = selectedEmoji;
-  currentCategory = 'money';
+  renderTabs();
+  renderGrid();
 }
 
 /**
@@ -126,8 +169,34 @@ export function resetEmojiPicker(): void {
  */
 export function setEmojiPickerValue(emoji: string): void {
   selectedEmoji = emoji;
+  currentCategory = Object.entries(EMOJI_PICKER_CATEGORIES).find(([, emojis]) => emojis.includes(emoji))?.[0] || 'money';
+  refreshRefs();
   if (preview) preview.textContent = emoji;
   if (hiddenInput) hiddenInput.value = emoji;
+  renderTabs();
+  renderGrid();
+}
+
+function handleDocumentClick(e: MouseEvent): void {
+  const target = e.target as HTMLElement | null;
+  if (!target) return;
+
+  if (target.closest('#emoji-picker-trigger')) {
+    handleTriggerClick();
+    return;
+  }
+
+  if (target.closest('.emoji-tab')) {
+    handleTabClick(e);
+    return;
+  }
+
+  if (target.closest('.emoji-cell')) {
+    handleEmojiSelect(e);
+    return;
+  }
+
+  handleOutsideClick(e);
 }
 
 // ==========================================
@@ -139,20 +208,16 @@ export function setEmojiPickerValue(emoji: string): void {
  */
 export function init(): void {
   if (isInitialized) return;
+  refreshRefs();
 
-  trigger = DOM.get('emoji-picker-trigger');
-  dropdown = DOM.get('emoji-picker-dropdown');
-  preview = DOM.get('selected-emoji-preview');
-  hiddenInput = DOM.get('custom-cat-emoji') as HTMLInputElement | null;
-  tabsContainer = DOM.get('emoji-category-tabs');
-  grid = DOM.get('emoji-grid');
+  // Set ARIA attributes
+  trigger?.setAttribute('aria-haspopup', 'listbox');
+  trigger?.setAttribute('aria-expanded', 'false');
+  dropdown?.setAttribute('role', 'listbox');
+  dropdown?.setAttribute('aria-label', 'Emoji picker');
 
-  if (!trigger || !dropdown) return;
-
-  trigger.addEventListener('click', handleTriggerClick);
-  if (tabsContainer) tabsContainer.addEventListener('click', handleTabClick);
-  if (grid) grid.addEventListener('click', handleEmojiSelect);
-  document.addEventListener('click', handleOutsideClick);
+  document.addEventListener('click', handleDocumentClick);
+  document.addEventListener('keydown', handleKeydown);
 
   // Expose global methods for backwards compatibility
   window.resetEmojiPicker = resetEmojiPicker;
@@ -163,11 +228,8 @@ export function init(): void {
 
 export function destroy(): void {
   if (!isInitialized) return;
-
-  if (trigger) trigger.removeEventListener('click', handleTriggerClick);
-  if (tabsContainer) tabsContainer.removeEventListener('click', handleTabClick);
-  if (grid) grid.removeEventListener('click', handleEmojiSelect);
-  document.removeEventListener('click', handleOutsideClick);
+  document.removeEventListener('click', handleDocumentClick);
+  document.removeEventListener('keydown', handleKeydown);
 
   delete window.resetEmojiPicker;
   delete window.setEmojiPickerValue;

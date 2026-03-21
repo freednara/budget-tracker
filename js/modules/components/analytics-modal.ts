@@ -27,11 +27,7 @@ export function renderAnalyticsModal(): TemplateResult {
         </div>
 
         <!-- Year Tabs -->
-        <div class="flex gap-2 mb-5 p-1 rounded-xl overflow-x-auto" style="background: var(--bg-tab);">
-          <button class="analytics-tab btn-primary flex-shrink-0 py-2 px-4 rounded-lg text-sm font-bold transition-all" data-period="all-time">All-Time</button>
-          <button class="analytics-tab btn-secondary flex-shrink-0 py-2 px-4 rounded-lg text-sm font-bold transition-all" data-period="2026">2026</button>
-          <button class="analytics-tab btn-secondary flex-shrink-0 py-2 px-4 rounded-lg text-sm font-bold transition-all" data-period="2025">2025</button>
-        </div>
+        <div id="analytics-period-tabs" class="flex gap-2 mb-5 p-1 rounded-xl overflow-x-auto" style="background: var(--bg-tab);"></div>
 
         <!-- Year Summary Card -->
         <div id="analytics-year-summary" class="mb-5 p-4 rounded-xl" style="background: var(--bg-card); border: 1px solid var(--border-card);">
@@ -43,7 +39,7 @@ export function renderAnalyticsModal(): TemplateResult {
 
         <!-- 12-Month Trend Chart -->
         <div id="analytics-trend-section" class="mb-5 p-4 rounded-xl" style="background: var(--bg-card); border: 1px solid var(--border-card);">
-          <h4 class="text-sm font-bold mb-3 text-secondary">📊 12-MONTH TREND</h4>
+          <h4 id="analytics-trend-title" class="text-sm font-bold mb-3 text-secondary">📊 12-MONTH TREND</h4>
           <div id="analytics-trend-chart" class="w-full" style="min-height: 200px;">
             <!-- Populated by JS -->
           </div>
@@ -67,7 +63,7 @@ export function renderAnalyticsModal(): TemplateResult {
 
         <!-- Seasonal Patterns -->
         <div id="analytics-seasonal-section" class="mb-5 p-4 rounded-xl" style="background: var(--bg-card); border: 1px solid var(--border-card);">
-          <h4 class="text-sm font-bold mb-3 text-secondary">📅 SEASONAL SPENDING PATTERNS</h4>
+          <h4 id="analytics-seasonal-title" class="text-sm font-bold mb-3 text-secondary">📅 SEASONAL SPENDING PATTERNS</h4>
           <div id="seasonal-pattern-chart" class="w-full" style="min-height: 260px;"></div>
           <div id="seasonal-insights" class="mt-4 space-y-2"></div>
         </div>
@@ -75,7 +71,7 @@ export function renderAnalyticsModal(): TemplateResult {
         <!-- Category Trends -->
         <div id="analytics-category-trends" class="mb-5 p-4 rounded-xl" style="background: var(--bg-card); border: 1px solid var(--border-card);">
           <div class="flex items-center justify-between mb-3">
-            <h4 class="text-sm font-bold text-secondary">📈 CATEGORY SPENDING TRENDS</h4>
+            <h4 id="analytics-category-title" class="text-sm font-bold text-secondary">📈 CATEGORY SPENDING TRENDS</h4>
             <select id="trend-period-select" class="px-2 py-1 rounded text-xs" style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
               <option value="6">6 months</option>
               <option value="12" selected>12 months</option>

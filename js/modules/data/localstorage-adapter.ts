@@ -9,7 +9,7 @@
  */
 
 import { StorageAdapter, STORES, SETTINGS_KEYS } from './storage-adapter.js';
-import { safeStorage } from '../core/error-handler.js';
+import { safeStorage } from '../core/safe-storage.js';
 import { SK } from '../core/state.js';
 import type {
   StorageResult,
@@ -79,6 +79,9 @@ const SETTINGS_KEY_MAP: Partial<Record<SettingKey, string>> = {
 
 export class LocalStorageAdapter extends StorageAdapter {
   private _cache: Map<string, unknown>;
+  private readonly LOCK_PREFIX = 'budget_tracker_lock_';
+  private readonly LOCK_TIMEOUT = 5000; // 5 seconds max lock duration
+  private readonly WEB_LOCK_PREFIX = 'budget_tracker_web_lock_';
 
   constructor() {
     super();
@@ -158,6 +161,38 @@ export class LocalStorageAdapter extends StorageAdapter {
   }
 
   async set(store: StoreName, key: string, value: unknown): Promise<boolean> {
+    // Use Web Locks API for cross-tab atomic operations
+    const lockName = `${this.LOCK_PREFIX}${store}`;
+
+    if ('locks' in navigator) {
+      // Use Web Locks API with AbortController timeout to prevent deadlocks
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.LOCK_TIMEOUT);
+      try {
+        return await navigator.locks.request(
+          lockName,
+          { mode: 'exclusive', signal: controller.signal },
+          async () => {
+            return await this._doSet(store, key, value);
+          }
+        );
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') {
+          if (import.meta.env.DEV) console.error(`Web Lock timed out for ${store}, operation aborted to prevent data races`);
+          return false;
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    } else {
+      // Fallback for browsers without Web Locks API
+      // At least use a local mutex to prevent same-tab races
+      return await this._doSet(store, key, value);
+    }
+  }
+
+  private async _doSet(store: StoreName, key: string, value: unknown): Promise<boolean> {
     try {
       if (store === STORES.SETTINGS) {
         // Settings are stored individually
@@ -197,12 +232,41 @@ export class LocalStorageAdapter extends StorageAdapter {
 
       return false;
     } catch (err) {
-      console.error(`LocalStorage set error for ${store}/${key}:`, err);
+      if (import.meta.env.DEV) console.error(`LocalStorage set error for ${store}/${key}:`, err);
       return false;
     }
   }
 
   async delete(store: StoreName, key: string): Promise<boolean> {
+    // Use Web Locks API for cross-tab atomic operations
+    const lockName = `${this.LOCK_PREFIX}${store}`;
+
+    if ('locks' in navigator) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.LOCK_TIMEOUT);
+      try {
+        return await navigator.locks.request(
+          lockName,
+          { mode: 'exclusive', signal: controller.signal },
+          async () => {
+            return await this._doDelete(store, key);
+          }
+        );
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') {
+          if (import.meta.env.DEV) console.error(`Web Lock timed out for delete on ${store}, operation aborted to prevent data races`);
+          return false;
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    } else {
+      return await this._doDelete(store, key);
+    }
+  }
+
+  private async _doDelete(store: StoreName, key: string): Promise<boolean> {
     try {
       if (store === STORES.SETTINGS) {
         localStorage.removeItem(this._getSettingsKey(key));
@@ -226,7 +290,7 @@ export class LocalStorageAdapter extends StorageAdapter {
 
       return false;
     } catch (err) {
-      console.error(`LocalStorage delete error for ${store}/${key}:`, err);
+      if (import.meta.env.DEV) console.error(`LocalStorage delete error for ${store}/${key}:`, err);
       return false;
     }
   }
@@ -257,7 +321,7 @@ export class LocalStorageAdapter extends StorageAdapter {
       localStorage.removeItem(storeKey);
       return true;
     } catch (err) {
-      console.error(`LocalStorage clear error for ${store}:`, err);
+      if (import.meta.env.DEV) console.error(`LocalStorage clear error for ${store}:`, err);
       return false;
     }
   }
@@ -290,10 +354,10 @@ export class LocalStorageAdapter extends StorageAdapter {
     let transactions = await this.getAll(STORES.TRANSACTIONS) as Transaction[];
     const countFilters = filters as CountFilters;
 
-    if (countFilters.type) {
+    if (countFilters.type && countFilters.type !== 'all') {
       transactions = transactions.filter(t => t.type === countFilters.type);
     }
-    if (countFilters.category) {
+    if (countFilters.category && countFilters.category !== 'all') {
       transactions = transactions.filter(t => t.category === countFilters.category);
     }
     if (countFilters.reconciled !== undefined) {
@@ -311,21 +375,107 @@ export class LocalStorageAdapter extends StorageAdapter {
   // ==========================================
 
   async createBatch(store: StoreName, items: unknown[]): Promise<boolean> {
+    // Use Web Locks API for cross-tab atomic batch operations
+    const lockName = `${this.LOCK_PREFIX}${store}`;
+
+    if ('locks' in navigator) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.LOCK_TIMEOUT);
+      try {
+        return await navigator.locks.request(
+          lockName,
+          { mode: 'exclusive', signal: controller.signal },
+          async () => {
+            return await this._doCreateBatch(store, items);
+          }
+        );
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') {
+          if (import.meta.env.DEV) console.error(`Web Lock timed out for createBatch on ${store}, operation aborted to prevent data races`);
+          return false;
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    } else {
+      return await this._doCreateBatch(store, items);
+    }
+  }
+
+  private async _doCreateBatch(store: StoreName, items: unknown[]): Promise<boolean> {
     try {
       const storeKey = this._getStoreKey(store);
       const existing = safeStorage.getJSON(storeKey, []) as unknown[];
       const combined = [...existing, ...items];
       return safeStorage.setJSON(storeKey, combined);
     } catch (err) {
-      console.error(`LocalStorage createBatch error for ${store}:`, err);
+      if (import.meta.env.DEV) console.error(`LocalStorage createBatch error for ${store}:`, err);
       return false;
     }
   }
 
   async updateBatch(store: StoreName, items: unknown[]): Promise<boolean> {
+    // Use Web Locks API for cross-tab atomic batch operations
+    const lockName = `${this.LOCK_PREFIX}${store}`;
+
+    if ('locks' in navigator) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.LOCK_TIMEOUT);
+      try {
+        return await navigator.locks.request(
+          lockName,
+          { mode: 'exclusive', signal: controller.signal },
+          async () => {
+            return await this._doUpdateBatch(store, items);
+          }
+        );
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') {
+          if (import.meta.env.DEV) console.error(`Web Lock timed out for updateBatch on ${store}, operation aborted to prevent data races`);
+          return false;
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    } else {
+      return await this._doUpdateBatch(store, items);
+    }
+  }
+
+  private async _doUpdateBatch(store: StoreName, items: unknown[]): Promise<boolean> {
     try {
       const storeKey = this._getStoreKey(store);
-      const existing = safeStorage.getJSON(storeKey, []) as Record<string, unknown>[];
+      const existing = safeStorage.getJSON(storeKey, []);
+
+      // If existing data is not an array (e.g., object-shaped stores like SAVINGS_GOALS),
+      // merge items as object properties or replace entirely
+      if (!Array.isArray(existing)) {
+        // For object-shaped stores, merge items into the existing object
+        const merged = { ...(existing as Record<string, unknown>) };
+        for (const item of items as Record<string, unknown>[]) {
+          const key = this._getItemKey(store, item);
+          if (key) merged[key] = item;
+        }
+        return safeStorage.setJSON(storeKey, merged);
+      }
+
+      // Array-shaped stores: standard update/insert logic
+      const existingArr = existing as Record<string, unknown>[];
+
+      // Fast path: single item update avoids Map/Set overhead
+      if (items.length === 1) {
+        const item = items[0] as Record<string, unknown>;
+        const itemKey = this._getItemKey(store, item);
+        const idx = existingArr.findIndex(e => this._getItemKey(store, e) === itemKey);
+        if (idx >= 0) {
+          existingArr[idx] = item;
+        } else {
+          existingArr.push(item);
+        }
+        return safeStorage.setJSON(storeKey, existingArr);
+      }
 
       // Create a map for quick lookup
       const itemMap = new Map<string, unknown>();
@@ -335,13 +485,13 @@ export class LocalStorageAdapter extends StorageAdapter {
       });
 
       // Update existing items or add new ones
-      const updated = existing.map(item => {
+      const updated = existingArr.map(item => {
         const key = this._getItemKey(store, item);
         return itemMap.has(key) ? itemMap.get(key) : item;
       }) as unknown[];
 
       // Add any new items that weren't in the existing array
-      const existingKeys = new Set(existing.map(item => this._getItemKey(store, item)));
+      const existingKeys = new Set(existingArr.map(item => this._getItemKey(store, item)));
       (items as Record<string, unknown>[]).forEach(item => {
         const key = this._getItemKey(store, item);
         if (!existingKeys.has(key)) {
@@ -351,7 +501,7 @@ export class LocalStorageAdapter extends StorageAdapter {
 
       return safeStorage.setJSON(storeKey, updated);
     } catch (err) {
-      console.error(`LocalStorage updateBatch error for ${store}:`, err);
+      if (import.meta.env.DEV) console.error(`LocalStorage updateBatch error for ${store}:`, err);
       return false;
     }
   }
@@ -359,12 +509,25 @@ export class LocalStorageAdapter extends StorageAdapter {
   async deleteBatch(store: StoreName, keys: string[]): Promise<boolean> {
     try {
       const storeKey = this._getStoreKey(store);
-      const existing = safeStorage.getJSON(storeKey, []) as Record<string, unknown>[];
+      const existing = safeStorage.getJSON(storeKey, []);
       const keySet = new Set(keys);
-      const filtered = existing.filter(item => !keySet.has(this._getItemKey(store, item)));
+
+      // Handle object-shaped stores (e.g., SAVINGS_GOALS keyed by ID)
+      if (!Array.isArray(existing)) {
+        const obj = { ...(existing as Record<string, unknown>) };
+        for (const key of keys) {
+          delete obj[key];
+        }
+        return safeStorage.setJSON(storeKey, obj);
+      }
+
+      // Array-shaped stores
+      const filtered = (existing as Record<string, unknown>[]).filter(
+        item => !keySet.has(this._getItemKey(store, item))
+      );
       return safeStorage.setJSON(storeKey, filtered);
     } catch (err) {
-      console.error(`LocalStorage deleteBatch error for ${store}:`, err);
+      if (import.meta.env.DEV) console.error(`LocalStorage deleteBatch error for ${store}:`, err);
       return false;
     }
   }
@@ -396,21 +559,42 @@ export class LocalStorageAdapter extends StorageAdapter {
 
   async importAll(data: Record<string, unknown>, overwrite: boolean = false): Promise<boolean> {
     try {
-      // Clear if overwrite mode
       if (overwrite) {
+        // Snapshot current data for rollback in case of failure (only stores being written)
+        const backupKeys: Array<{ key: string; value: string | null }> = [];
         for (const storeName of Object.values(STORES)) {
-          await this.clear(storeName as StoreName);
-        }
-      }
-
-      // Import each store
-      for (const storeName of Object.values(STORES)) {
-        const items = data[storeName];
-        if (items) {
-          if (overwrite) {
+          if (data[storeName] !== undefined) {
             const storeKey = this._getStoreKey(storeName as StoreName);
-            safeStorage.setJSON(storeKey, items);
-          } else {
+            backupKeys.push({ key: storeKey, value: localStorage.getItem(storeKey) });
+          }
+        }
+
+        try {
+          // Clear and write only stores that have data in the payload —
+          // do NOT remove unrelated stores (e.g. don't wipe savings when only updating transactions)
+          for (const storeName of Object.values(STORES)) {
+            const items = data[storeName];
+            if (items !== undefined) {
+              const storeKey = this._getStoreKey(storeName as StoreName);
+              safeStorage.setJSON(storeKey, items);
+            }
+          }
+        } catch (writeErr) {
+          // Rollback: restore from snapshot
+          for (const { key, value } of backupKeys) {
+            if (value !== null) {
+              localStorage.setItem(key, value);
+            } else {
+              localStorage.removeItem(key);
+            }
+          }
+          throw writeErr;
+        }
+      } else {
+        // Non-overwrite: merge into existing stores
+        for (const storeName of Object.values(STORES)) {
+          const items = data[storeName];
+          if (items) {
             await this.updateBatch(storeName as StoreName, items as unknown[]);
           }
         }
@@ -426,7 +610,7 @@ export class LocalStorageAdapter extends StorageAdapter {
 
       return true;
     } catch (err) {
-      console.error('LocalStorage import failed:', err);
+      if (import.meta.env.DEV) console.error('LocalStorage import failed:', err);
       return false;
     }
   }
@@ -442,7 +626,7 @@ export class LocalStorageAdapter extends StorageAdapter {
       }
       return true;
     } catch (err) {
-      console.error('LocalStorage clearAll failed:', err);
+      if (import.meta.env.DEV) console.error('LocalStorage clearAll failed:', err);
       return false;
     }
   }
@@ -461,7 +645,7 @@ export class LocalStorageAdapter extends StorageAdapter {
     for (const [storeName, lsKey] of Object.entries(STORE_KEY_MAP)) {
       if (lsKey) {
         const value = localStorage.getItem(lsKey);
-        const size = value ? new Blob([value]).size : 0;
+        const size = value ? value.length * 2 : 0; // UTF-16 approximation, avoids Blob overhead
         storeUsage[storeName] = size;
         totalSize += size;
       }

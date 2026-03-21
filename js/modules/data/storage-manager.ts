@@ -12,6 +12,7 @@ import { IndexedDBAdapter } from './indexeddb-adapter.js';
 import { LocalStorageAdapter } from './localstorage-adapter.js';
 import { STORES } from './storage-adapter.js';
 import { emit, Events } from '../core/event-bus.js';
+import { generateSecureId } from '../core/utils-dom.js';
 import type {
   StorageResult,
   StorageType,
@@ -63,7 +64,8 @@ class StorageManager {
   readonly ERROR_THRESHOLD: number = 5;
 
   constructor() {
-    this._tabId = `tab_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    // Use secure ID generation for tab identification
+    this._tabId = `tab_${Date.now()}_${generateSecureId().replace(/-/g, '').substring(0, 9)}`;
   }
 
   /**
@@ -86,7 +88,7 @@ class StorageManager {
         this._initialized = true;
         this._setupSync();
 
-        console.log('Storage: Using IndexedDB');
+        // Storage: Using IndexedDB backend
         return { isOk: true, type: 'indexeddb' };
       }
     }
@@ -102,12 +104,12 @@ class StorageManager {
         this._initialized = true;
         this._setupLocalStorageSync();
 
-        console.log('Storage: Using localStorage (IndexedDB unavailable)');
+        // Storage: Using localStorage backend (IndexedDB unavailable)
         return { isOk: true, type: 'localstorage' };
       }
     }
 
-    console.error('Storage: No storage backend available');
+    if (import.meta.env.DEV) console.error('Storage: No storage backend available');
     return { isOk: false, type: null, error: 'No storage backend available' };
   }
 
@@ -128,7 +130,7 @@ class StorageManager {
         this._handleSyncMessage(event.data);
       };
     } catch (err) {
-      console.warn('BroadcastChannel setup failed, using localStorage sync:', err);
+      if (import.meta.env.DEV) console.warn('BroadcastChannel setup failed, using localStorage sync:', err);
       this._setupLocalStorageSync();
     }
   }
@@ -219,7 +221,9 @@ class StorageManager {
   async get(store: StoreName, key: string): Promise<unknown> {
     this._checkInitialized();
     try {
-      return await this.adapter!.get(store, key);
+      const result = await this.adapter!.get(store, key);
+      this._errorCount = 0; // Reset on success to prevent premature rollback after transient errors recover
+      return result;
     } catch (err) {
       this._handleError(err, 'get', store);
       throw err;
@@ -234,6 +238,7 @@ class StorageManager {
     try {
       const result = await this.adapter!.set(store, key, value);
       if (result) {
+        this._errorCount = 0; // Reset on success to prevent premature rollback after transient errors recover
         this.broadcastChange('update', store, { key, value });
       }
       return result;
@@ -251,6 +256,7 @@ class StorageManager {
     try {
       const result = await this.adapter!.delete(store, key);
       if (result) {
+        this._errorCount = 0; // Reset on success
         this.broadcastChange('delete', store, { key });
       }
       return result;
@@ -266,7 +272,9 @@ class StorageManager {
   async getAll(store: StoreName): Promise<unknown[]> {
     this._checkInitialized();
     try {
-      return await this.adapter!.getAll(store);
+      const result = await this.adapter!.getAll(store);
+      this._errorCount = 0; // Reset on success
+      return result;
     } catch (err) {
       this._handleError(err, 'getAll', store);
       throw err;
@@ -281,6 +289,7 @@ class StorageManager {
     try {
       const result = await this.adapter!.clear(store);
       if (result) {
+        this._errorCount = 0; // Reset on success
         this.broadcastChange('clear', store, null);
       }
       return result;
@@ -318,6 +327,7 @@ class StorageManager {
     try {
       const result = await this.adapter!.createBatch(store, items);
       if (result) {
+        this._errorCount = 0; // Reset on success
         this.broadcastChange('batch', store, { type: 'create', count: items.length });
       }
       return result;
@@ -332,6 +342,7 @@ class StorageManager {
     try {
       const result = await this.adapter!.updateBatch(store, items);
       if (result) {
+        this._errorCount = 0; // Reset on success
         this.broadcastChange('batch', store, { type: 'update', count: items.length });
       }
       return result;
@@ -346,6 +357,7 @@ class StorageManager {
     try {
       const result = await this.adapter!.deleteBatch(store, keys);
       if (result) {
+        this._errorCount = 0; // Reset on success
         this.broadcastChange('batch', store, { type: 'delete', count: keys.length });
       }
       return result;
@@ -397,7 +409,7 @@ class StorageManager {
    */
   private _handleError(err: unknown, operation: string, store: StoreName): void {
     this._errorCount++;
-    console.error(`Storage error in ${operation} for ${store}:`, err);
+    if (import.meta.env.DEV) console.error(`Storage error in ${operation} for ${store}:`, err);
 
     if (this._errorCount >= this.ERROR_THRESHOLD && this.type === 'indexeddb') {
       this._triggerRollback();
@@ -407,10 +419,13 @@ class StorageManager {
   /**
    * Trigger rollback to localStorage
    */
-  private async _triggerRollback(): Promise<void> {
-    if (this.type !== 'indexeddb') return;
+  private _rollbackInProgress = false;
 
-    console.warn('Storage: Too many IndexedDB errors, rolling back to localStorage');
+  private async _triggerRollback(): Promise<void> {
+    if (this.type !== 'indexeddb' || this._rollbackInProgress) return;
+    this._rollbackInProgress = true;
+
+    if (import.meta.env.DEV) console.warn('Storage: Too many IndexedDB errors, rolling back to localStorage');
 
     try {
       // Export current data
@@ -435,7 +450,9 @@ class StorageManager {
       }));
 
     } catch (err) {
-      console.error('Storage rollback failed:', err);
+      if (import.meta.env.DEV) console.error('Storage rollback failed:', err);
+    } finally {
+      this._rollbackInProgress = false;
     }
   }
 

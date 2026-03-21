@@ -7,9 +7,11 @@
  */
 'use strict';
 
-import { SK, lsGet, lsSet } from '../../core/state.js';
+import { SK } from '../../core/state.js';
+import { safeStorage } from '../../core/safe-storage.js';
 import * as signals from '../../core/signals.js';
-import { CURRENCY_MAP, getTodayStr, parseAmount, generateId } from '../../core/utils.js';
+import { CURRENCY_MAP, getTodayStr, parseAmount, generateId, toCents } from '../../core/utils.js';
+import { DEFAULT_CATEGORY_COLOR } from '../../core/categories.js';
 import { showToast } from '../../ui/core/ui.js';
 import { validator } from '../../core/validator.js';
 import type {
@@ -23,17 +25,13 @@ import type {
   AlertPrefs,
   RolloverSettings,
   FilterPreset,
-  TxTemplate
+  TxTemplate,
+  LegacySavingsGoal
 } from '../../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
 // ==========================================
-
-interface ValidationResultLegacy {
-  valid: boolean;
-  reason?: string;
-}
 
 interface RejectedImportRecord {
   index: number;
@@ -63,6 +61,8 @@ interface ImportData {
   debts?: unknown[];
   rolloverSettings?: unknown;
   theme?: string;
+  lastBackup?: string;
+  syncState?: unknown;
 }
 
 interface ImportStateResult {
@@ -90,15 +90,10 @@ interface ExportData {
   txTemplates: TxTemplate[];
   exportedAt: string;
   version: string;
+  lastBackup: string | null;
 }
 
-// Legacy savings goal structure
-interface LegacySavingsGoal {
-  name?: string;
-  target_amount?: number | string;
-  saved_amount?: number | string;
-  deadline?: string;
-}
+// Using LegacySavingsGoal from central types
 
 // ==========================================
 // CONSTANTS
@@ -128,20 +123,7 @@ function sanitizeId(id: unknown): string {
 // VALIDATION FUNCTIONS
 // ==========================================
 
-/**
- * Validates a single transaction record for type safety
- * @deprecated Use validator.validateTransaction() for comprehensive validation
- */
-export function validateTransaction(t: unknown): ValidationResultLegacy {
-  // Delegate to validator module for comprehensive validation
-  const result = validator.validateTransaction(t as Partial<Transaction>);
-  if (!result.valid) {
-    // Convert errors object to reason string for backwards compatibility
-    const reason = Object.entries(result.errors).map(([k, v]) => `${k}: ${v}`).join(', ');
-    return { valid: false, reason: reason || 'validation failed' };
-  }
-  return { valid: true };
-}
+// validateTransaction removed - use validator.validateTransaction() directly
 
 /**
  * Sanitize and validate imported transactions
@@ -168,7 +150,7 @@ export function sanitizeImportedTransactions(
 
   // Log rejected records for debugging (in production, could show summary to user)
   if (rejected.length > 0) {
-    console.warn(`Import validation: ${rejected.length} record(s) rejected`, rejected.slice(0, 10));
+    if (import.meta.env.DEV) console.warn(`Import validation: ${rejected.length} record(s) rejected`, rejected.slice(0, 10));
   }
 
   // Assign unique IDs to validated transactions
@@ -187,41 +169,78 @@ export function sanitizeImportedTransactions(
 /**
  * Fuzzy duplicate detection (similar date, amount within 5%, category, similar description)
  */
+/**
+ * Find exact duplicates during import
+ * FIXED: Now uses strict matching for financial accuracy
+ * Returns both exact duplicates and potential similar transactions
+ */
 export function findContentDuplicates(
   incoming: Transaction[],
   existing: Transaction[]
-): Transaction[] {
+): { exact: Transaction[]; similar: Transaction[] } {
   const normalizeDesc = (s: string | undefined): string => (s || '').toLowerCase().trim().replace(/\s+/g, ' ');
-  const isSimilarDesc = (a: string | undefined, b: string | undefined): boolean => {
-    const na = normalizeDesc(a), nb = normalizeDesc(b);
-    if (!na && !nb) return true;
-    if (!na || !nb) return false;
-    if (na === nb) return true;
-    if (na.includes(nb) || nb.includes(na)) return true;
-    // Simple word overlap check
-    const wordsA = na.split(' ').filter(w => w.length > 2);
-    const wordsB = nb.split(' ').filter(w => w.length > 2);
-    if (wordsA.length === 0 || wordsB.length === 0) return false;
-    const overlap = wordsA.filter(w => wordsB.includes(w)).length;
-    return overlap >= Math.min(wordsA.length, wordsB.length) * 0.5;
+  
+  // FIXED: Strict duplicate detection - exact match required
+  const isExactDuplicate = (inc: Transaction, ex: Transaction): boolean => {
+    return ex.date === inc.date &&
+           ex.type === inc.type &&
+           ex.category === inc.category &&
+           ex.amount === inc.amount && // EXACT amount match required
+           normalizeDesc(ex.description) === normalizeDesc(inc.description);
   };
-  const isSimilarAmount = (a: number, b: number): boolean => {
-    const amtA = parseFloat(String(a)) || 0, amtB = parseFloat(String(b)) || 0;
-    if (amtA === amtB) return true;
-    const diff = Math.abs(amtA - amtB);
-    const avg = (Math.abs(amtA) + Math.abs(amtB)) / 2;
-    return avg > 0 && diff / avg <= 0.05; // Within 5%
+  
+  // Similar transactions (for UI suggestion only, not automatic filtering)
+  const isSimilar = (inc: Transaction, ex: Transaction): boolean => {
+    if (ex.date !== inc.date || ex.type !== inc.type) return false;
+    
+    const amtACents = toCents(ex.amount);
+    const amtBCents = toCents(inc.amount);
+    const diffCents = Math.abs(amtACents - amtBCents);
+    const avgCents = (Math.abs(amtACents) + Math.abs(amtBCents)) / 2;
+    const withinRange = avgCents > 0 && diffCents / avgCents <= 0.05; // 5% range
+    
+    const descA = normalizeDesc(ex.description);
+    const descB = normalizeDesc(inc.description);
+    const similarDesc = descA.includes(descB) || descB.includes(descA) ||
+                       descA === descB;
+    
+    return withinRange && similarDesc && !isExactDuplicate(inc, ex);
   };
 
-  return incoming.filter(inc => {
-    return existing.some(ex =>
-      ex.date === inc.date &&
-      ex.type === inc.type &&
-      ex.category === inc.category &&
-      isSimilarAmount(ex.amount, inc.amount) &&
-      isSimilarDesc(ex.description, inc.description)
-    );
-  });
+  // Build a Map of existing transactions keyed by exact-match fields for O(1) lookups
+  const exactKeyMap = new Map<string, Transaction[]>();
+  const similarKeyMap = new Map<string, Transaction[]>();
+  for (const ex of existing) {
+    // Exact match key: date|type|category|amount|description
+    const exactKey = `${ex.date}|${ex.type}|${ex.category}|${ex.amount}|${normalizeDesc(ex.description)}`;
+    if (!exactKeyMap.has(exactKey)) exactKeyMap.set(exactKey, []);
+    exactKeyMap.get(exactKey)!.push(ex);
+
+    // Similar match key (broader): date|type for pre-filtering
+    const similarKey = `${ex.date}|${ex.type}`;
+    if (!similarKeyMap.has(similarKey)) similarKeyMap.set(similarKey, []);
+    similarKeyMap.get(similarKey)!.push(ex);
+  }
+
+  const exactDuplicates: Transaction[] = [];
+  const similarTransactions: Transaction[] = [];
+
+  for (const inc of incoming) {
+    const exactKey = `${inc.date}|${inc.type}|${inc.category}|${inc.amount}|${normalizeDesc(inc.description)}`;
+    if (exactKeyMap.has(exactKey)) {
+      exactDuplicates.push(inc);
+    } else {
+      // Check for similar only among transactions with same date|type (narrowed search)
+      const similarKey = `${inc.date}|${inc.type}`;
+      const candidates = similarKeyMap.get(similarKey) || [];
+      const similar = candidates.find(ex => isSimilar(inc, ex));
+      if (similar) {
+        similarTransactions.push(inc);
+      }
+    }
+  }
+
+  return { exact: exactDuplicates, similar: similarTransactions };
 }
 
 // ==========================================
@@ -231,24 +250,49 @@ export function findContentDuplicates(
 /**
  * Atomic write helper: snapshots current bytes for every key, applies each
  * lsSet in sequence, and rolls back all keys on the first failure.
+ * FIXED: Now uses Web Locks API to prevent cross-tab interference
  */
-export function tryAtomicWrite(writes: AtomicWriteEntry[]): boolean {
-  const backups = writes.map(({ key }) => ({ key, raw: localStorage.getItem(key) }));
+export async function tryAtomicWrite(writes: AtomicWriteEntry[]): Promise<boolean> {
+  // Use Web Locks API for true cross-tab atomicity during import
+  if ('locks' in navigator) {
+    return await navigator.locks.request(
+      'budget_tracker_import_lock',
+      { mode: 'exclusive', ifAvailable: false },
+      async () => {
+        return performAtomicWrite(writes);
+      }
+    );
+  } else {
+    // Fallback for browsers without Web Locks
+    return performAtomicWrite(writes);
+  }
+}
+
+/**
+ * Internal atomic write implementation
+ * FIXED: Uses safeStorage for consistent error handling and rollback
+ */
+function performAtomicWrite(writes: AtomicWriteEntry[]): boolean {
+  const backups = writes.map(({ key }) => ({ 
+    key, 
+    raw: safeStorage.getItem(key) 
+  }));
+
   for (const { key, value } of writes) {
-    if (!lsSet(key, value)) {
-      // Rollback failed write - wrap in try/catch to detect rollback failures
+    if (!safeStorage.setJSON(key, value)) {
+      // Rollback failed write
       let rollbackFailed = false;
       backups.forEach(({ key: k, raw }) => {
         try {
-          if (raw === null) localStorage.removeItem(k);
-          else localStorage.setItem(k, raw); // restore exact bytes, bypass JSON round-trip
+          if (raw === null) safeStorage.removeItem(k);
+          else localStorage.setItem(k, raw); // Still use raw set for restore
         } catch (e) {
-          console.error('Rollback failed for key:', k, e);
+          if (import.meta.env.DEV) console.error('Rollback failed for key:', k, e);
           rollbackFailed = true;
         }
       });
       if (rollbackFailed) {
-        console.error('CRITICAL: Atomic write rollback failed - data may be in inconsistent state');
+        if (import.meta.env.DEV) console.error('CRITICAL: Atomic write rollback failed - data may be in inconsistent state');
         showToast('Storage error: data may be corrupted. Please export and refresh.', 'error');
       }
       return false;
@@ -272,11 +316,16 @@ export function buildImportState(
 ): ImportStateResult {
   const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 
+  // Safety check: Prevent massive transaction imports from crashing the browser
+  if (existingTx.length > MAX_IMPORT_TRANSACTIONS) {
+    throw new Error(`Import exceeds maximum allowed transactions (${MAX_IMPORT_TRANSACTIONS})`);
+  }
+
   // L7: version compatibility warning
   const importedVersion = d.version || '1.0';
   const compatibleVersions = ['2.3', '2.5', '2.6'];
   if (!compatibleVersions.includes(importedVersion)) {
-    console.warn(`Import: backup version ${importedVersion} may not be fully compatible with current schema.`);
+    if (import.meta.env.DEV) console.warn(`Import: backup version ${importedVersion} may not be fully compatible with current schema.`);
   }
 
   const newS: Record<string, unknown> = {};
@@ -297,6 +346,7 @@ export function buildImportState(
       insightPers: signals.insightPers.value,
       filterPresets: signals.filterPresets.value,
       txTemplates: signals.txTemplates.value,
+      lastBackup: signals.lastBackup.value,
     };
     return signalMap[prop];
   };
@@ -312,6 +362,7 @@ export function buildImportState(
     { src: 'insightPersonality', prop: 'insightPers', sk: SK.INSIGHT_PERS, defaultVal: 'serious' },
     { src: 'filterPresets', prop: 'filterPresets', sk: SK.FILTER_PRESETS, defaultVal: [] },
     { src: 'txTemplates', prop: 'txTemplates', sk: SK.TX_TEMPLATES, defaultVal: [] },
+    { src: 'lastBackup', prop: 'lastBackup', sk: SK.LAST_BACKUP, defaultVal: null },
   ];
 
   // Type validation: ensure imported data has correct types to prevent runtime errors
@@ -347,7 +398,7 @@ export function buildImportState(
     Object.entries(newS.savingsGoals as Record<string, unknown>).forEach(([k, v]) => {
       const safeKey = sanitizeId(k);
       if (safeKey && isObj(v)) {
-        const goal = v as LegacySavingsGoal;
+        const goal = v as unknown as LegacySavingsGoal;
         sanitized[safeKey] = {
           ...goal,
           target_amount: parseAmount(goal.target_amount ?? 0) || 1,  // Default to 1, not 0
@@ -398,7 +449,7 @@ export function buildImportState(
       name: String(cat.name || '').slice(0, 50),
       type: cat.type as 'expense' | 'income',
       emoji: String(cat.emoji || '').replace(/<[^>]*>/g, '').slice(0, 10),
-      color: /^#[0-9a-fA-F]{3,8}$/.test(String(cat.color || '')) ? String(cat.color) : '#8b5cf6'
+      color: /^#[0-9a-fA-F]{3,8}$/.test(String(cat.color || '')) ? String(cat.color) : DEFAULT_CATEGORY_COLOR
     };
   };
 
@@ -528,10 +579,11 @@ export function buildImportState(
 
 /**
  * Build export JSON data object
+ * FIXED: Uses live signals for IndexedDB-backed data and includes all relevant state for a complete backup
  */
 export function buildExportData(): ExportData {
   return {
-    transactions: lsGet(SK.TX, []) as Transaction[],
+    transactions: [...signals.transactions.value],
     savingsGoals: signals.savingsGoals.value as unknown as Record<string, SavingsGoal>,
     savingsContributions: signals.savingsContribs.value as SavingsContribution[],
     monthlyAllocations: signals.monthlyAlloc.value as Record<string, Record<string, number>>,
@@ -540,13 +592,14 @@ export function buildExportData(): ExportData {
     achievements: signals.achievements.value as Record<string, unknown>,
     streak: signals.streak.value as StreakData,
     sections: signals.sections.value as { envelope: boolean },
-    theme: lsGet(SK.THEME, 'dark') as string,
+    theme: safeStorage.getItem(SK.THEME) || 'dark',
     alertPrefs: signals.alerts.value as AlertPrefs,
     insightPersonality: signals.insightPers.value as string,
     debts: (signals.debts.value || []) as Debt[],
     rolloverSettings: (signals.rolloverSettings.value || null) as RolloverSettings | null,
     filterPresets: (signals.filterPresets.value || []) as FilterPreset[],
     txTemplates: (signals.txTemplates.value || []) as TxTemplate[],
+    lastBackup: signals.lastBackup.value ? String(signals.lastBackup.value) : null,
     exportedAt: new Date().toISOString(),
     version: '2.6'
   };

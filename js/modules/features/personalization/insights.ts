@@ -7,9 +7,10 @@
 'use strict';
 
 import * as signals from '../../core/signals.js';
-import { fmtCur as fmtCurBase, getPrevMonthKey, sumByType, parseLocalDate } from '../../core/utils.js';
-import { getMonthTx, calcTotals, getMonthExpByCat, calcVelocity, getTopCat } from '../financial/calculations.js';
+import { fmtCur as fmtCurBase, getPrevMonthKey, getMonthKey, sumByType, parseLocalDate, toCents, toDollars } from '../../core/utils.js';
+import { getMonthTx, getMonthExpenses, calcTotals, getMonthExpByCat, calcVelocity, getTopCat, getMonthlySavings } from '../financial/calculations.js';
 import { getAllCats, getCatInfo } from '../../core/categories.js';
+import { isTrackedExpenseTransaction, SAVINGS_TRANSFER_CATEGORY_ID } from '../../core/transaction-classification.js';
 import DOM from '../../core/dom-cache.js';
 import { html, render, nothing } from '../../core/lit-helpers.js';
 import type {
@@ -20,9 +21,9 @@ import type {
   InsightResult,
   InsightResultWithAction,
   InsightGenerator,
-  InsightActionData,
   FlattenedCategory,
-  SavingsGoal
+  SavingsGoal,
+  LegacySavingsGoal
 } from '../../../types/index.js';
 
 // ==========================================
@@ -41,11 +42,7 @@ interface UnusualSpending {
   avg: number;
 }
 
-interface LegacySavingsGoal {
-  name: string;
-  target_amount: number;
-  saved_amount: number;
-}
+// Using LegacySavingsGoal from central types
 
 // ==========================================
 // CURRENCY FORMATTER
@@ -61,16 +58,22 @@ const fmtCur = (amount: number, currency?: string): string => fmtCurBase(amount,
 function insightMonthChange(pers: InsightPersonalityType, ctx: InsightContext): InsightResult {
   const { expenses } = ctx;
   const prevMk = getPrevMonthKey(signals.currentMonth.value);
-  const prevExp = sumByType(getMonthTx(prevMk), 'expense');
+  const prevExp = calcTotals(getMonthExpenses(prevMk)).expenses;
   const change = prevExp > 0 ? Math.round(((expenses - prevExp) / prevExp) * 100) : 0;
+  let text: string;
 
   if (pers === 'roast') {
-    return change > 0 ? `Spending up ${change}%? Your wallet is crying.` : `Down ${Math.abs(change)}%. Miracle.`;
+    text = change > 0 ? `Spending up ${change}%? Your wallet is crying.` : `Down ${Math.abs(change)}%. Miracle.`;
+  } else if (pers === 'friendly') {
+    text = change > 0 ? `Spending up ${change}% — you got this!` : `Down ${Math.abs(change)}%! Amazing work!`;
+  } else {
+    text = change > 0 ? `Spending up ${change}% vs last month` : `Spending down ${Math.abs(change)}% vs last month`;
   }
-  if (pers === 'friendly') {
-    return change > 0 ? `Spending up ${change}% — you got this!` : `Down ${Math.abs(change)}%! Amazing work!`;
-  }
-  return change > 0 ? `Spending up ${change}% vs last month` : `Spending down ${Math.abs(change)}% vs last month`;
+
+  return {
+    text,
+    action: { type: 'goto-budget', label: change > 0 ? 'Adjust' : 'Review' }
+  };
 }
 
 function insightSavingsRate(pers: InsightPersonalityType, ctx: InsightContext): InsightResult {
@@ -85,12 +88,19 @@ function insightSavingsRate(pers: InsightPersonalityType, ctx: InsightContext): 
   const diff = rate - prevRate;
 
   if (pers === 'roast') {
-    return rate < 10 ? `Saving ${rate}%? That's... something.` : `${rate}% saved. Not bad, I guess.`;
+    return rate < 10
+      ? { text: `Saving ${rate}%? That's... something.`, action: { type: 'goto-budget', label: 'Improve' } }
+      : { text: `${rate}% saved. Not bad, I guess.`, action: { type: 'goto-budget', label: 'Improve' } };
   }
   if (pers === 'friendly') {
-    return diff > 0 ? `Saving ${rate}%! Up from ${prevRate}% last month!` : `You're saving ${rate}% this month!`;
+    return diff > 0
+      ? { text: `Saving ${rate}%! Up from ${prevRate}% last month!`, action: { type: 'goto-budget', label: 'Keep it up' } }
+      : { text: `You're saving ${rate}% this month!`, action: { type: 'goto-budget', label: 'Improve' } };
   }
-  return `Savings rate: ${rate}%${diff !== 0 ? ` (${diff > 0 ? '+' : ''}${diff}% vs last month)` : ''}`;
+  return {
+    text: `Savings rate: ${rate}%${diff !== 0 ? ` (${diff > 0 ? '+' : ''}${diff}% vs last month)` : ''}`,
+    action: { type: 'goto-budget', label: 'Improve' }
+  };
 }
 
 function insightCategoryTrend(pers: InsightPersonalityType, ctx: InsightContext): InsightResult {
@@ -113,23 +123,32 @@ function insightCategoryTrend(pers: InsightPersonalityType, ctx: InsightContext)
 
   const { cat, change } = biggest;
   if (pers === 'roast') {
-    return change > 0 ? `${cat.emoji} ${cat.name} up ${change}%? Oof.` : `${cat.emoji} ${cat.name} down ${Math.abs(change)}%. Finally.`;
+    return {
+      text: change > 0 ? `${cat.emoji} ${cat.name} up ${change}%? Oof.` : `${cat.emoji} ${cat.name} down ${Math.abs(change)}%. Finally.`,
+      action: { type: 'filter-category', category: cat.id, label: 'Review' }
+    };
   }
   if (pers === 'friendly') {
-    return change > 0 ? `${cat.emoji} ${cat.name} up ${change}% — watch this one!` : `${cat.emoji} ${cat.name} down ${Math.abs(change)}%! Nice!`;
+    return {
+      text: change > 0 ? `${cat.emoji} ${cat.name} up ${change}% — watch this one!` : `${cat.emoji} ${cat.name} down ${Math.abs(change)}%! Nice!`,
+      action: { type: 'filter-category', category: cat.id, label: 'Review' }
+    };
   }
-  return `${cat.emoji} ${cat.name}: ${change > 0 ? '+' : ''}${change}% vs last month`;
+  return {
+    text: `${cat.emoji} ${cat.name}: ${change > 0 ? '+' : ''}${change}% vs last month`,
+    action: { type: 'filter-category', category: cat.id, label: 'Review' }
+  };
 }
 
 function insightVelocity(pers: InsightPersonalityType, _ctx: InsightContext): InsightResult {
   const vel = calcVelocity();
   if (pers === 'roast') {
-    return `At ${fmtCur(vel.dailyRate)}/day, you'll spend ${fmtCur(vel.projected)} this month. Yikes.`;
+    return { text: `At ${fmtCur(vel.dailyRate)}/day, you'll spend ${fmtCur(vel.projected)} this month. Yikes.`, action: { type: 'goto-budget', label: 'Adjust plan' } };
   }
   if (pers === 'friendly') {
-    return `On track for ${fmtCur(vel.projected)} this month (${fmtCur(vel.dailyRate)}/day)`;
+    return { text: `On track for ${fmtCur(vel.projected)} this month (${fmtCur(vel.dailyRate)}/day)`, action: { type: 'goto-budget', label: 'Adjust plan' } };
   }
-  return `Projected: ${fmtCur(vel.projected)} this month (${fmtCur(vel.dailyRate)}/day)`;
+  return { text: `Projected: ${fmtCur(vel.projected)} this month (${fmtCur(vel.dailyRate)}/day)`, action: { type: 'goto-budget', label: 'Adjust plan' } };
 }
 
 function insightBudgetAdherence(pers: InsightPersonalityType, _ctx: InsightContext): InsightResult {
@@ -147,16 +166,25 @@ function insightBudgetAdherence(pers: InsightPersonalityType, _ctx: InsightConte
   });
 
   if (pers === 'roast') {
-    return over > 0 ? `${over} categories over budget. Classic.` : `All ${under} categories under budget? Suspicious.`;
+    return {
+      text: over > 0 ? `${over} categories over budget. Classic.` : `All ${under} categories under budget? Suspicious.`,
+      action: { type: 'goto-budget', label: over > 0 ? 'Fix budget' : 'Review budget' }
+    };
   }
   if (pers === 'friendly') {
-    return over > 0 ? `${under} on track, ${over} over — you can do it!` : `All ${under} categories on track! Amazing!`;
+    return {
+      text: over > 0 ? `${under} on track, ${over} over — you can do it!` : `All ${under} categories on track! Amazing!`,
+      action: { type: 'goto-budget', label: over > 0 ? 'Fix budget' : 'Review budget' }
+    };
   }
-  return `Budget: ${under} on track, ${over} over`;
+  return {
+    text: `Budget check: ${under} categories on track, ${over} over budget`,
+    action: { type: 'goto-budget', label: over > 0 ? 'Fix budget' : 'Review budget' }
+  };
 }
 
 function insightDayOfWeek(pers: InsightPersonalityType, _ctx: InsightContext): InsightResult {
-  const monthTx = (getMonthTx() as Transaction[]).filter(t => t.type === 'expense');
+  const monthTx = (getMonthTx() as Transaction[]).filter((t: Transaction) => isTrackedExpenseTransaction(t));
   if (monthTx.length < 5) return null;
 
   let weekday = 0;
@@ -184,12 +212,21 @@ function insightDayOfWeek(pers: InsightPersonalityType, _ctx: InsightContext): I
   if (Math.abs(diff) < 10) return null;
 
   if (pers === 'roast') {
-    return diff > 0 ? `Weekends cost ${diff}% more per transaction. Ouch.` : `Weekdays cost ${Math.abs(diff)}% more. Interesting.`;
+    return {
+      text: diff > 0 ? `Weekends cost ${diff}% more per transaction. Ouch.` : `Weekdays cost ${Math.abs(diff)}% more. Interesting.`,
+      action: { type: 'goto-budget', label: 'Plan ahead' }
+    };
   }
   if (pers === 'friendly') {
-    return diff > 0 ? `Weekends run ${diff}% higher — treat yourself!` : `Weekdays run ${Math.abs(diff)}% higher`;
+    return {
+      text: diff > 0 ? `Weekends run ${diff}% higher — treat yourself!` : `Weekdays run ${Math.abs(diff)}% higher`,
+      action: { type: 'goto-budget', label: 'Plan ahead' }
+    };
   }
-  return `${diff > 0 ? 'Weekend' : 'Weekday'} spending ${Math.abs(diff)}% higher per transaction`;
+  return {
+    text: `${diff > 0 ? 'Weekend' : 'Weekday'} spending ${Math.abs(diff)}% higher per transaction`,
+    action: { type: 'goto-budget', label: 'Plan ahead' }
+  };
 }
 
 function insightTopCat(pers: InsightPersonalityType, _ctx: InsightContext): InsightResult {
@@ -209,7 +246,7 @@ function insightTopCat(pers: InsightPersonalityType, _ctx: InsightContext): Insi
 }
 
 function insightUnusualSpending(pers: InsightPersonalityType, _ctx: InsightContext): InsightResult {
-  const monthTx = (getMonthTx() as Transaction[]).filter(t => t.type === 'expense');
+  const monthTx = (getMonthTx() as Transaction[]).filter((t: Transaction) => isTrackedExpenseTransaction(t));
   if (monthTx.length < 3) return null;
 
   const byCategory: Record<string, number[]> = {};
@@ -223,7 +260,7 @@ function insightUnusualSpending(pers: InsightPersonalityType, _ctx: InsightConte
 
   for (const [catId, amounts] of Object.entries(byCategory)) {
     if (amounts.length < 2) continue;
-    const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
+    const avg = toDollars(amounts.reduce((sumCents, amount) => sumCents + toCents(amount), 0)) / amounts.length;
     const max = Math.max(...amounts);
     if (max >= avg * 2 && max > 30) {
       const cat = getCatInfo('expense', catId);
@@ -241,7 +278,7 @@ function insightUnusualSpending(pers: InsightPersonalityType, _ctx: InsightConte
   } else if (pers === 'friendly') {
     text = `Big ${unusual.cat.emoji} expense: ${fmtCur(unusual.amount)} (usually ~${fmtCur(unusual.avg)})`;
   } else {
-    text = `Unusual: ${unusual.cat.emoji} ${fmtCur(unusual.amount)} (avg ${fmtCur(unusual.avg)})`;
+    text = `${unusual.cat.emoji} ${unusual.cat.name} spiked to ${fmtCur(unusual.amount)} vs your usual ${fmtCur(unusual.avg)}`;
   }
 
   return { text, action: { type: 'filter-category', category: unusualCatId, label: 'Review' } };
@@ -259,12 +296,47 @@ function insightSavingsGoal(pers: InsightPersonalityType, _ctx: InsightContext):
   const name = g.name || 'Goal';
 
   if (pers === 'roast') {
-    return pct < 50 ? `${name}: ${pct}% there. Keep going... or don't.` : `${name}: ${pct}% done. Almost bearable.`;
+    return {
+      text: pct < 50 ? `${name}: ${pct}% there. Keep going... or don't.` : `${name}: ${pct}% done. Almost bearable.`,
+      action: { type: 'goto-budget-goals', label: 'Open goals' }
+    };
   }
   if (pers === 'friendly') {
-    return `${name}: ${fmtCur(saved)}/${fmtCur(target)} (${pct}%) — you're doing great!`;
+    return {
+      text: `${name}: ${fmtCur(saved)}/${fmtCur(target)} (${pct}%) — you're doing great!`,
+      action: { type: 'goto-budget-goals', label: 'Open goals' }
+    };
   }
-  return `${name}: ${fmtCur(saved)}/${fmtCur(target)} (${pct}%)`;
+  return {
+    text: `${name}: ${fmtCur(saved)}/${fmtCur(target)} (${pct}%)`,
+    action: { type: 'goto-budget-goals', label: 'Open goals' }
+  };
+}
+
+function insightSavingsTransfers(pers: InsightPersonalityType, _ctx: InsightContext): InsightResult {
+  const monthKey = signals.currentMonth.value;
+  const transferCount = signals.savingsContribs.value.filter((c) => getMonthKey(c.date) === monthKey).length;
+  if (transferCount === 0) return null;
+
+  const totalMoved = getMonthlySavings(monthKey);
+  const transferLabel = transferCount === 1 ? 'transfer' : 'transfers';
+
+  if (pers === 'roast') {
+    return {
+      text: `You moved ${fmtCur(totalMoved)} to savings in ${transferCount} ${transferLabel}. At least that money is behaving.`,
+      action: { type: 'filter-category', category: SAVINGS_TRANSFER_CATEGORY_ID, label: 'View transfers' }
+    };
+  }
+  if (pers === 'friendly') {
+    return {
+      text: `You moved ${fmtCur(totalMoved)} to savings across ${transferCount} ${transferLabel} this month.`,
+      action: { type: 'filter-category', category: SAVINGS_TRANSFER_CATEGORY_ID, label: 'View transfers' }
+    };
+  }
+  return {
+    text: `${fmtCur(totalMoved)} moved to savings this month across ${transferCount} ${transferLabel}`,
+    action: { type: 'filter-category', category: SAVINGS_TRANSFER_CATEGORY_ID, label: 'View transfers' }
+  };
 }
 
 // ==========================================
@@ -277,6 +349,7 @@ const INSIGHT_GENERATORS: InsightGenerator[] = [
   { slot: 1, fn: insightSavingsRate, priority: 1 },     // info
   { slot: 1, fn: insightCategoryTrend, priority: 2 },   // trend
   { slot: 2, fn: insightVelocity, priority: 2 },        // trend
+  { slot: 2, fn: insightSavingsTransfers, priority: 2 }, // transfer activity
   { slot: 2, fn: insightBudgetAdherence, priority: 3 }, // warning (over budget)
   { slot: 2, fn: insightDayOfWeek, priority: 1 },       // info
   { slot: 3, fn: insightTopCat, priority: 1 },          // info
@@ -289,58 +362,17 @@ const INSIGHT_GENERATORS: InsightGenerator[] = [
 // ==========================================
 
 /**
- * Renders an insight result with optional action button
+ * Generate insights for all slots (pure business logic)
+ * Returns computed insights without UI concerns
  */
-export function renderInsightWithAction(el: HTMLElement | null, result: InsightResult | string): void {
-  if (!el) return;
-
-  if (typeof result === 'string') {
-    render(html`${result}`, el);
-    return;
-  }
-
-  if (result === null) {
-    render(nothing, el);
-    return;
-  }
-
-  // Result is an object with text and optional action
-  const resultObj = result as InsightResultWithAction;
-  render(html`
-    <span>${resultObj.text}</span>
-    ${resultObj.action ? html`
-      <button class="insight-action-btn ml-2 px-2 py-1 rounded text-xs font-bold transition-all"
-        data-action-type=${resultObj.action.type}
-        data-category=${resultObj.action.category || ''}
-        style="background: var(--color-accent); color: white;">
-        ${resultObj.action.label} →
-      </button>
-    ` : nothing}
-  `, el);
-}
-
-/**
- * Handles insight action button clicks
- * Returns action data for the caller to process UI changes
- */
-export function handleInsightAction(actionType: string, data: Record<string, string>): InsightActionData {
-  return { actionType, data };
-}
-
-/**
- * Updates all insight slots with priority-based content
- */
-export function updateInsights(): void {
-  const i1 = DOM.get('insight-1');
-  const i2 = DOM.get('insight-2');
-  const i3 = DOM.get('insight-3');
-
+export function generateInsights(): { insight1: InsightResult | string; insight2: InsightResult | string; insight3: InsightResult | string } {
   const transactions = signals.transactions.value as Transaction[];
   if (transactions.length === 0) {
-    if (i1) i1.textContent = 'Add transactions to unlock insights';
-    if (i2) i2.textContent = 'Your spending patterns will appear here';
-    if (i3) i3.textContent = 'Keep tracking!';
-    return;
+    return {
+      insight1: 'Add your first few transactions to reveal spending trends.',
+      insight2: 'This panel will highlight where your month is drifting.',
+      insight3: 'Use the Transactions tab to build a real picture quickly.'
+    };
   }
 
   const monthTx = getMonthTx() as Transaction[];
@@ -359,7 +391,11 @@ export function updateInsights(): void {
     return fallbackText;
   };
 
-  renderInsightWithAction(i1, pickForSlot(1, 'Keep tracking your spending!'));
-  renderInsightWithAction(i2, pickForSlot(2, 'More data = better insights'));
-  renderInsightWithAction(i3, pickForSlot(3, 'Keep it up!'));
+  return {
+    insight1: pickForSlot(1, 'Review this month’s trend to see what changed.'),
+    insight2: pickForSlot(2, 'Open Budget to turn this month into a clearer plan.'),
+    insight3: pickForSlot(3, 'Review the ledger to spot the transactions driving this month.')
+  };
 }
+
+// updateInsights() removed — rendering is handled by reactive components/insights.ts (mountInsights)

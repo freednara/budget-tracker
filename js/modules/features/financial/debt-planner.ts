@@ -10,7 +10,9 @@ import { SK, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
 import { toCents, toDollars, parseAmount, generateId, getTodayStr } from '../../core/utils.js';
 import { dataSdk } from '../../data/data-manager.js';
-import { emit, Events } from '../../core/event-bus.js';
+import { withTransaction, type Operation } from '../../data/transaction-manager.js';
+import { emit, Events, on } from '../../core/event-bus.js';
+import { FeatureEvents } from '../../core/feature-event-interface.js';
 import type {
   Debt,
   DebtType,
@@ -204,78 +206,122 @@ export function removeDebt(debtId: string): boolean {
 }
 
 // ==========================================
+// ATOMIC OPERATIONS
+// ==========================================
+
+/**
+ * Atomic operation for recording a debt payment
+ */
+class DebtPaymentOperation implements Operation<PaymentResult> {
+  private originalDebt: Debt | null = null;
+  private updatedDebt: Debt | null = null;
+  private transaction: Transaction | null = null;
+
+  constructor(
+    private debtId: string,
+    private amount: number,
+    private date: string
+  ) {}
+
+  async execute(): Promise<PaymentResult> {
+    const currentDebts = (signals.debts.value as Debt[]) || [];
+    this.originalDebt = currentDebts.find(d => d.id === this.debtId) || null;
+
+    if (!this.originalDebt) throw new Error('Debt not found');
+
+    // 1. Calculate portions
+    const monthlyRate = this.originalDebt.interestRate / 12;
+    const interestCents = Math.round(toCents(this.originalDebt.balance) * monthlyRate);
+    const principalCents = Math.max(0, toCents(this.amount) - interestCents);
+
+    // 2. Create transaction via SDK
+    const txResult = await dataSdk.create({
+      type: 'expense',
+      category: DEBT_PAYMENT_CATEGORY,
+      amount: this.amount,
+      description: `${this.originalDebt.name} payment`,
+      date: this.date,
+      notes: `Principal: $${toDollars(principalCents).toFixed(2)}, Interest: $${toDollars(interestCents).toFixed(2)}`,
+      tags: 'debt,payment',
+      debtId: this.debtId
+    });
+
+    if (!txResult.isOk) throw new Error('Failed to create payment transaction');
+    this.transaction = txResult.data as Transaction;
+
+    // 3. Update debt state
+    const payment: DebtPayment = {
+      id: `pay_${generateId()}`,
+      date: this.date,
+      amount: this.amount,
+      principal: toDollars(principalCents),
+      interest: toDollars(interestCents),
+      transactionId: this.transaction.__backendId
+    };
+
+    const newBalanceCents = Math.max(0, toCents(this.originalDebt.balance) - principalCents);
+    this.updatedDebt = {
+      ...this.originalDebt,
+      balance: toDollars(newBalanceCents),
+      payments: [...this.originalDebt.payments, payment]
+    };
+
+    // Apply update to signals
+    signals.debts.value = currentDebts.map(d => d.id === this.debtId ? this.updatedDebt! : d);
+    persist(SK.DEBTS, signals.debts.value);
+
+    return {
+      isOk: true,
+      debt: this.updatedDebt,
+      payment,
+      transaction: this.transaction
+    };
+  }
+
+  async rollback(): Promise<void> {
+    // Restore original debt state
+    if (this.originalDebt) {
+      const currentDebts = (signals.debts.value as Debt[]) || [];
+      signals.debts.value = currentDebts.map(d => d.id === this.debtId ? this.originalDebt! : d);
+      persist(SK.DEBTS, signals.debts.value);
+    }
+
+    // Delete the transaction if it was created
+    if (this.transaction) {
+      await dataSdk.delete(this.transaction);
+    }
+  }
+}
+
+// ==========================================
 // PAYMENT RECORDING
 // ==========================================
 
 /**
  * Record a payment on a debt
- * Creates a transaction AND updates the debt balance (integrated approach)
+ * FIXED: Now uses atomic TransactionManager to prevent data corruption
  */
 export async function recordPayment(debtId: string, amount: number | string, date: string | null = null): Promise<PaymentResult> {
-  const debt = getDebt(debtId);
-  if (!debt) {
-    return { isOk: false, error: 'Debt not found' };
-  }
-
   const paymentAmount = parseAmount(amount);
-  if (paymentAmount <= 0) {
-    return { isOk: false, error: 'Payment amount must be positive' };
-  }
-
   const paymentDate = date || getTodayStr();
 
-  // Calculate how much goes to interest vs principal
-  // Simple monthly interest calculation (APR / 12)
-  const monthlyRate = debt.interestRate / 12;
-  const interestPortion = toDollars(Math.round(toCents(debt.balance) * monthlyRate));
-  const principalPortion = Math.max(0, paymentAmount - interestPortion);
+  try {
+    const result = await withTransaction<PaymentResult>(
+      [new DebtPaymentOperation(debtId, paymentAmount, paymentDate)],
+      (results: PaymentResult[]) => results[0] as PaymentResult
+    );
 
-  // Create expense transaction for the payment
-  const txResult = await dataSdk.create({
-    type: 'expense',
-    category: DEBT_PAYMENT_CATEGORY,
-    amount: paymentAmount,
-    description: `${debt.name} payment`,
-    date: paymentDate,
-    notes: `Principal: $${principalPortion.toFixed(2)}, Interest: $${interestPortion.toFixed(2)}`,
-    tags: 'debt,payment',
-    debtId: debtId  // Link to debt for reference
-  });
+    if (result.isOk) {
+      emit(Events.DEBT_PAYMENT, result);
+    }
 
-  if (!txResult.isOk) {
-    return { isOk: false, error: 'Failed to create payment transaction' };
+    return result;
+  } catch (error) {
+    return { 
+      isOk: false, 
+      error: error instanceof Error ? error.message : 'Unknown error during payment' 
+    };
   }
-
-  // Record payment in debt history
-  const payment: DebtPayment = {
-    id: `pay_${generateId()}`,
-    date: paymentDate,
-    amount: paymentAmount,
-    principal: principalPortion,
-    interest: interestPortion,
-    transactionId: (txResult.data as Transaction).__backendId
-  };
-
-  // Update debt balance (reduce by principal portion)
-  const newBalanceCents = Math.max(0, toCents(debt.balance) - toCents(principalPortion));
-  const updatedDebt = {
-    ...debt,
-    balance: toDollars(newBalanceCents),
-    payments: [...debt.payments, payment]
-  };
-
-  // Use immutable update to trigger signal effects
-  const currentDebts = (signals.debts.value as Debt[]) || [];
-  signals.debts.value = currentDebts.map(d => d.id === debtId ? updatedDebt : d);
-  persist(SK.DEBTS, signals.debts.value);
-  emit(Events.DEBT_PAYMENT, { debt: updatedDebt, payment, transaction: txResult.data });
-
-  return {
-    isOk: true,
-    debt: updatedDebt,
-    payment,
-    transaction: txResult.data as Transaction
-  };
 }
 
 // ==========================================
@@ -356,6 +402,22 @@ export function generateAmortizationSchedule(debt: Debt, extraPayment: number = 
     month++;
 
     const interestCents = Math.round(balanceCents * monthlyRate);
+
+    // If payment doesn't cover interest, record the shortfall and stop
+    if (interestCents >= paymentCents) {
+      const principalCents = 0;
+      const actualPaymentCents = paymentCents;
+      balanceCents = balanceCents + interestCents - paymentCents;
+      schedule.push({
+        month,
+        payment: toDollars(actualPaymentCents),
+        principal: toDollars(principalCents),
+        interest: toDollars(interestCents),
+        balance: toDollars(balanceCents)
+      });
+      break;
+    }
+
     const principalCents = Math.min(paymentCents - interestCents, balanceCents);
     const actualPaymentCents = interestCents + principalCents;
 
@@ -369,8 +431,8 @@ export function generateAmortizationSchedule(debt: Debt, extraPayment: number = 
       balance: toDollars(balanceCents)
     });
 
-    // Stop if payment doesn't cover interest
-    if (interestCents >= paymentCents) break;
+    // Early exit: no need to continue once balance is fully paid
+    if (balanceCents <= 0) break;
   }
 
   return schedule;
@@ -381,10 +443,18 @@ export function generateAmortizationSchedule(debt: Debt, extraPayment: number = 
 // ==========================================
 
 /**
- * Calculate snowball payoff strategy (smallest balance first)
- * Good for psychological wins
+ * Configuration for payoff simulations
  */
-export function calculateSnowball(debts: Debt[], extraMonthly: number = 0): PayoffStrategyResult {
+export interface PayoffConfig {
+  interestTiming?: 'before_payment' | 'after_payment' | 'mid_month';
+  enableRollover?: boolean;
+}
+
+/**
+ * Calculate snowball payoff strategy (smallest balance first)
+ * Good for psychological wins and motivation
+ */
+export function calculateSnowball(debts: Debt[], extraMonthly: number = 0, config?: PayoffConfig): PayoffStrategyResult {
   const activeDebts = debts.filter(d => d.balance > 0 && d.isActive !== false);
   if (!activeDebts.length) {
     return { months: 0, totalInterest: 0, order: [], schedule: [] };
@@ -392,14 +462,14 @@ export function calculateSnowball(debts: Debt[], extraMonthly: number = 0): Payo
 
   // Sort by balance ascending (smallest first)
   const sorted = [...activeDebts].sort((a, b) => a.balance - b.balance);
-  return simulatePayoffStrategy(sorted, extraMonthly);
+  return simulatePayoffStrategy(sorted, extraMonthly, config);
 }
 
 /**
  * Calculate avalanche payoff strategy (highest interest first)
  * Mathematically optimal - saves most on interest
  */
-export function calculateAvalanche(debts: Debt[], extraMonthly: number = 0): PayoffStrategyResult {
+export function calculateAvalanche(debts: Debt[], extraMonthly: number = 0, config?: PayoffConfig): PayoffStrategyResult {
   const activeDebts = debts.filter(d => d.balance > 0 && d.isActive !== false);
   if (!activeDebts.length) {
     return { months: 0, totalInterest: 0, order: [], schedule: [] };
@@ -407,13 +477,43 @@ export function calculateAvalanche(debts: Debt[], extraMonthly: number = 0): Pay
 
   // Sort by interest rate descending (highest first)
   const sorted = [...activeDebts].sort((a, b) => b.interestRate - a.interestRate);
-  return simulatePayoffStrategy(sorted, extraMonthly);
+  return simulatePayoffStrategy(sorted, extraMonthly, config);
 }
 
 /**
- * Simulate payoff with debts in a specific order
+ * Calculate custom order payoff strategy
+ * Allows user to specify their own priority order
  */
-function simulatePayoffStrategy(sortedDebts: Debt[], extraMonthly: number): PayoffStrategyResult {
+export function calculateCustomOrder(debts: Debt[], order: string[], extraMonthly: number = 0, config?: PayoffConfig): PayoffStrategyResult {
+  const activeDebts = debts.filter(d => d.balance > 0 && d.isActive !== false);
+  if (!activeDebts.length) {
+    return { months: 0, totalInterest: 0, order: [], schedule: [] };
+  }
+
+  // Sort by specified order
+  const orderMap = new Map(order.map((id, idx) => [id, idx]));
+  const sorted = [...activeDebts].sort((a, b) => {
+    const aOrder = orderMap.get(a.id) ?? 999;
+    const bOrder = orderMap.get(b.id) ?? 999;
+    return aOrder - bOrder;
+  });
+
+  return simulatePayoffStrategy(sorted, extraMonthly, config);
+}
+
+/**
+ * Enhanced payoff simulation with payment rollover and configurable interest timing
+ */
+function simulatePayoffStrategy(sortedDebts: Debt[], extraMonthly: number, options?: {
+  interestTiming?: 'before_payment' | 'after_payment' | 'mid_month';
+  enableRollover?: boolean;
+}): PayoffStrategyResult {
+  const config = {
+    interestTiming: 'mid_month' as const,  // More realistic mid-month payment timing
+    enableRollover: true,                  // Enable payment rollover by default
+    ...options
+  };
+
   // Clone debts with cents balances
   const debtStates: DebtState[] = sortedDebts.map(d => ({
     id: d.id,
@@ -424,9 +524,10 @@ function simulatePayoffStrategy(sortedDebts: Debt[], extraMonthly: number): Payo
     paidOffMonth: null
   }));
 
-  const extraCents = toCents(extraMonthly);
+  const baseExtraCents = toCents(extraMonthly);
   let totalInterestCents = 0;
   let month = 0;
+  let totalReleasedCents = 0; // Accumulate freed-up minimum payments
   const maxMonths = 1200;
   const order: DebtPayoffOrder[] = [];
   const schedule: PayoffScheduleEntry[] = [];
@@ -434,50 +535,94 @@ function simulatePayoffStrategy(sortedDebts: Debt[], extraMonthly: number): Payo
   while (debtStates.some(d => d.balanceCents > 0) && month < maxMonths) {
     month++;
     let monthInterest = 0;
-    let availableExtraCents = extraCents;
+    
+    // Total available extra = base extra + rollover from paid-off debts
+    let availableExtraCents = baseExtraCents + (config.enableRollover ? totalReleasedCents : 0);
+    let monthlyReleasedCents = 0; // Track releases this month
 
     // Find the focus debt (first one with balance > 0)
     const focusIdx = debtStates.findIndex(d => d.balanceCents > 0);
 
     debtStates.forEach((debt, idx) => {
-      if (debt.balanceCents <= 0) return;
+      if (debt.balanceCents <= 0 || debt.paidOffMonth !== null) return;
 
-      // Calculate interest
-      const interestCents = Math.round(debt.balanceCents * debt.rateCents);
+      let interestCents: number;
+      let effectiveBalance = debt.balanceCents;
+
+      // Apply interest timing strategy
+      if (config.interestTiming === 'mid_month') {
+        // More realistic: apply interest on average balance (assumes mid-month payment)
+        const minPayment = Math.min(debt.minPaymentCents, debt.balanceCents);
+        const avgBalance = debt.balanceCents - (minPayment / 2); // Approximate mid-month balance
+        interestCents = Math.round(Math.max(0, avgBalance) * debt.rateCents);
+      } else if (config.interestTiming === 'after_payment') {
+        // Payment first, then interest (most favorable to user)
+        const minPayment = Math.min(debt.minPaymentCents, debt.balanceCents);
+        effectiveBalance = debt.balanceCents - minPayment;
+        interestCents = Math.round(Math.max(0, effectiveBalance) * debt.rateCents);
+      } else {
+        // Traditional: interest before payment (current implementation)
+        interestCents = Math.round(debt.balanceCents * debt.rateCents);
+      }
+
       debt.balanceCents += interestCents;
       monthInterest += interestCents;
 
       // Apply minimum payment
-      const paymentCents = Math.min(debt.minPaymentCents, debt.balanceCents);
-      debt.balanceCents -= paymentCents;
+      const minPaymentCents = Math.min(debt.minPaymentCents, debt.balanceCents);
+      debt.balanceCents -= minPaymentCents;
 
-      // Apply extra to focus debt
+      // Apply extra to focus debt only
       if (idx === focusIdx && availableExtraCents > 0) {
         const extraApplied = Math.min(availableExtraCents, debt.balanceCents);
         debt.balanceCents -= extraApplied;
         availableExtraCents -= extraApplied;
       }
 
-      // Check if paid off
+      // Check if paid off this month
       if (debt.balanceCents <= 0 && debt.paidOffMonth === null) {
         debt.paidOffMonth = month;
         debt.balanceCents = 0;
         order.push({ id: debt.id, name: debt.name, month });
 
-        // Released minimum payment becomes available for next debt
-        // (This is the "snowball" effect)
+        // CRITICAL FIX: Add freed-up minimum payment to rollover pool
+        if (config.enableRollover) {
+          monthlyReleasedCents += debt.minPaymentCents;
+          if (import.meta.env.DEV) console.log(`Debt '${debt.name}' paid off in month ${month}. Releasing $${toDollars(debt.minPaymentCents)}/month for accelerated payoff.`);
+        }
+
+        // NOTE: Do NOT emit DEBT_PAID_OFF here — this is a simulation/projection,
+        // not an actual payoff. Emitting would trigger celebrations/achievements
+        // for debts that are not actually paid off.
       }
     });
+
+    // Add this month's released payments to the cumulative total
+    totalReleasedCents += monthlyReleasedCents;
 
     totalInterestCents += monthInterest;
 
     // Record monthly snapshot (first 60 months for chart)
     if (month <= 60) {
+      const totalBalance = debtStates.reduce((s, d) => s + d.balanceCents, 0);
       schedule.push({
         month,
-        totalBalance: toDollars(debtStates.reduce((s, d) => s + d.balanceCents, 0)),
-        interest: toDollars(monthInterest)
+        totalBalance: toDollars(totalBalance),
+        interest: toDollars(monthInterest),
+        availableExtra: toDollars(baseExtraCents + totalReleasedCents), // Show growing extra payment power
+        releasedThisMonth: toDollars(monthlyReleasedCents)
       });
+    }
+
+    // Safety check for negative amortization
+    const activeDebts = debtStates.filter(d => d.balanceCents > 0);
+    if (activeDebts.some(d => {
+      const monthlyInterest = Math.round(d.balanceCents * d.rateCents);
+      const totalPayment = d.minPaymentCents + (activeDebts[0] === d ? availableExtraCents : 0);
+      return monthlyInterest >= totalPayment;
+    }) && month > 12) {
+      if (import.meta.env.DEV) console.warn('Negative amortization detected - payments do not cover interest');
+      break;
     }
   }
 
@@ -485,26 +630,153 @@ function simulatePayoffStrategy(sortedDebts: Debt[], extraMonthly: number): Payo
     months: month,
     totalInterest: toDollars(totalInterestCents),
     order,
-    schedule
+    schedule,
+    totalReleased: toDollars(totalReleasedCents), // New: show total payment acceleration
+    paymentAcceleration: config.enableRollover ? toDollars(totalReleasedCents) : 0
   };
 }
 
 /**
- * Compare snowball and avalanche strategies
+ * Enhanced strategy comparison with configurable simulation options
  */
-export function compareStrategies(debts: Debt[], extraMonthly: number = 0): StrategyComparison {
-  const snowball = calculateSnowball(debts, extraMonthly);
-  const avalanche = calculateAvalanche(debts, extraMonthly);
+export function compareStrategies(debts: Debt[], extraMonthly: number = 0, config?: PayoffConfig): StrategyComparison {
+  const snowball = calculateSnowball(debts, extraMonthly, config);
+  const avalanche = calculateAvalanche(debts, extraMonthly, config);
 
   const interestSaved = snowball.totalInterest - avalanche.totalInterest;
   const timeDiff = snowball.months - avalanche.months;
+
+  // Enhanced recommendation logic that considers both savings and time
+  let recommended: 'avalanche' | 'snowball';
+  if (interestSaved > 500) {
+    // Significant interest savings favor avalanche
+    recommended = 'avalanche';
+  } else if (interestSaved < 100 && timeDiff < 6) {
+    // Small difference - go with psychological wins
+    recommended = 'snowball';
+  } else {
+    // Default to avalanche for meaningful savings
+    recommended = interestSaved > 100 ? 'avalanche' : 'snowball';
+  }
 
   return {
     snowball,
     avalanche,
     interestSaved,      // Positive = avalanche saves more
-    timeDiff,           // Positive = avalanche is faster
-    recommended: interestSaved > 100 ? 'avalanche' : 'snowball'  // Recommend avalanche if saves $100+
+    timeDiff,           // Positive = avalanche is faster  
+    recommended,
+    rolloverImpact: config?.enableRollover ? {
+      snowballAcceleration: snowball.paymentAcceleration || 0,
+      avalancheAcceleration: avalanche.paymentAcceleration || 0,
+      accelerationDifference: (avalanche.paymentAcceleration || 0) - (snowball.paymentAcceleration || 0)
+    } : undefined
+  };
+}
+
+/**
+ * Get detailed simulation insights for a specific strategy
+ */
+export function getStrategyInsights(debts: Debt[], strategy: 'snowball' | 'avalanche' | 'custom', extraMonthly: number = 0, customOrder?: string[]): {
+  result: PayoffStrategyResult;
+  insights: {
+    totalPayments: number;
+    averageMonthlyPayment: number;
+    largestPaymentBoost: number;
+    earlyPayoffCount: number;
+    motivationScore: number;
+  };
+} {
+  let result: PayoffStrategyResult;
+  
+  switch (strategy) {
+    case 'snowball':
+      result = calculateSnowball(debts, extraMonthly);
+      break;
+    case 'avalanche':
+      result = calculateAvalanche(debts, extraMonthly);
+      break;
+    case 'custom':
+      result = calculateCustomOrder(debts, customOrder || [], extraMonthly);
+      break;
+  }
+
+  const totalBalance = debts.reduce((sum, d) => sum + d.balance, 0);
+  const totalMinimums = debts.reduce((sum, d) => sum + d.minimumPayment, 0);
+  const totalPayments = totalBalance + result.totalInterest;
+  const averageMonthlyPayment = result.months > 0 ? totalPayments / result.months : 0;
+
+  // Calculate largest payment boost from rollover
+  const largestPaymentBoost = result.totalReleased || 0;
+
+  // Count debts paid off in first 2 years (motivational factor)
+  const earlyPayoffCount = result.order.filter(o => o.month <= 24).length;
+
+  // Motivation score (0-100) based on early wins and time to completion
+  let motivationScore = Math.max(0, 100 - result.months * 2); // Base score decreases with time
+  motivationScore += earlyPayoffCount * 15; // Bonus for early payoffs
+  if (strategy === 'snowball') motivationScore += 10; // Psychological bonus
+  motivationScore = Math.min(100, motivationScore);
+
+  return {
+    result,
+    insights: {
+      totalPayments,
+      averageMonthlyPayment,
+      largestPaymentBoost,
+      earlyPayoffCount,
+      motivationScore
+    }
+  };
+}
+
+// recordDebtPayment removed - use recordPayment() (async, uses dataSdk) as the single authority
+// for recording debt payments with proper transaction creation.
+//
+// Old synchronous recordDebtPayment bypassed dataSdk and manually persisted to localStorage,
+// which could desync with IndexedDB and skip multi-tab sync protections.
+
+/** @deprecated Use recordPayment() instead - this bypasses dataSdk */
+export function recordDebtPayment(_debtId: string, _amount: number, _description?: string): PaymentResult {
+  throw new Error('recordDebtPayment is deprecated. Use recordPayment() which persists via dataSdk.');
+}
+
+/**
+ * Calculate total interest paid on a debt based on payment history
+ */
+function calculateTotalInterestPaid(debt: Debt): number {
+  const totalPaid = (debt.payments || []).reduce((sum, p) => sum + p.amount, 0);
+  const principalPaid = (debt.originalBalance || 0) - debt.balance;
+  return Math.max(0, totalPaid - principalPaid);
+}
+
+/**
+ * Simulate a payment schedule for visualization
+ */
+export function simulatePaymentSchedule(debt: Debt, paymentAmount: number): {
+  schedule: Array<{
+    month: number;
+    payment: number;
+    principal: number;
+    interest: number;
+    balance: number;
+  }>;
+  summary: {
+    totalMonths: number;
+    totalInterest: number;
+    totalPayments: number;
+  };
+} {
+  const schedule = generateAmortizationSchedule(debt, paymentAmount - debt.minimumPayment);
+  const totalInterest = schedule.reduce((sum, entry) => sum + entry.interest, 0);
+  const totalPayments = schedule.reduce((sum, entry) => sum + entry.payment, 0);
+
+  return {
+    schedule,
+    summary: {
+      totalMonths: schedule.length,
+      totalInterest,
+      totalPayments
+    }
   };
 }
 
@@ -599,23 +871,56 @@ export function getMonthlyDebtPayments(): number {
 // ==========================================
 
 /**
- * Initialize debt planner module
- * Ensures the debt payment category exists
+ * Initialize debt planner module and register feature event listeners
+ * Ensures the debt payment category exists using proper state management
  */
 export function initDebtPlanner(): void {
-  // Debts are already loaded via state.js
-  // Check if debt_payment category exists in custom categories
-  const hasDebtCat = signals.customCats.value?.some(c => c.id === DEBT_PAYMENT_CATEGORY);
+  // Register Feature Event Listeners
+  // Request: Get all debts
+  on(FeatureEvents.REQUEST_DEBTS, (data: any) => {
+    const responseEvent = data.responseEvent;
+    if (responseEvent) {
+      const result = getDebts();
+      emit(responseEvent, { type: FeatureEvents.REQUEST_DEBTS, result });
+    }
+  });
 
-  if (!hasDebtCat && signals.customCats.value) {
-    // Auto-create debt payment category if it doesn't exist
-    signals.customCats.value.push({
+  // Action: Add debt
+  on(FeatureEvents.ADD_DEBT, (debt: Debt) => {
+    addDebt(debt);
+  });
+
+  // Action: Update debt
+  on(FeatureEvents.UPDATE_DEBT, (data: { id: string, updates: Partial<Debt> }) => {
+    updateDebt(data.id, data.updates);
+  });
+
+  // Action: Delete debt
+  on(FeatureEvents.DELETE_DEBT, (data: { id: string }) => {
+    deleteDebt(data.id);
+  });
+
+  // Check if debt_payment category exists in custom categories
+  const currentCustomCats = signals.customCats.value || [];
+  const hasDebtCat = currentCustomCats.some(c => c.id === DEBT_PAYMENT_CATEGORY);
+
+  if (!hasDebtCat) {
+    // ARCHITECTURE FIX: Use immutable update to trigger reactive effects
+    const newCategory = {
       id: DEBT_PAYMENT_CATEGORY,
       name: 'Debt Payment',
-      type: 'expense',
+      type: 'expense' as const,
       emoji: '💳',
       color: '#dc2626'  // Red
-    });
+    };
+    
+    // Create new array reference to ensure signals trigger properly
+    signals.customCats.value = [...currentCustomCats, newCategory];
     persist(SK.CUSTOM_CAT, signals.customCats.value);
+    
+    if (import.meta.env.DEV) console.debug('Created debt payment category with proper signal reactivity');
+    emit(Events.CATEGORY_UPDATED, newCategory);
   }
+
+  if (import.meta.env.DEV) console.debug('Debt planner feature events initialized');
 }

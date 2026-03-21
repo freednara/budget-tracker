@@ -10,18 +10,21 @@
 import { SK, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
 import { settings } from '../../core/state-actions.js';
-import { showToast } from '../core/ui.js';
+import { showToast, openModal, closeModal } from '../core/ui.js';
 import { escapeHtml } from '../../core/utils.js';
 import { validator } from '../../core/validator.js';
 import {
   createPinWithRecovery,
-  verifyPin as verifyPinCrypto,
   recoverPinHash,
   hasRecoveryEnabled,
-  validateRecoveryPhrase
+  validateRecoveryPhrase,
+  verifyPin
 } from '../../features/security/pin-crypto.js';
+import { on, emit } from '../../core/event-bus.js';
+import { FeatureEvents } from '../../core/feature-event-interface.js';
 import DOM from '../../core/dom-cache.js';
-import type { PinBundle } from '../../../types/index.js';
+import { checkRateLimit, recordAttempt, formatLockoutTime } from '../../features/security/rate-limiter.js';
+// PinBundle type now only used internally by pin-crypto.ts
 
 // ==========================================
 // TYPE DEFINITIONS
@@ -38,6 +41,9 @@ interface PinConfig {
 // Store pending recovery phrase for display
 let pendingRecoveryPhrase: string | null = null;
 
+// Lockout countdown timer
+let lockoutIntervalId: ReturnType<typeof setInterval> | null = null;
+
 // Configuration (set by app.js)
 let pinConfig: PinConfig = {
   PIN_ERROR_DISPLAY: 2000
@@ -51,42 +57,75 @@ export function setPinConfig(config: Partial<PinConfig>): void {
 }
 
 // ==========================================
-// PIN VERIFICATION
+// RATE-LIMIT UI HELPERS
 // ==========================================
 
 /**
- * Verify entered PIN against stored PIN
- * Supports multiple formats: recovery-enabled, PBKDF2, SHA-256, plaintext
+ * Show lockout countdown on the PIN error element and disable input
  */
-export async function verifyPin(entered: string, stored: string): Promise<boolean> {
-  // Check for recovery-enabled format (JSON with version: 2)
-  if (hasRecoveryEnabled(stored)) {
-    try {
-      const bundle = JSON.parse(stored) as PinBundle;
-      return verifyPinCrypto(entered, bundle.hash);
-    } catch {
-      return false;
+function showLockoutUI(waitMs: number): void {
+  clearLockoutInterval();
+
+  const pinInput = DOM.get('pin-input') as HTMLInputElement | null;
+  const pinError = DOM.get('pin-error');
+  if (pinInput) {
+    pinInput.disabled = true;
+    pinInput.value = '';
+  }
+
+  const endTime = Date.now() + waitMs;
+
+  function updateCountdown(): void {
+    const remaining = endTime - Date.now();
+    if (remaining <= 0) {
+      clearLockoutInterval();
+      if (pinError) {
+        pinError.textContent = '';
+        pinError.classList.add('hidden');
+      }
+      if (pinInput) {
+        pinInput.disabled = false;
+        pinInput.focus();
+      }
+      return;
+    }
+    if (pinError) {
+      pinError.textContent = `Locked for ${formatLockoutTime(remaining)}`;
+      pinError.classList.remove('hidden');
     }
   }
 
-  // Legacy PBKDF2 format (salt:hash with base64)
-  if (stored.includes(':')) {
-    return verifyPinCrypto(entered, stored);
-  }
-
-  // Very old legacy SHA-256 hash (64 hex chars, no salt)
-  if (/^[0-9a-f]{64}$/.test(stored)) {
-    const encoder = new TextEncoder();
-    const buf = await crypto.subtle.digest('SHA-256', encoder.encode(entered));
-    const hash = Array.from(new Uint8Array(buf))
-      .map(b => b.toString(16).padStart(2, '0'))
-      .join('');
-    return hash === stored;
-  }
-
-  // Plaintext comparison (very old)
-  return entered === stored;
+  updateCountdown();
+  lockoutIntervalId = setInterval(updateCountdown, 1000);
 }
+
+function clearLockoutInterval(): void {
+  if (lockoutIntervalId !== null) {
+    clearInterval(lockoutIntervalId);
+    lockoutIntervalId = null;
+  }
+}
+
+/**
+ * Show remaining attempts feedback on the PIN error element
+ */
+function showAttemptsRemaining(remaining: number): void {
+  const pinError = DOM.get('pin-error');
+  if (pinError) {
+    pinError.textContent = remaining > 0
+      ? `Incorrect PIN. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining`
+      : 'Too many attempts';
+    pinError.classList.remove('hidden');
+    setTimeout(() => pinError.classList.add('hidden'), pinConfig.PIN_ERROR_DISPLAY);
+  }
+}
+
+// ==========================================
+// PIN VERIFICATION
+// ==========================================
+
+// verifyPin is now fully handled by pin-crypto.ts (single source of truth for all formats)
+export { verifyPin };
 
 /**
  * Check PIN entry and unlock if valid
@@ -96,8 +135,17 @@ async function checkPinEntry(entered: string, explicit: boolean = false): Promis
   const isHashed = hasRecoveryEnabled(pin) || pin.includes(':') || /^[0-9a-f]{64}$/.test(pin);
   if (isHashed && !explicit) return; // hashed PIN: only verify on explicit submit
 
+  // Rate-limit check before attempting verification
+  const limit = checkRateLimit();
+  if (!limit.allowed) {
+    showLockoutUI(limit.waitMs);
+    return;
+  }
+
   const match = await verifyPin(entered, pin);
   if (match) {
+    recordAttempt(true);
+    clearLockoutInterval();
     // Auto-upgrade legacy PIN to recovery-enabled format
     if (!hasRecoveryEnabled(pin)) {
       try {
@@ -107,17 +155,22 @@ async function checkPinEntry(entered: string, explicit: boolean = false): Promis
         // Note: We don't show recovery phrase on auto-upgrade to avoid interruption
         // User can reset PIN in settings to get a new recovery phrase
       } catch (err) {
-        console.warn('PIN upgrade failed:', err);
+        if (import.meta.env.DEV) console.warn('PIN upgrade failed:', err);
       }
     }
     DOM.get('pin-overlay')?.classList.remove('active');
     const pinInput = DOM.get('pin-input') as HTMLInputElement | null;
     if (pinInput) pinInput.value = '';
   } else if (explicit || (!isHashed && entered.length >= pin.length)) {
-    DOM.get('pin-error')?.classList.remove('hidden');
+    recordAttempt(false);
+    const updated = checkRateLimit();
+    if (!updated.allowed) {
+      showLockoutUI(updated.waitMs);
+    } else {
+      showAttemptsRemaining(updated.attemptsRemaining);
+    }
     const pinInput = DOM.get('pin-input') as HTMLInputElement | null;
     if (pinInput) pinInput.value = '';
-    setTimeout(() => DOM.get('pin-error')?.classList.add('hidden'), pinConfig.PIN_ERROR_DISPLAY);
   }
 }
 
@@ -126,9 +179,33 @@ async function checkPinEntry(entered: string, explicit: boolean = false): Promis
 // ==========================================
 
 /**
- * Initialize all PIN-related event handlers
+ * Initialize all PIN-related event handlers and register feature event listeners
  */
 export function initPinHandlers(): void {
+  // Register Feature Event Listeners
+  // Request: PIN check
+  on(FeatureEvents.REQUEST_PIN_CHECK, async (data: any) => {
+    const { pin } = data.payload || {};
+    const responseEvent = data.responseEvent;
+    if (responseEvent) {
+      const storedPin = signals.pin.value;
+      const result = await verifyPin(pin, storedPin);
+      emit(responseEvent, { type: FeatureEvents.REQUEST_PIN_CHECK, result });
+    }
+  });
+
+  // Action: Update PIN
+  on(FeatureEvents.UPDATE_PIN, async (bundle: any) => {
+    settings.setPin(bundle);
+    persist(SK.PIN, bundle);
+  });
+
+  // Action: Clear PIN
+  on(FeatureEvents.CLEAR_PIN, () => {
+    settings.setPin('');
+    persist(SK.PIN, '');
+  });
+
   // PIN setup with recovery phrase
   DOM.get('save-pin-btn')?.addEventListener('click', async () => {
     const settingsPin = DOM.get('settings-pin') as HTMLInputElement | null;
@@ -153,7 +230,7 @@ export function initPinHandlers(): void {
       const words = recoveryPhrase.split(' ');
       const grid = document.querySelector('#recovery-phrase-display .grid');
       if (grid) {
-        grid.innerHTML = words.map((word, i) =>
+        grid.innerHTML = words.map((word: string, i: number) =>
           `<div class="p-2 rounded text-center" style="background: var(--bg-primary);">
             <span class="text-xs" style="color: var(--text-tertiary);">${i + 1}.</span>
             <span class="font-bold" style="color: var(--text-primary);">${escapeHtml(word)}</span>
@@ -161,13 +238,9 @@ export function initPinHandlers(): void {
         ).join('');
       }
 
-      const phraseModal = DOM.get('recovery-phrase-modal');
-      if (phraseModal) {
-        phraseModal.classList.remove('hidden');
-        phraseModal.classList.add('active');
-      }
+      openModal('recovery-phrase-modal');
     } catch (err) {
-      console.error('PIN setup failed:', err);
+      if (import.meta.env.DEV) console.error('PIN setup failed:', err);
       showToast('Failed to set PIN', 'error');
     }
   });
@@ -186,11 +259,7 @@ export function initPinHandlers(): void {
   // Confirm recovery phrase saved
   DOM.get('confirm-recovery-btn')?.addEventListener('click', () => {
     pendingRecoveryPhrase = null;
-    const phraseModal = DOM.get('recovery-phrase-modal');
-    if (phraseModal) {
-      phraseModal.classList.remove('active');
-      phraseModal.classList.add('hidden');
-    }
+    closeModal('recovery-phrase-modal');
     showToast('PIN set with recovery!', 'success');
   });
 
@@ -208,11 +277,7 @@ export function initPinHandlers(): void {
       showToast('No recovery phrase set for this PIN', 'error');
       return;
     }
-    const inputModal = DOM.get('recovery-input-modal');
-    if (inputModal) {
-      inputModal.classList.remove('hidden');
-      inputModal.classList.add('active');
-    }
+    openModal('recovery-input-modal');
     const input = DOM.get('recovery-phrase-input') as HTMLInputElement | null;
     if (input) input.value = '';
     DOM.get('recovery-error')?.classList.add('hidden');
@@ -220,11 +285,7 @@ export function initPinHandlers(): void {
 
   // Cancel recovery
   DOM.get('cancel-recovery-btn')?.addEventListener('click', () => {
-    const inputModal = DOM.get('recovery-input-modal');
-    if (inputModal) {
-      inputModal.classList.remove('active');
-      inputModal.classList.add('hidden');
-    }
+    closeModal('recovery-input-modal');
   });
 
   // Submit recovery phrase
@@ -246,11 +307,7 @@ export function initPinHandlers(): void {
       const recoveredHash = await recoverPinHash(pin, phrase);
       if (recoveredHash) {
         // Recovery successful - unlock and prompt to set new PIN
-        const inputModal = DOM.get('recovery-input-modal');
-        if (inputModal) {
-          inputModal.classList.remove('active');
-          inputModal.classList.add('hidden');
-        }
+        closeModal('recovery-input-modal');
         DOM.get('pin-overlay')?.classList.remove('active');
         const pinInput = DOM.get('pin-input') as HTMLInputElement | null;
         if (pinInput) pinInput.value = '';
@@ -268,7 +325,7 @@ export function initPinHandlers(): void {
         }
       }
     } catch (err) {
-      console.error('Recovery failed:', err);
+      if (import.meta.env.DEV) console.error('Recovery failed:', err);
       const errorEl = DOM.get('recovery-error');
       if (errorEl) {
         errorEl.textContent = 'Recovery failed';

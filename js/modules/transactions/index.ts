@@ -22,20 +22,14 @@ export {
   deleteTemplate,
   renderTemplates,
   setTemplateFmtCurFn,
-  setTemplateRenderCategoriesFn
+  setTemplateRenderCategoriesFn,
+  setTemplateSwitchTabFn
 } from './template-manager.js';
 
 // Edit mode
 export {
   startEditing,
   cancelEditing,
-  updateRecurringPreview,
-  setSwitchTabFn,
-  setGetTodayStrFn,
-  setEditRenderCategoriesFn,
-  setEditConfig,
-  type SwitchTabCallback,
-  type GetTodayStrCallback,
-  type RenderCategoriesCallback,
-  type EditModeConfig
+  mountRecurringPreview,
+  mountEditUI
 } from './edit-mode.js';

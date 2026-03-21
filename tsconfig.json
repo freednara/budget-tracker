@@ -11,8 +11,18 @@
     "checkJs": false,
     "isolatedModules": true,
     "resolveJsonModule": true,
-    "lib": ["ESNext", "DOM", "DOM.Iterable"]
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "removeComments": true
   },
-  "include": ["js/**/*", "app.js"],
+  "include": [
+    "js/**/*",
+    "app.ts",
+    "vite.config.ts",
+    "vitest.config.ts",
+    "test-app.ts",
+    "check_imports.ts",
+    "tests/**/*",
+    "e2e/**/*"
+  ],
   "exclude": ["node_modules", "dist"]
 }

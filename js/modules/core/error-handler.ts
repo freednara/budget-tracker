@@ -1,11 +1,21 @@
 /**
  * Error Handler Module
- * Provides centralized error handling and recovery mechanisms
- *
+ * Provides centralized error handling and recovery mechanisms (Backwards compatibility wrapper)
+ * 
  * @module error-handler
+ * @deprecated Use ErrorTracker.ts instead
  */
 
+import {
+  trackError,
+  getStoredErrors,
+  clearErrorLog as clearTrackerLog,
+  onError as onTrackerError,
+  displayError
+} from './error-tracker.js';
 import DOM from './dom-cache.js';
+import { esc } from './utils-dom.js';
+import { safeStorage, setStorageErrorHandler } from './safe-storage.js';
 
 // ==========================================
 // TYPE DEFINITIONS
@@ -21,109 +31,50 @@ export interface ErrorInfo {
   userMessage?: string;
 }
 
-export interface ErrorLogEntry extends ErrorInfo {
-  timestamp: string;
-}
-
+/**
+ * Backwards compatibility alias
+ */
+export type ErrorLogEntry = any;
 export type ErrorListener = (errorInfo: ErrorInfo) => void;
 
-type ToastType = 'error' | 'info';
+type ToastType = 'error' | 'info' | 'warning';
 
 // ==========================================
 // ERROR HANDLER CLASS
 // ==========================================
 
 class ErrorHandler {
-  private errorLog: ErrorLogEntry[] = [];
-  private maxLogSize = 100;
   private listeners = new Set<ErrorListener>();
 
   constructor() {
-    this.setupGlobalHandler();
-  }
-
-  private setupGlobalHandler(): void {
-    window.addEventListener('error', (event: ErrorEvent) => {
-      this.handleError({
-        message: event.message,
-        source: event.filename,
-        line: event.lineno,
-        column: event.colno,
-        error: event.error
-      });
-    });
-
-    window.addEventListener('unhandledrejection', (event: PromiseRejectionEvent) => {
-      this.handleError({
-        message: `Unhandled Promise: ${event.reason}`,
-        error: event.reason
+    // ErrorTracker handles its own global initialization
+    onTrackerError((tracked) => {
+      this.notifyListeners({
+        message: tracked.message,
+        error: new Error(tracked.message),
+        critical: tracked.type === 'unhandledRejection'
       });
     });
   }
 
   handleError(errorInfo: ErrorInfo): void {
-    this.logError(errorInfo);
-    this.notifyListeners(errorInfo);
+    const err = errorInfo.error instanceof Error ? errorInfo.error : new Error(errorInfo.message);
+    
+    trackError(err, {
+      module: errorInfo.source || 'ErrorHandler',
+      action: 'manual_handle'
+    });
 
-    if (errorInfo.critical) {
-      this.showUserNotification(errorInfo.userMessage || 'An error occurred. Your data is safe.');
-    }
-  }
-
-  private logError(errorInfo: ErrorInfo): void {
-    const entry: ErrorLogEntry = {
-      timestamp: new Date().toISOString(),
-      ...errorInfo
-    };
-
-    this.errorLog.push(entry);
-
-    if (this.errorLog.length > this.maxLogSize) {
-      this.errorLog.shift();
-    }
-
-    if (console && console.warn) {
-      console.warn('Error logged:', entry);
+    if (errorInfo.critical || errorInfo.userMessage) {
+      displayError(err, {
+        userMessage: errorInfo.userMessage,
+        context: { module: errorInfo.source }
+      });
     }
   }
 
   showUserNotification(message: string, type: ToastType = 'error'): void {
-    const existingToast = DOM.get('error-toast');
-    if (existingToast) {
-      existingToast.remove();
-    }
-
-    const toast = document.createElement('div');
-    toast.id = 'error-toast';
-    toast.className = `toast toast-${type}`;
-    toast.innerHTML = `
-      <div class="toast-content">
-        <span class="toast-icon">${type === 'error' ? '⚠️' : 'ℹ️'}</span>
-        <span class="toast-message">${this.escapeHtml(message)}</span>
-        <button class="toast-close">×</button>
-      </div>
-    `;
-
-    // Use addEventListener instead of inline onclick for CSP compliance
-    const closeBtn = toast.querySelector('.toast-close');
-    if (closeBtn) {
-      closeBtn.addEventListener('click', () => toast.remove());
-    }
-
-    document.body.appendChild(toast);
-
-    setTimeout(() => {
-      if (toast.parentNode) {
-        toast.classList.add('toast-fade-out');
-        setTimeout(() => toast.remove(), 300);
-      }
-    }, 5000);
-  }
-
-  private escapeHtml(text: string): string {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    import('../ui/core/ui.js').then(({ showToast }) => showToast(message, type));
   }
 
   addListener(callback: ErrorListener): void {
@@ -139,17 +90,17 @@ class ErrorHandler {
       try {
         callback(errorInfo);
       } catch (e) {
-        console.warn('Error in error listener:', e);
+        if (import.meta.env.DEV) console.warn('Error in error listener:', e);
       }
     });
   }
 
-  getRecentErrors(count = 10): ErrorLogEntry[] {
-    return this.errorLog.slice(-count);
+  getRecentErrors(count = 10): any[] {
+    return getStoredErrors().slice(-count);
   }
 
   clearErrorLog(): void {
-    this.errorLog = [];
+    clearTrackerLog();
   }
 }
 
@@ -160,158 +111,14 @@ class ErrorHandler {
 // Global error handler instance
 export const errorHandler = new ErrorHandler();
 
-// ==========================================
-// SAFE STORAGE WRAPPER
-// ==========================================
+// Register with safeStorage to maintain error reporting
+setStorageErrorHandler(errorHandler);
 
-/**
- * Safe localStorage wrapper with error handling
- */
-export const safeStorage = {
-  getItem(key: string): string | null {
-    try {
-      const value = localStorage.getItem(key);
-      return value;
-    } catch (error) {
-      errorHandler.handleError({
-        message: `Failed to read from localStorage: ${key}`,
-        error,
-        userMessage: 'Unable to load saved data. Please check your browser settings.'
-      });
-      return null;
-    }
-  },
+export { safeStorage };
 
-  setItem(key: string, value: string): boolean {
-    try {
-      localStorage.setItem(key, value);
-      return true;
-    } catch (error) {
-      if ((error as DOMException).name === 'QuotaExceededError') {
-        errorHandler.handleError({
-          message: `localStorage quota exceeded for key: ${key}`,
-          error,
-          critical: true,
-          userMessage: 'Storage is full! Please export your data and clear old entries.'
-        });
-      } else {
-        errorHandler.handleError({
-          message: `Failed to write to localStorage: ${key}`,
-          error,
-          userMessage: 'Unable to save data. Please check your browser settings.'
-        });
-      }
-      return false;
-    }
-  },
-
-  removeItem(key: string): boolean {
-    try {
-      localStorage.removeItem(key);
-      return true;
-    } catch (error) {
-      errorHandler.handleError({
-        message: `Failed to remove from localStorage: ${key}`,
-        error
-      });
-      return false;
-    }
-  },
-
-  clear(): boolean {
-    try {
-      localStorage.clear();
-      return true;
-    } catch (error) {
-      errorHandler.handleError({
-        message: 'Failed to clear localStorage',
-        error,
-        userMessage: 'Unable to clear storage. Please try again.'
-      });
-      return false;
-    }
-  },
-
-  getJSON<T>(key: string, defaultValue: T): T {
-    try {
-      const value = this.getItem(key);
-      if (value === null) return defaultValue;
-      return JSON.parse(value) as T;
-    } catch (error) {
-      errorHandler.handleError({
-        message: `Failed to parse JSON from localStorage: ${key}`,
-        error
-      });
-      return defaultValue;
-    }
-  },
-
-  setJSON(key: string, value: unknown): boolean {
-    try {
-      const json = JSON.stringify(value);
-      return this.setItem(key, json);
-    } catch (error) {
-      errorHandler.handleError({
-        message: `Failed to stringify JSON for localStorage: ${key}`,
-        error
-      });
-      return false;
-    }
-  }
-};
-
-// ==========================================
-// ERROR HANDLING WRAPPERS
-// ==========================================
-
-interface WithErrorHandlingOptions {
-  message?: string;
-  critical?: boolean;
-  userMessage?: string;
-  fallback?: unknown;
-}
-
-/**
- * Wrap async functions with error handling
- */
-export function withErrorHandling<T extends (...args: unknown[]) => Promise<unknown>>(
-  fn: T,
-  options: WithErrorHandlingOptions = {}
-): (...args: Parameters<T>) => Promise<ReturnType<T> | unknown> {
-  return async function(this: unknown, ...args: Parameters<T>): Promise<ReturnType<T> | unknown> {
-    try {
-      return await fn.apply(this, args);
-    } catch (error) {
-      errorHandler.handleError({
-        message: options.message || `Error in ${fn.name || 'anonymous function'}`,
-        error,
-        critical: options.critical,
-        userMessage: options.userMessage
-      });
-
-      if (options.fallback !== undefined) {
-        return options.fallback;
-      }
-
-      throw error;
-    }
-  };
-}
-
-/**
- * Wrap sync functions with error handling
- */
-export function tryCatch<T>(fn: () => T, fallback: T | null = null): T | null {
-  try {
-    return fn();
-  } catch (error) {
-    errorHandler.handleError({
-      message: `Error in sync operation`,
-      error
-    });
-    return fallback;
-  }
-}
+// withErrorHandling and tryCatch wrappers removed - unused throughout codebase.
+// Error handling is done inline where context-specific recovery is needed.
+// Error handling is done inline where context-specific recovery is needed.
 
 // ==========================================
 // TOAST STYLES

@@ -10,7 +10,7 @@ import DOM from '../../core/dom-cache.js';
 // TYPE DEFINITIONS
 // ==========================================
 
-type ToastType = 'success' | 'error' | 'info';
+type ToastType = 'success' | 'error' | 'info' | 'warning';
 
 interface ToastColors {
   bg: string;
@@ -69,13 +69,14 @@ export function showToast(message: string, type: ToastType = 'success'): void {
   const colors: Record<ToastType, ToastColors> = {
     success: { bg: 'var(--color-income)', icon: '✓' },
     error: { bg: 'var(--color-expense)', icon: '✕' },
-    info: { bg: 'var(--color-accent)', icon: 'ℹ' }
+    info: { bg: 'var(--color-accent)', icon: 'ℹ' },
+    warning: { bg: '#f59e0b', icon: '⚠' }
   };
 
   const { bg, icon } = colors[type] || colors.info;
 
   const toast = document.createElement('div');
-  toast.className = 'px-4 py-3 rounded-lg shadow-lg flex items-center gap-2 pointer-events-auto transform transition-all duration-300 translate-y-4 opacity-0';
+  toast.className = 'toast px-4 py-3 rounded-lg shadow-lg flex items-center gap-2 pointer-events-auto transform transition-all duration-300 translate-y-4 opacity-0';
   toast.style.cssText = `background: ${bg}; color: white; min-width: 200px;`;
   toast.innerHTML = `<span class="font-bold">${icon}</span><span class="text-sm font-semibold">${esc(message)}</span>`;
 
@@ -131,7 +132,7 @@ export function showUndoToast(
   undoBtn?.addEventListener('click', () => {
     if (onUndo) onUndo();
     dismiss();
-  });
+  }, { once: true });
 
   // Animate in
   requestAnimationFrame(() => {
@@ -277,13 +278,21 @@ export function openModal(id: string): void {
     mainContent.setAttribute('aria-hidden', 'true');
   }
 
+  m.classList.remove('hidden');
   m.classList.add('active');
+  m.style.display = 'flex';
+  m.setAttribute('aria-hidden', 'false');
 
   // Auto-focus first focusable element (after a small delay for animation)
   setTimeout(() => {
-    const focusables = getFocusableElements(m);
     const firstInput = m.querySelector<HTMLElement>('input:not([disabled]), select:not([disabled]), textarea:not([disabled])');
-    (firstInput || focusables[0])?.focus();
+    if (firstInput) {
+      firstInput.focus();
+      return;
+    }
+
+    m.tabIndex = -1;
+    m.focus();
   }, timingConfig.MODAL_FOCUS_DELAY);
 
   // Setup focus trap and backdrop click (only once)
@@ -311,6 +320,9 @@ export function closeModal(id: string): void {
   const m = DOM.get(id);
   if (m) {
     m.classList.remove('active');
+    m.classList.add('hidden');
+    m.style.display = 'none';
+    m.setAttribute('aria-hidden', 'true');
 
     // Remove closed modal from stack
     const idx = modalStack.lastIndexOf(id);
@@ -340,10 +352,21 @@ export function closeModal(id: string): void {
     const topModal = topModalId ? DOM.get(topModalId) : null;
     if (topModal) {
       setTimeout(() => {
-        const focusables = getFocusableElements(topModal);
         const firstInput = topModal.querySelector<HTMLElement>('input:not([disabled]), select:not([disabled]), textarea:not([disabled])');
-        (firstInput || focusables[0])?.focus();
+        if (firstInput) {
+          firstInput.focus();
+          return;
+        }
+
+        topModal.tabIndex = -1;
+        topModal.focus();
       }, timingConfig.MODAL_FOCUS_DELAY);
     }
   }
 }
+
+// ==========================================
+// UI EVENT LISTENERS
+// ==========================================
+
+// UI event bridge removed - all callers now import showToast/showProgress directly

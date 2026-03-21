@@ -8,7 +8,7 @@
  */
 'use strict';
 
-import { html, render, nothing, type TemplateResult } from 'lit-html';
+import { html, svg, render, nothing, type TemplateResult } from 'lit-html';
 import { repeat } from 'lit-html/directives/repeat.js';
 import { classMap } from 'lit-html/directives/class-map.js';
 import { styleMap } from 'lit-html/directives/style-map.js';
@@ -17,7 +17,7 @@ import { unsafeSVG } from 'lit-html/directives/unsafe-svg.js';
 import { ifDefined } from 'lit-html/directives/if-defined.js';
 
 // Re-export core lit-html functions
-export { html, render, nothing, repeat, classMap, styleMap, unsafeHTML, unsafeSVG, ifDefined };
+export { html, svg, render, nothing, repeat, classMap, styleMap, unsafeHTML, unsafeSVG, ifDefined };
 
 // Re-export types
 export type { TemplateResult };
@@ -70,4 +70,18 @@ export function join(
   separator: TemplateResult | string = html`, `
 ): TemplateResult {
   return html`${templates.map((t, i) => i > 0 ? html`${separator}${t}` : t)}`;
+}
+
+/**
+ * Mount multiple sub-components and return a single cleanup function.
+ * Eliminates the repeated "collect cleanups in array, return dispose" boilerplate.
+ *
+ * @example
+ * export function mountDailyAllowance(): () => void {
+ *   return mountAll(mountHeroCard, mountTodayBudget, mountMonthlyPace);
+ * }
+ */
+export function mountAll(...mountFns: Array<() => (() => void)>): () => void {
+  const cleanups = mountFns.map(fn => fn());
+  return () => { cleanups.forEach(c => c()); };
 }

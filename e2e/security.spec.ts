@@ -1,17 +1,12 @@
 import { test, expect } from '@playwright/test';
+import { cleanAppState } from './test-helpers.js';
 
 test.describe('Security - PIN Settings', () => {
   test.beforeEach(async ({ page }) => {
-    // Clear localStorage and skip onboarding
-    await page.addInitScript(() => {
-      localStorage.clear();
-      localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
-    });
+    await cleanAppState(page);
   });
 
   test('can access PIN settings in modal', async ({ page }) => {
-    await page.goto('/');
-
     // Open settings
     const settingsBtn = page.locator('#open-settings');
     await settingsBtn.click();
@@ -25,8 +20,6 @@ test.describe('Security - PIN Settings', () => {
   });
 
   test('PIN input accepts numeric values', async ({ page }) => {
-    await page.goto('/');
-
     // Open settings
     const settingsBtn = page.locator('#open-settings');
     await settingsBtn.click();
@@ -43,8 +36,6 @@ test.describe('Security - PIN Settings', () => {
   });
 
   test('save PIN button exists', async ({ page }) => {
-    await page.goto('/');
-
     // Open settings
     const settingsBtn = page.locator('#open-settings');
     await settingsBtn.click();
@@ -58,11 +49,7 @@ test.describe('Security - PIN Settings', () => {
 
 test.describe('Security - Input Validation', () => {
   test.beforeEach(async ({ page }) => {
-    await page.addInitScript(() => {
-      localStorage.clear();
-      localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
-    });
-    await page.goto('/');
+    await cleanAppState(page);
     // Navigate to transactions tab
     await page.locator('#tab-transactions-btn').click();
     await page.waitForSelector('#amount', { state: 'visible', timeout: 10000 });
@@ -123,11 +110,7 @@ test.describe('Security - Input Validation', () => {
 
 test.describe('Security - Data Integrity', () => {
   test('localStorage keys are properly namespaced', async ({ page }) => {
-    await page.addInitScript(() => {
-      localStorage.clear();
-      localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
-    });
-    await page.goto('/');
+    await cleanAppState(page);
 
     // Check that app uses proper namespacing for localStorage
     const keys = await page.evaluate(() => Object.keys(localStorage));

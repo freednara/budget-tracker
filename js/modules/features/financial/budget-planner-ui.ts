@@ -10,17 +10,18 @@
 import { SK, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
 import { showToast, openModal, closeModal } from '../../ui/core/ui.js';
-import { parseAmount, toCents, toDollars, esc, generateId } from '../../core/utils.js';
+import { parseAmount, toCents, toDollars, generateId } from '../../core/utils.js';
 import { getEffectiveIncome } from './calculations.js';
 import { isRolloverEnabled, calculateMonthRollovers } from './rollover.js';
-import { getAllCats } from '../../core/categories.js';
+import { DEFAULT_CATEGORY_COLOR, getAllCats } from '../../core/categories.js';
 import { emit, Events } from '../../core/event-bus.js';
 import { checkAchievements } from '../gamification/achievements.js';
 import DOM from '../../core/dom-cache.js';
+import { html, render, type TemplateResult } from '../../core/lit-helpers.js';
 import type { CustomCategory, TransactionType } from '../../../types/index.js';
 
 // ==========================================
-// TYPE DEFINITIONS
+// CALLBACKS & STATE
 // ==========================================
 
 interface BudgetPlannerCallbacks {
@@ -30,33 +31,51 @@ interface BudgetPlannerCallbacks {
   renderCustomCatsList?: () => void;
 }
 
-// Extend window for emoji picker global
-declare global {
-  interface Window {
-    resetEmojiPicker?: () => void;
-  }
-}
-
-// ==========================================
-// MODULE STATE
-// ==========================================
-
-// Configurable callbacks (set by app.js)
-let fmtCur: (v: number) => string = (v) => '$' + v.toFixed(2);
 let renderCategoriesFn: (() => void) | null = null;
 let renderQuickShortcutsFn: (() => void) | null = null;
 let populateCategoryFilterFn: (() => void) | null = null;
 let renderCustomCatsListFn: (() => void) | null = null;
+let fmtCurFn: ((v: number) => string) | null = null;
+
+interface CategoryModalElements {
+  nameInput: HTMLInputElement | null;
+  emojiInput: HTMLInputElement | null;
+  colorInput: HTMLInputElement | null;
+  typeSelect: HTMLSelectElement | null;
+}
+
+function getCategoryModalElements(): CategoryModalElements {
+  return {
+    nameInput: document.getElementById('custom-cat-name') as HTMLInputElement | null,
+    emojiInput: document.getElementById('custom-cat-emoji') as HTMLInputElement | null,
+    colorInput: document.getElementById('custom-cat-color') as HTMLInputElement | null,
+    typeSelect: document.getElementById('custom-cat-type') as HTMLSelectElement | null
+  };
+}
 
 // ==========================================
-// CONFIGURATION
+// UTILITIES
 // ==========================================
+
+// Cache the DI-resolved currency formatter to avoid container lookup on every call
+let cachedDIFormatter: ((v: number) => string) | null = null;
+
+function formatCurrency(amount: number): string {
+  if (!cachedDIFormatter) {
+    const container = signals.getDefaultContainer();
+    const formatter = container.resolveSync<any>(signals.Services.CURRENCY_FORMATTER);
+    if (formatter) {
+      cachedDIFormatter = formatter;
+    }
+  }
+  return cachedDIFormatter ? cachedDIFormatter(amount) : '$' + amount.toFixed(2);
+}
 
 /**
- * Set the currency formatter function
+ * Set currency formatter function
  */
 export function setBudgetPlannerFmtCur(fn: (v: number) => string): void {
-  fmtCur = fn;
+  fmtCurFn = fn;
 }
 
 /**
@@ -94,7 +113,7 @@ export function updatePlanRemaining(): void {
   if (!el) return;
   const saveBtn = DOM.get('save-plan-budget') as HTMLButtonElement | null;
   const remCents = getPlanRemainingCents();
-  const remText = fmtCur(toDollars(Math.abs(remCents)));
+  const remText = (fmtCurFn || formatCurrency)(toDollars(Math.abs(remCents)));
 
   if (remCents > 0) {
     el.textContent = `${remText} unassigned`;
@@ -108,9 +127,12 @@ export function updatePlanRemaining(): void {
   }
 
   if (saveBtn) {
-    saveBtn.disabled = remCents !== 0;
-    saveBtn.classList.toggle('opacity-50', remCents !== 0);
-    saveBtn.classList.toggle('cursor-not-allowed', remCents !== 0);
+    // Allow saving when allocations are at or under income (partial budgets are OK)
+    // Only block when over-allocated (remCents < 0)
+    const isOverAllocated = remCents < 0;
+    saveBtn.disabled = isOverAllocated;
+    saveBtn.classList.toggle('opacity-50', isOverAllocated);
+    saveBtn.classList.toggle('cursor-not-allowed', isOverAllocated);
   }
 }
 
@@ -119,40 +141,50 @@ export function updatePlanRemaining(): void {
 // ==========================================
 
 /**
- * Render the budget grid HTML
+ * Render the budget grid using Lit
  */
-function renderBudgetGridHtml(): string {
+function renderBudgetGrid(): void {
+  const container = DOM.get('plan-budget-grid');
+  if (!container) return;
+
   const cats = getAllCats('expense');
-  const currentMonth = signals.currentMonth.value;
-  const alloc = signals.monthlyAlloc.value[currentMonth] || {};
+  const monthKey = signals.currentMonth.value;
+  const alloc = signals.monthlyAlloc.value[monthKey] || {};
   const rolloverEnabled = isRolloverEnabled();
-  const rollovers = rolloverEnabled ? calculateMonthRollovers(currentMonth) : {};
+  const rollovers = rolloverEnabled ? calculateMonthRollovers(monthKey) : {};
 
-  return cats.map(c => {
-    const rollover = rollovers[c.id] || 0;
-    const rolloverBadge = rolloverEnabled && rollover !== 0
-      ? `<span class="rollover-badge text-xs px-1.5 py-0.5 rounded ml-1" style="background: ${rollover > 0 ? 'color-mix(in srgb, var(--color-income) 20%, transparent)' : 'color-mix(in srgb, var(--color-expense) 20%, transparent)'}; color: ${rollover > 0 ? 'var(--color-income)' : 'var(--color-expense)'};">${rollover > 0 ? '+' : ''}${fmtCur(rollover)}</span>`
-      : '';
-    return `<div class="flex items-center gap-3">
-      <span class="text-lg w-8">${esc(c.emoji)}</span>
-      <span class="flex-1 text-sm font-bold" style="color: var(--text-primary);">${esc(c.name)}${rolloverBadge}</span>
-      <input type="number" class="plan-cat-input w-24 px-2 py-1 rounded text-sm text-right" data-cat="${c.id}" step="0.01" min="0" value="${esc(String(alloc[c.id] || ''))}"
-        style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);" placeholder="0">
-    </div>`;
-  }).join('');
-}
+  const template = html`
+    ${cats.map(c => {
+      const rollover = rollovers[c.id] || 0;
+      return html`
+        <div class="flex items-center gap-3">
+          <span class="text-lg w-8">${c.emoji}</span>
+          <span class="flex-1 text-sm font-bold text-primary">
+            ${c.name}
+            ${rolloverEnabled && rollover !== 0 ? html`
+              <span class="rollover-badge text-xs px-1.5 py-0.5 rounded ml-1" 
+                    style="background: ${rollover > 0 ? 'color-mix(in srgb, var(--color-income) 20%, transparent)' : 'color-mix(in srgb, var(--color-expense) 20%, transparent)'}; 
+                           color: ${rollover > 0 ? 'var(--color-income)' : 'var(--color-expense)'};">
+                ${rollover > 0 ? '+' : ''}${formatCurrency(rollover)}
+              </span>
+            ` : ''}
+          </span>
+          <input type="number" 
+                 class="plan-cat-input w-24 px-2 py-1 rounded text-sm text-right" 
+                 data-cat="${c.id}" 
+                 step="0.01" 
+                 min="0" 
+                 .value="${String(alloc[c.id] || '')}"
+                 style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);" 
+                 placeholder="0"
+                 @input=${updatePlanRemaining}>
+        </div>
+      `;
+    })}
+  `;
 
-/**
- * Refresh the budget grid and attach event listeners
- */
-function refreshBudgetGrid(): void {
-  const grid = DOM.get('plan-budget-grid');
-  if (!grid) return;
-  grid.innerHTML = renderBudgetGridHtml();
+  render(template, container);
   updatePlanRemaining();
-  grid.querySelectorAll('.plan-cat-input').forEach(inp => {
-    inp.addEventListener('input', updatePlanRemaining);
-  });
 }
 
 // ==========================================
@@ -163,12 +195,10 @@ function refreshBudgetGrid(): void {
  * Open the custom category modal with reset fields
  */
 function openCustomCategoryModal(): void {
-  const nameInput = DOM.get('custom-cat-name') as HTMLInputElement | null;
-  const colorInput = DOM.get('custom-cat-color') as HTMLInputElement | null;
-  const typeSelect = DOM.get('custom-cat-type') as HTMLSelectElement | null;
+  const { nameInput, colorInput, typeSelect } = getCategoryModalElements();
 
   if (nameInput) nameInput.value = '';
-  if (colorInput) colorInput.value = '#8b5cf6';
+  if (colorInput) colorInput.value = DEFAULT_CATEGORY_COLOR;
   if (typeSelect) typeSelect.value = 'expense';
   if (window.resetEmojiPicker) window.resetEmojiPicker();
   openModal('category-modal');
@@ -186,8 +216,8 @@ export function initBudgetPlannerHandlers(): void {
   DOM.get('open-plan-budget')?.addEventListener('click', () => {
     const income = getEffectiveIncome(signals.currentMonth.value);
     const incomeDisplay = DOM.get('plan-monthly-income');
-    if (incomeDisplay) incomeDisplay.textContent = fmtCur(income);
-    refreshBudgetGrid();
+    if (incomeDisplay) incomeDisplay.textContent = formatCurrency(income);
+    renderBudgetGrid();
     openModal('plan-budget-modal');
   });
 
@@ -199,14 +229,10 @@ export function initBudgetPlannerHandlers(): void {
   // Plan Budget modal - save
   DOM.get('save-plan-budget')?.addEventListener('click', () => {
     const remCents = getPlanRemainingCents();
-    if (remCents !== 0) {
-      const remText = fmtCur(toDollars(Math.abs(remCents)));
-      showToast(
-        remCents > 0
-          ? `Allocate ${remText} before saving`
-          : `Reduce allocations by ${remText} before saving`,
-        'error'
-      );
+    // Only block saving when over-allocated (not when under-allocated — partial budgets are valid)
+    if (remCents < 0) {
+      const remText = (fmtCurFn || formatCurrency)(toDollars(Math.abs(remCents)));
+      showToast(`Reduce allocations by ${remText} — exceeds income`, 'error');
       return;
     }
 
@@ -234,14 +260,11 @@ export function initBudgetPlannerHandlers(): void {
 
   // Custom category modal - save
   DOM.get('save-custom-cat')?.addEventListener('click', () => {
-    const nameInput = DOM.get('custom-cat-name') as HTMLInputElement | null;
-    const emojiInput = DOM.get('custom-cat-emoji') as HTMLInputElement | null;
-    const colorInput = DOM.get('custom-cat-color') as HTMLInputElement | null;
-    const typeSelect = DOM.get('custom-cat-type') as HTMLSelectElement | null;
+    const { nameInput, emojiInput, colorInput, typeSelect } = getCategoryModalElements();
 
     const name = nameInput?.value.trim() || '';
     const emoji = emojiInput?.value.trim() || '📌';
-    const color = colorInput?.value || '#8b5cf6';
+    const color = colorInput?.value || DEFAULT_CATEGORY_COLOR;
     const type = (typeSelect?.value || 'expense') as TransactionType;
 
     // Validate color to prevent CSS injection
@@ -271,7 +294,7 @@ export function initBudgetPlannerHandlers(): void {
       // Refresh budget grid if plan-budget-modal is open
       const budgetModal = DOM.get('plan-budget-modal');
       if (budgetModal && budgetModal.classList.contains('active')) {
-        refreshBudgetGrid();
+        renderBudgetGrid();
       }
     }
   });

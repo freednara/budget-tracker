@@ -14,20 +14,15 @@ import { savingsGoals as savingsGoalsActions, modal } from '../core/state-action
 import { calculateGoalForecast } from '../features/financial/savings-goals.js';
 import { openModal, showToast } from '../ui/core/ui.js';
 import { fmtCur, parseLocalDate } from '../core/utils.js';
-import { html, render, nothing } from '../core/lit-helpers.js';
+import { html, render, nothing, repeat } from '../core/lit-helpers.js';
 import DOM from '../core/dom-cache.js';
-import type { SavingsContribution } from '../../types/index.js';
+import type { SavingsContribution, LegacySavingsGoal, GoalForecast, GoalForecastComplete, GoalForecastInProgress } from '../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
 // ==========================================
 
-interface LegacySavingsGoal {
-  name: string;
-  target_amount: number;
-  saved_amount: number;
-  deadline?: string;
-}
+// Using types from central registry
 
 interface GoalDisplayData {
   id: string;
@@ -39,20 +34,6 @@ interface GoalDisplayData {
   percentage: number;
   forecast: GoalForecast | null;
 }
-
-interface GoalForecastComplete {
-  completed: true;
-}
-
-interface GoalForecastInProgress {
-  completed: false;
-  projectedDate: Date;
-  daysToComplete: number;
-  dailyRate: number;
-  onTrack: boolean | null;
-}
-
-type GoalForecast = GoalForecastComplete | GoalForecastInProgress;
 
 // ==========================================
 // COMPUTED SIGNALS
@@ -75,17 +56,19 @@ const goalsDisplayData = computed((): GoalDisplayData[] => {
   today.setHours(0, 0, 0, 0);
 
   return goals.map(([gid, g]) => {
-    const saved = g.saved_amount || 0;
-    const pct = g.target_amount > 0 ? Math.min((saved / g.target_amount) * 100, 100) : 0;
+    // Handle both SavingsGoal (target/saved) and LegacySavingsGoal (target_amount/saved_amount)
+    const saved = g.saved_amount ?? (g as any).saved ?? 0;
+    const target = g.target_amount ?? (g as any).target ?? 0;
+    const pct = target > 0 ? Math.min((saved / target) * 100, 100) : 0;
     const daysLeft = g.deadline
-      ? Math.max(0, Math.round((new Date(g.deadline).getTime() - today.getTime()) / 86400000))
+      ? Math.max(0, Math.round((parseLocalDate(g.deadline).getTime() - today.getTime()) / 86400000))
       : null;
     const forecast = calculateGoalForecast({ ...g, id: gid });
 
     return {
       id: gid,
       name: g.name,
-      targetAmount: g.target_amount,
+      targetAmount: target,
       savedAmount: saved,
       deadline: g.deadline || '',
       daysLeft,
@@ -142,7 +125,7 @@ function renderForecast(forecast: GoalForecast | null) {
     ? 'var(--text-tertiary)'
     : (forecast.onTrack ? 'var(--color-income)' : 'var(--color-warning)');
 
-  const statusIcon = forecast.onTrack === null ? '' : (forecast.onTrack ? '' : '');
+  const statusIcon = forecast.onTrack === null ? '—' : (forecast.onTrack ? '✓' : '⚠');
 
   return html`<span class="text-xs" style="color: ${statusColor};">${statusIcon} Est. ${forecastDateStr}</span>`;
 }
@@ -171,39 +154,55 @@ export function mountSavingsGoals(): () => void {
           <div class="text-4xl mb-2">💚</div>
           <p class="font-semibold mb-1">No savings goals yet</p>
           <p class="text-xs mb-3" style="color: var(--text-tertiary);">Start saving toward something special</p>
-          <button id="add-goal" class="btn-primary text-sm px-4 py-2">+ Create Goal</button>
+          <button @click=${() => openModal('savings-goal-modal')} class="btn-primary text-sm px-4 py-2">+ Create Goal</button>
         </div>
       `, container);
       return;
     }
 
     render(html`
-      ${goals.map(goal => html`
-        <div class="flex items-center gap-3 p-3 rounded-lg" style="background: var(--bg-input);">
-          <span class="text-xl">💚</span>
-          <div class="flex-1">
-            <div class="flex justify-between mb-1">
-              <div>
-                <p class="text-sm font-bold" style="color: var(--text-primary);">${goal.name}</p>
-                <p class="text-xs" style="color: var(--text-tertiary);">
-                  ${goal.daysLeft !== null ? `${goal.daysLeft} days left` : 'No deadline'}
-                </p>
-                ${renderForecast(goal.forecast)}
-              </div>
-              <span class="text-sm font-bold" style="color: var(--color-income);">
-                ${fmtCur(goal.savedAmount)} / ${fmtCur(goal.targetAmount)}
+      ${repeat(goals, goal => goal.id, goal => html`
+        <div class="savings-goal-row">
+          <div class="savings-goal-row__head">
+            <div class="savings-goal-row__title">
+              <span class="text-lg">💚</span>
+              <span>${goal.name}</span>
+            </div>
+            <div class="savings-goal-row__summary">
+              <span class="savings-goal-row__status">${goal.percentage.toFixed(0)}% funded</span>
+              <span class="savings-goal-row__amount">
+                Saved ${fmtCur(goal.savedAmount)} of ${fmtCur(goal.targetAmount)}
               </span>
             </div>
-            <div class="goal-bar">
-              <div class="goal-fill" style="width:${goal.percentage}%;"></div>
+          </div>
+          <div class="goal-bar">
+            <div class="goal-fill" style="width:${goal.percentage}%;"></div>
+          </div>
+          <div class="savings-goal-row__foot">
+            <div class="savings-goal-row__meta">
+              <span>
+                ${goal.daysLeft !== null ? `${goal.daysLeft} days left` : 'No deadline'}
+              </span>
+              ${renderForecast(goal.forecast)}
+            </div>
+            <div class="savings-goal-row__actions">
+              <button
+                class="savings-goal-action-btn savings-goal-action-btn--add"
+                @click=${() => handleAddSavings(goal.id, goal.name)}
+                aria-label=${`Add savings to ${goal.name}`}
+                title="Add savings"
+              >
+                <span aria-hidden="true">+</span>
+                <span class="label">Add Funds</span>
+              </button>
+              <button
+                class="savings-goal-action-btn savings-goal-action-btn--delete"
+                @click=${() => handleDeleteGoal(goal.id)}
+                aria-label=${`Delete ${goal.name}`}
+                title="Delete goal"
+              >✕</button>
             </div>
           </div>
-          <button class="add-savings-btn p-1 rounded hover:opacity-70 text-lg font-black"
-                  @click=${() => handleAddSavings(goal.id, goal.name)}
-                  style="color: var(--color-income);">+</button>
-          <button class="delete-savings-goal-btn p-1 rounded hover:opacity-70"
-                  @click=${() => handleDeleteGoal(goal.id)}
-                  style="color: var(--color-expense);">✕</button>
         </div>
       `)}
     `, container);

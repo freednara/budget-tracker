@@ -1,12 +1,16 @@
 /**
- * State Management Module
- * Handles localStorage operations and storage keys.
- * Application state has been migrated to Preact Signals (see signals.ts).
+ * Storage Operations Module
+ * 
+ * Provides localStorage utilities and storage key constants.
+ * 
+ * ⚠️  LEGACY STATE MIGRATION COMPLETE
+ * Application state has been fully migrated to Preact Signals (see signals.ts).
+ * This module now only contains storage utilities and key constants.
  *
- * @module state
+ * @module storage
  */
 
-import { safeStorage } from './error-handler.js';
+import { safeStorage } from './safe-storage.js';
 import type { StorageKeys } from '../../types/index.js';
 
 // ==========================================
@@ -33,8 +37,59 @@ export const SK: StorageKeys = {
   TX_TEMPLATES: 'budget_tracker_tx_templates',
   FILTER_EXPANDED: 'budget_tracker_filter_expanded',
   ROLLOVER_SETTINGS: 'budget_tracker_rollover_settings',
-  DEBTS: 'budget_tracker_debts'
+  DEBTS: 'budget_tracker_debts',
+  BUDGET_PLANS: 'budget_tracker_budget_plans',
+  ATTACHMENTS: 'budget_tracker_attachments',
+  USER_SETTINGS: 'budget_tracker_user_settings',
+  SYNC_STATE: 'budget_tracker_sync_state',
+  RECURRING: 'budget_tracker_recurring',
+  APP_STATS: 'budget_tracker_app_stats',
+  HAS_ONBOARDED: 'budget_tracker_has_onboarded'
 } as const;
+
+// ==========================================
+// STORAGE DEFAULTS (single source of truth)
+// When adding new state, add the key to SK and its default here.
+// ==========================================
+
+export const STORAGE_DEFAULTS: Record<string, unknown> = {
+  [SK.TX]: [],
+  [SK.SAVINGS]: {},
+  [SK.SAVINGS_CONTRIB]: [],
+  [SK.ALLOC]: {},
+  [SK.ACHIEVE]: {},
+  [SK.STREAK]: { current: 0, longest: 0, lastDate: '' },
+  [SK.CUSTOM_CAT]: [],
+  [SK.DEBTS]: [],
+  [SK.CURRENCY]: { home: 'USD', symbol: '$' },
+  [SK.SECTIONS]: { envelope: true },
+  [SK.PIN]: '',
+  [SK.INSIGHT_PERS]: 'serious',
+  [SK.ALERTS]: { budgetThreshold: 0.8 },
+  [SK.ROLLOVER_SETTINGS]: { enabled: false, mode: 'all', categories: [], maxRollover: null, negativeHandling: 'zero' },
+  [SK.FILTER_PRESETS]: [],
+  [SK.TX_TEMPLATES]: [],
+  [SK.THEME]: 'dark',
+  [SK.ONBOARD]: { active: false, completed: false, step: 0 },
+  [SK.LAST_BACKUP]: 0,
+  [SK.FILTER_EXPANDED]: false,
+  [SK.BUDGET_PLANS]: {},
+  [SK.ATTACHMENTS]: {},
+  [SK.USER_SETTINGS]: {},
+  [SK.SYNC_STATE]: {},
+  [SK.RECURRING]: {},
+  [SK.APP_STATS]: {},
+  [SK.HAS_ONBOARDED]: false
+};
+
+/**
+ * Get a stored value using the centralized default.
+ * Prefer this over raw lsGet(SK.KEY, hardcodedDefault).
+ */
+export function getStored<T>(key: string, defaultValue?: T): T {
+  const fallback = defaultValue ?? STORAGE_DEFAULTS[key] as T;
+  return lsGet<T>(key, fallback ?? ('' as unknown as T));
+}
 
 // ==========================================
 // LOCALSTORAGE HELPERS
@@ -56,16 +111,15 @@ export function lsSet(key: string, val: unknown): boolean {
 
 /**
  * Persist helper - shorthand for lsSet
+ * Returns false if storage write failed (e.g. quota exceeded)
  */
-export function persist(key: string, val: unknown): void {
-  lsSet(key, val);
+export function persist(key: string, val: unknown): boolean {
+  return lsSet(key, val);
 }
 
 // ==========================================
 // SESSION STATE
 // ==========================================
 
-/**
- * Session-only dismissed alerts (not persisted to localStorage)
- */
-export const dismissedAlerts: Set<string> = new Set();
+// dismissedAlerts has been moved to signals.ts as a reactive signal.
+// Import from '../core/signals.js' instead.
