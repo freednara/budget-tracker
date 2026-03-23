@@ -372,6 +372,36 @@ test.describe('Month Navigation', () => {
   });
 });
 
+test.describe('Calendar Tab', () => {
+  test.beforeEach(async ({ page }) => {
+    await cleanAppState(page);
+    await goToTransactions(page);
+  });
+
+  test('selected day can jump into transactions with that date prefilled', async ({ page }) => {
+    const desc = `CalendarItem-${Date.now()}`;
+    await addExpenseWithDetails(page, {
+      amount: '32.00',
+      description: desc,
+      date: '2026-03-22'
+    });
+
+    await page.locator('#tab-calendar-btn').click();
+    await expect(page.locator('#tab-calendar')).toBeVisible({ timeout: 10000 });
+
+    const dayCell = page.locator('.cal-day[data-day="22"]').first();
+    await expect(dayCell).toBeVisible({ timeout: 5000 });
+    await dayCell.click();
+
+    await expect(page.locator('#cal-detail-panel')).toContainText(desc, { timeout: 5000 });
+    await page.locator('#cal-detail-panel').getByRole('button', { name: 'Add Transaction' }).click();
+
+    await expect(page.locator('#tab-transactions-btn')).toHaveAttribute('aria-selected', 'true', { timeout: 10000 });
+    await expect(page.locator('#date')).toHaveValue('2026-03-22', { timeout: 5000 });
+    await expect(page.locator('#amount')).toBeFocused();
+  });
+});
+
 test.describe('Search and Filter', () => {
   test.beforeEach(async ({ page }) => {
     await cleanAppState(page);

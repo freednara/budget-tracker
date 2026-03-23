@@ -15,15 +15,14 @@ import * as signals from '../../core/signals.js';
 import { navigation, form } from '../../core/state-actions.js';
 import { emit, Events } from '../../core/event-bus.js';
 import DOM from '../../core/dom-cache.js';
-import { parseMonthKey, getMonthKey } from '../../core/utils.js';
 import { CONFIG } from '../../core/config.js';
+import type { Transaction, MainTab } from '../../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
 // ==========================================
 
 type TransactionType = 'expense' | 'income';
-type MainTab = 'dashboard' | 'transactions' | 'budget';
 
 // ==========================================
 // DEPENDENCY INJECTION
@@ -225,6 +224,31 @@ export function revealTransactionsForm(focusId?: string, selectInput = false): v
   }
 }
 
+export async function openTransactionsForDate(date: string): Promise<void> {
+  switchMainTab('transactions');
+
+  const [{ resetForm }, { formDate, syncFormWithSignals }, { cancelEditing }] = await Promise.all([
+    import('../interactions/form-events.js'),
+    import('../../transactions/template-manager.js'),
+    import('../../transactions/edit-mode.js')
+  ]);
+
+  cancelEditing();
+  resetForm();
+  formDate.value = date;
+  syncFormWithSignals();
+
+  requestAnimationFrame(() => {
+    revealTransactionsForm('amount', true);
+  });
+}
+
+export async function openTransactionsEdit(tx: Transaction): Promise<void> {
+  switchMainTab('transactions');
+  const { startEditing } = await import('../../transactions/edit-mode.js');
+  startEditing(tx);
+}
+
 // ==========================================
 // TAB SWITCHING
 // ==========================================
@@ -284,7 +308,7 @@ export function switchMainTab(tabName: MainTab): void {
  * Extracted so it can be called from a signal effect if needed.
  */
 function syncMainTabDOM(tabName: MainTab): void {
-  const tabs: MainTab[] = ['dashboard', 'transactions', 'budget'];
+  const tabs: MainTab[] = ['dashboard', 'budget', 'transactions', 'calendar'];
 
   for (const t of tabs) {
     const el = DOM.get('tab-' + t);

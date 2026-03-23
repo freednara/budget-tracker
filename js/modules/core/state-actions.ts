@@ -25,6 +25,7 @@ import type {
   TxTemplate,
   SavingsGoal,
   SavingsContribution,
+  AlertPrefs,
   MonthlyAllocation,
   RolloverSettings,
   PaginationState
@@ -120,7 +121,7 @@ export const navigation = {
   },
 
   setActiveMainTab(tabName: MainTab): boolean {
-    const validTabs: MainTab[] = ['dashboard', 'transactions', 'budget'];
+    const validTabs: MainTab[] = ['dashboard', 'transactions', 'budget', 'calendar'];
     if (!validTabs.includes(tabName)) return false;
     signals.activeMainTab.value = tabName;
     return true;
@@ -238,6 +239,10 @@ export const settings = {
 
   setInsightPersonality(personality: InsightPersonality): void {
     signals.insightPers.value = personality;
+  },
+
+  setAlerts(nextAlerts: AlertPrefs): void {
+    signals.alerts.value = nextAlerts;
   }
 };
 

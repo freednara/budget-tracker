@@ -20,7 +20,7 @@ import { html, type TemplateResult } from '../core/lit-helpers.js';
 export function renderAnalyticsModal(): TemplateResult {
   return html`
     <div id="analytics-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="analytics-modal-title">
-      <div class="rounded-2xl p-6 max-w-2xl w-full card-shadow" style="background: var(--bg-card-section); border: 1px solid var(--border-section); max-height: 90vh; overflow-y: auto;">
+      <div class="rounded-2xl p-6 w-full card-shadow analytics-modal-shell" style="background: var(--bg-card-section); border: 1px solid var(--border-section); max-height: 90vh; overflow-y: auto;">
         <div class="flex justify-between items-center mb-4">
           <h3 id="analytics-modal-title" class="text-xl font-black text-primary">📈 Analytics</h3>
           <button id="close-analytics" class="w-8 h-8 flex items-center justify-center rounded-lg text-lg" style="background: var(--bg-input); color: var(--text-secondary);" aria-label="Close analytics">✕</button>
@@ -89,6 +89,30 @@ export function renderAnalyticsModal(): TemplateResult {
               <div id="shrinking-categories" class="space-y-1"></div>
             </div>
           </div>
+        </div>
+
+        <!-- Current Month Comparison -->
+        <div id="analytics-month-comparison-section" class="mb-5 p-4 rounded-xl analytics-detail-section" style="background: var(--bg-card); border: 1px solid var(--border-card);">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <h4 class="text-sm font-bold text-secondary">📈 MONTH VS LAST MONTH<span id="month-comparison-badge"></span></h4>
+              <p class="text-[11px] mt-1 text-tertiary">Current-month comparison for income, expenses, and biggest movers.</p>
+            </div>
+            <span class="time-badge">Current Month</span>
+          </div>
+          <div id="month-comparison"></div>
+        </div>
+
+        <!-- Budget vs Actual -->
+        <div id="budget-vs-actual-section" class="mb-5 p-4 rounded-xl analytics-detail-section hidden" style="background: var(--bg-card); border: 1px solid var(--border-card);">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <h4 class="text-sm font-bold text-secondary">📊 BUDGET VS ACTUAL<span id="budget-actual-badge"></span></h4>
+              <p class="text-[11px] mt-1 text-tertiary">Assigned versus spent for the active budget month.</p>
+            </div>
+            <span class="time-badge">Current Month</span>
+          </div>
+          <div id="budget-actual-chart" class="w-full" style="min-height: 260px;"></div>
         </div>
 
         <!-- All-Time Stats -->

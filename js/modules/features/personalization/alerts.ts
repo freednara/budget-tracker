@@ -11,6 +11,7 @@ import { FeatureEvents } from '../../core/feature-event-interface.js';
 import DOM from '../../core/dom-cache.js';
 import { html, render } from '../../core/lit-helpers.js';
 import { effect } from '@preact/signals-core';
+import { initBrowserBudgetNotifications } from './browser-notifications.js';
 
 // ==========================================
 // ACTIONS
@@ -45,23 +46,27 @@ export function mountAlertBanner(): () => void {
     const alerts = signals.activeAlerts.value;
     
     if (alerts.length === 0) {
+      container.classList.add('hidden');
       render(html``, container);
       return;
     }
 
+    container.classList.remove('hidden');
     const firstAlert = alerts[0];
     const moreCount = alerts.length - 1;
     const displayText = firstAlert + (moreCount > 0 ? ` (+${moreCount} more)` : '');
 
     render(html`
-      <div id="alert-banner" class="bg-expense/10 border-b border-expense/20 p-2 text-center flex items-center justify-center gap-3">
-        <span class="text-sm font-bold text-expense flex items-center gap-2">
+      <div class="w-full px-4 md:px-8 py-3 flex items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
           <span class="text-lg">⚠️</span>
-          <span id="alert-text">${displayText}</span>
-        </span>
+          <p id="alert-text" class="text-sm font-semibold text-warning">${displayText}</p>
+        </div>
         <button @click=${() => dismissAlert(firstAlert)}
-                class="text-xs font-black uppercase tracking-tighter hover:opacity-70 transition-opacity text-secondary">
-          Dismiss
+                id="dismiss-alert"
+                class="touch-btn text-sm font-bold rounded text-warning"
+                aria-label="Dismiss alert">
+          ✕
         </button>
       </div>
     `, container);
@@ -77,11 +82,16 @@ export function mountAlertBanner(): () => void {
 /**
  * Initialize alert handlers
  */
-export function initAlerts(): void {
+export function initAlerts(): () => void {
   // Register Feature Event Listener for external control
-  on(FeatureEvents.DISMISS_ALERT, (data: { id: string }) => {
+  const unsubscribe = on(FeatureEvents.DISMISS_ALERT, (data: { id: string }) => {
     dismissAlert(data.id);
   });
+  const stopBrowserNotifications = initBrowserBudgetNotifications();
+  return () => {
+    unsubscribe();
+    stopBrowserNotifications();
+  };
 }
 
 /**

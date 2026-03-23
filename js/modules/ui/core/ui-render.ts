@@ -18,7 +18,7 @@ import { showToast, openModal } from './ui.js';
 import { asyncConfirm } from '../components/async-modal.js';
 import { emit, Events } from '../../core/event-bus.js';
 import { monthLabel, parseLocalDate, toCents, toDollars } from '../../core/utils.js';
-import { renderTrendChart, renderDonutChart, renderBarChart } from '../charts/chart-renderers.js';
+import { renderTrendChart, renderDonutChart, renderBarChart, getTrendChartMonths } from '../charts/chart-renderers.js';
 import { calculateMonthlyTotalsWithCacheSync } from '../../core/monthly-totals-cache.js';
 import { calculateCategoryTrends } from '../../orchestration/analytics.js';
 import { getMonthBadge } from '../widgets/calendar.js';
@@ -232,9 +232,28 @@ export function renderCategories(): void {
  */
 export async function updateCharts(): Promise<void> {
   const currentMonth = signals.currentMonth.value;
+  const trendContainer = DOM.get('trend-chart-container');
+  const donutContainer = DOM.get('donut-chart-container');
+  const trackedMonths = Array.from(signals.transactionsByMonth.value.keys()).filter(monthKey => {
+    const totals = calculateMonthlyTotalsWithCacheSync(monthKey);
+    return totals.income > 0 || totals.expenses > 0;
+  });
   
   // 1. Trend Chart (uses its own multi-month logic)
-  renderTrendChart('trend-chart-container');
+  if (trendContainer) {
+    if (signals.transactions.value.length === 0) {
+      render(html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">Add transactions to unlock your income and expense trend.</p>`, trendContainer);
+    } else if (trackedMonths.length < 2) {
+      render(
+        html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">
+          Need at least two months of history to show the ${getTrendChartMonths()}-month trend.
+        </p>`,
+        trendContainer
+      );
+    } else {
+      renderTrendChart('trend-chart-container');
+    }
+  }
 
   // 2. Donut Chart - use pre-calculated category totals from cache
   const totals = calculateMonthlyTotalsWithCacheSync(currentMonth);
@@ -254,7 +273,13 @@ export async function updateCharts(): Promise<void> {
     };
   }
   
-  renderDonutChart('donut-chart-container', donutData, trends);
+  if (donutContainer) {
+    if (donutData.length === 0) {
+      render(html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">No expense categories yet for this month.</p>`, donutContainer);
+    } else {
+      renderDonutChart('donut-chart-container', donutData, trends);
+    }
+  }
   
   const breakdownBadge = DOM.get('category-breakdown-badge');
   if (breakdownBadge) breakdownBadge.innerHTML = getMonthBadge(signals.currentMonth.value);

@@ -158,15 +158,7 @@
   <div id="app" class="h-full w-full overflow-auto flex flex-col" style="background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-tertiary) 100%);">
 
     <!-- Alert Banner (Feature 9) -->
-    <div id="alert-banner" class="hidden" style="background: color-mix(in srgb, var(--color-warning) 15%, transparent); border-bottom: 1px solid var(--color-warning);">
-      <div class="w-full px-4 md:px-8 py-3 flex items-center justify-between">
-        <div class="flex items-center gap-3">
-          <span id="alert-icon" class="text-lg">⚠️</span>
-          <p id="alert-text" class="text-sm font-semibold text-warning">Alert message here</p>
-        </div>
-        <button id="dismiss-alert" class="touch-btn text-sm font-bold rounded text-warning" aria-label="Dismiss alert">✕</button>
-      </div>
-    </div>
+    <div id="alert-banner" class="hidden" style="background: color-mix(in srgb, var(--color-warning) 15%, transparent); border-bottom: 1px solid var(--color-warning);" aria-live="polite"></div>
 
     <!-- Backup Reminder Banner -->
     <div id="backup-reminder" class="hidden" style="background: color-mix(in srgb, var(--color-accent) 15%, transparent); border-bottom: 1px solid var(--color-accent);">
@@ -201,6 +193,7 @@
           <button id="tab-dashboard-btn" class="main-tab flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all btn-primary" data-tab="dashboard" role="tab" aria-selected="true" aria-controls="tab-dashboard">📊 Dashboard</button>
           <button id="tab-budget-btn" class="main-tab flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all btn-secondary" data-tab="budget" role="tab" aria-selected="false" aria-controls="tab-budget">🎯 Budget</button>
           <button id="tab-transactions-btn" class="main-tab flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all btn-secondary" data-tab="transactions" role="tab" aria-selected="false" aria-controls="tab-transactions">💸 Transactions</button>
+          <button id="tab-calendar-btn" class="main-tab flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all btn-secondary" data-tab="calendar" role="tab" aria-selected="false" aria-controls="tab-calendar">🗓️ Calendar</button>
         </div>
         <section class="app-shell-month flex items-center justify-between mt-3 pt-3" aria-label="Month navigation">
           <button id="prev-month" class="month-nav-btn" aria-label="Previous month">◀</button>
@@ -361,9 +354,9 @@
       </section>
 
       <!-- Analytics & Charts Section (Features 3, 8) -->
-      <div id="analytics-section" data-component="charts" class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6 dashboard-analytics-grid">
+      <div id="analytics-section" data-component="charts" class="hero-dashboard-grid dashboard-analytics-grid mb-6">
         <!-- Spending Trend Chart -->
-        <div class="lg:col-span-2 section-card dashboard-analytics-primary">
+        <div class="section-card dashboard-analytics-primary dashboard-chart-row-card">
           <div class="flex items-center justify-between mb-4">
             <div>
               <p class="text-sm font-bold section-label">📊 Income vs Expenses</p>
@@ -378,7 +371,7 @@
           <div id="trend-chart-container" class="overflow-hidden"></div>
         </div>
         <!-- Category Donut (Feature 8) -->
-        <div class="section-card dashboard-analytics-secondary">
+        <div class="section-card dashboard-analytics-secondary dashboard-chart-row-card">
           <div class="mb-4">
             <p class="text-sm font-bold section-label">🏆 Category Breakdown<span id="category-breakdown-badge"></span></p>
             <p class="text-xs mt-1 text-tertiary">Where your expense pressure is coming from this month.</p>
@@ -425,41 +418,6 @@
           </div>
         </div>
       </section>
-
-      <details id="dashboard-more-analysis" class="section-card mb-6 dashboard-more-analysis">
-        <summary class="dashboard-more-analysis__summary">
-          <div>
-            <p class="text-sm font-bold section-label">🧠 More Analysis</p>
-            <p class="text-xs mt-1 text-tertiary">Open the deeper monthly views when you need them.</p>
-          </div>
-          <span class="dashboard-more-analysis__toggle text-xs font-bold text-accent" aria-hidden="true"></span>
-        </summary>
-        <div class="dashboard-more-analysis__body">
-          <!-- Budget vs Actual (Features 1, 8) -->
-          <div id="budget-vs-actual-section" class="dashboard-analysis-panel hidden">
-            <p class="text-sm font-bold mb-4 section-label">📊 Budget vs Actual<span id="budget-actual-badge"></span></p>
-            <div id="budget-actual-chart" class="overflow-hidden"></div>
-          </div>
-
-          <!-- Calendar View -->
-          <section class="dashboard-analysis-panel" data-component="calendar">
-            <p class="text-sm font-bold mb-3 section-label">🗓️ Calendar<span id="calendar-badge"></span></p>
-            <div class="cal-legend">
-              <div class="cal-legend-item"><span class="cal-dot" style="background: var(--color-expense);"></span> Expense</div>
-              <div class="cal-legend-item"><span class="cal-dot" style="background: var(--color-income);"></span> Income</div>
-              <div class="cal-legend-item"><span class="cal-dot" style="background: var(--color-warning); box-shadow: 0 0 4px var(--color-warning);"></span> Recurring Bill</div>
-            </div>
-            <div id="spending-heatmap" class="overflow-hidden"></div>
-            <div id="cal-detail-panel"></div>
-          </section>
-
-          <!-- Month Comparison -->
-          <section class="dashboard-analysis-panel">
-            <p class="text-sm font-bold mb-3 section-label">📈 Month vs Last Month<span id="month-comparison-badge"></span></p>
-            <div id="month-comparison"></div>
-          </section>
-        </div>
-      </details>
 
       </div><!-- /tab-dashboard -->
 
@@ -882,6 +840,41 @@
       </div>
 
       </div><!-- /tab-transactions -->
+
+      <!-- ===== TAB: CALENDAR ===== -->
+      <div id="tab-calendar" role="tabpanel" aria-labelledby="tab-calendar-btn" style="display:none;">
+        <section class="calendar-tab-layout">
+          <div id="calendar-upcoming-summary" class="section-card calendar-summary-strip mb-6"></div>
+
+          <div class="calendar-tab-grid">
+            <section class="section-card calendar-main-card" data-component="calendar">
+              <div class="flex items-center justify-between mb-4">
+                <div>
+                  <h2 class="text-lg font-black text-primary">🗓️ Calendar Planning</h2>
+                  <p class="text-xs mt-1 text-secondary">Review day-by-day activity, recurring bills, and plan what happens next.</p>
+                </div>
+                <span id="calendar-badge"></span>
+              </div>
+              <div class="cal-legend">
+                <div class="cal-legend-item"><span class="cal-dot" style="background: var(--color-expense);"></span> Expense</div>
+                <div class="cal-legend-item"><span class="cal-dot" style="background: var(--color-income);"></span> Income</div>
+                <div class="cal-legend-item"><span class="cal-dot" style="background: var(--color-warning); box-shadow: 0 0 4px var(--color-warning);"></span> Recurring Bill</div>
+              </div>
+              <div id="spending-heatmap" class="overflow-hidden"></div>
+            </section>
+
+            <aside class="section-card calendar-detail-card">
+              <div class="flex items-center justify-between mb-4">
+                <div>
+                  <h2 class="text-lg font-black text-primary">📍 Selected Day</h2>
+                  <p class="text-xs mt-1 text-secondary">Inspect activity and jump straight into transactions for that date.</p>
+                </div>
+              </div>
+              <div id="cal-detail-panel"></div>
+            </aside>
+          </div>
+        </section>
+      </div><!-- /tab-calendar -->
 
     </main>
 

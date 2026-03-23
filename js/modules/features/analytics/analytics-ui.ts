@@ -9,6 +9,8 @@
 import * as signals from '../../core/signals.js';
 import { html, render, nothing, unsafeSVG, styleMap, type LitTemplate } from '../../core/lit-helpers.js';
 import { getDefaultContainer, Services } from '../../core/di-container.js';
+import { getCatInfo } from '../../core/categories.js';
+import { calculateMonthlyTotalsWithCacheSync } from '../../core/monthly-totals-cache.js';
 import { analyzeSeasonalPatterns } from './seasonal-analysis.js';
 import { calculateCategoryTrends, getTrendingCategories, analyzeSpendingVelocity } from './trend-analysis.js';
 import { 
@@ -19,12 +21,12 @@ import {
 } from '../financial/calculations.js';
 import DOM from '../../core/dom-cache.js';
 import { renderTrendChart, renderBarChart } from '../../ui/charts/chart-renderers.js';
+import { renderMonthComparison as renderMonthComparisonSection } from '../../ui/charts/analytics-ui.js';
 import type {
   Transaction,
   CurrencyFormatter,
   AllTimeStats,
-  YearStats,
-  CategoryTrendsResult
+  YearStats
 } from '../../../types/index.js';
 
 // ==========================================
@@ -48,7 +50,6 @@ function getFmtCur(): CurrencyFormatter {
 // ==========================================
 
 let analyticsCurrentPeriod: string = 'all-time';
-
 function isYearPeriod(period: string): boolean {
   return /^\d{4}$/.test(period);
 }
@@ -187,11 +188,19 @@ export function renderAnalyticsModal(): void {
   // 6. Populate Category Trends
   populateCategoryTrendsSection();
 
-  // 7. Populate All-Time Stats
+  // 7. Populate moved dashboard detail sections
+  populateMovedDashboardSections();
+
+  // 8. Populate All-Time Stats
   populateAllTimeStats();
 
-  // 8. Attach event listeners
+  // 9. Attach event listeners
   attachAnalyticsEventListeners();
+}
+
+function populateMovedDashboardSections(): void {
+  renderMonthComparisonSection();
+  populateBudgetVsActualSection();
 }
 
 /**
@@ -470,6 +479,39 @@ function populateCategoryTrendsSection(): void {
     `)}
     ${trending.decreasing.length === 0 ? html`<p class="text-[10px] text-tertiary">None detected</p>` : nothing}
   `, shrinkingEl);
+}
+
+function populateBudgetVsActualSection(): void {
+  const currentMonth = signals.currentMonth.value;
+  const section = DOM.get('budget-vs-actual-section');
+  if (!(section instanceof HTMLElement)) return;
+
+  const allocations = signals.monthlyAlloc.value[currentMonth] || {};
+  const categories = Object.keys(allocations);
+
+  if (categories.length === 0) {
+    section.classList.add('hidden');
+    return;
+  }
+
+  const totals = calculateMonthlyTotalsWithCacheSync(currentMonth);
+  const labels = categories.map((categoryId: string) => {
+    const info = getCatInfo('expense', categoryId);
+    return `${info.emoji} ${info.name.split(' ')[0]}`;
+  });
+  const budgetValues = categories.map((categoryId: string) => allocations[categoryId]);
+  const actualValues = categories.map((categoryId: string) => (totals.categoryTotals || {})[categoryId] || 0);
+
+  section.classList.remove('hidden');
+  renderBarChart('budget-actual-chart', labels, [
+    { label: 'Budget', data: budgetValues, color: 'var(--color-accent)' },
+    { label: 'Actual', data: actualValues, color: 'var(--color-expense)' }
+  ]);
+
+  const badge = DOM.get('budget-actual-badge');
+  if (badge) {
+    badge.innerHTML = `<span class="time-badge">${currentMonth}</span>`;
+  }
 }
 
 /**

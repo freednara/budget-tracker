@@ -12,7 +12,7 @@
 import { signal, computed, effect, batch } from '@preact/signals-core';
 import type { Signal, ReadonlySignal } from '@preact/signals-core';
 import { getDefaultContainer, Services } from './di-container.js';
-import { lsGet, lsSet, SK, getStored } from './state.js';
+import { lsGet, lsSet, SK, getStored, normalizeAlertPrefs } from './state.js';
 import { getMonthKey, getTodayStr as _getTodayStr, toCents, toDollars } from './utils.js';
 import { isTrackedExpenseTransaction } from './transaction-classification.js';
 import { calcTotals, getEffectiveIncome, getDailyAllowance, getSpendingPace, getMonthExpByCat, getMonthTx } from '../features/financial/calculations.js';
@@ -150,7 +150,7 @@ export const insightPers = signal<InsightPersonality>(
  * Alert preferences
  */
 export const alerts = signal<AlertPrefs>(
-  getStored<AlertPrefs>(SK.ALERTS)
+  normalizeAlertPrefs(getStored<unknown>(SK.ALERTS))
 );
 
 /**
@@ -668,8 +668,9 @@ export const splitStatus: ReadonlySignal<SplitStatus> = computed(() => {
  */
 let _prevAlertInputs: { mk: string; allocKeys: string; expJson: string; threshold: number | null; dismissedSize: number } | null = null;
 let _prevAlertResult: string[] = [];
+let _prevAlertEntries: Array<{ key: string; text: string; categoryId: string; percentSpent: number }> = [];
 
-export const activeAlerts: ReadonlySignal<string[]> = computed(() => {
+export const activeAlertEntries: ReadonlySignal<Array<{ key: string; text: string; categoryId: string; percentSpent: number }>> = computed(() => {
   const mk = currentMonth.value;
   const alloc = monthlyAlloc.value[mk] || {};
   const expByCat = expensesByCategory.value;
@@ -678,7 +679,6 @@ export const activeAlerts: ReadonlySignal<string[]> = computed(() => {
 
   if (alertSettings.budgetThreshold === null) return [];
 
-  // Quick memoization check: compare cheap fingerprints of inputs
   const allocKeys = Object.keys(alloc).join(',');
   const expJson = JSON.stringify(expByCat);
   const inputs = { mk, allocKeys, expJson, threshold: alertSettings.budgetThreshold, dismissedSize: dismissed.size };
@@ -688,10 +688,10 @@ export const activeAlerts: ReadonlySignal<string[]> = computed(() => {
       _prevAlertInputs.expJson === inputs.expJson &&
       _prevAlertInputs.threshold === inputs.threshold &&
       _prevAlertInputs.dismissedSize === inputs.dismissedSize) {
-    return _prevAlertResult;
+    return _prevAlertEntries;
   }
 
-  const foundAlerts: string[] = [];
+  const foundAlerts: Array<{ key: string; text: string; categoryId: string; percentSpent: number }> = [];
 
   Object.entries(alloc).forEach(([catId, amt]) => {
     if (!(amt > 0)) return;
@@ -699,18 +699,28 @@ export const activeAlerts: ReadonlySignal<string[]> = computed(() => {
     const spent = expByCat[catId] || 0;
     if (spent >= amt * alertSettings.budgetThreshold!) {
       const cat = getCatInfo('expense', catId);
-      const alertText = `${cat.emoji} ${cat.name}: ${Math.round(spent / amt * 100)}% spent`;
+      const percentSpent = Math.round(spent / amt * 100);
+      const alertText = `${cat.emoji} ${cat.name}: ${percentSpent}% spent`;
 
-      // Filter out dismissed alerts
       if (!dismissed.has(`${mk}:${alertText}`)) {
-        foundAlerts.push(alertText);
+        foundAlerts.push({
+          key: `${mk}:${catId}:budget-threshold`,
+          text: alertText,
+          categoryId: catId,
+          percentSpent
+        });
       }
     }
   });
 
   _prevAlertInputs = inputs;
-  _prevAlertResult = foundAlerts;
+  _prevAlertEntries = foundAlerts;
+  _prevAlertResult = foundAlerts.map((alert) => alert.text);
   return foundAlerts;
+});
+
+export const activeAlerts: ReadonlySignal<string[]> = computed(() => {
+  return activeAlertEntries.value.map((alert) => alert.text);
 });
 
 /**

@@ -5,7 +5,7 @@
  * Eliminates manual signal updates and prevents data loss during imports.
  */
 
-import { SK, lsGet } from './state.js';
+import { SK, lsGet, normalizeAlertPrefs } from './state.js';
 import * as signals from './signals.js';
 import { safeStorage } from './safe-storage.js';
 import { batch } from '@preact/signals-core';
@@ -50,7 +50,7 @@ const SIGNAL_MAPPINGS = {
   },
   [SK.ALERTS]: {
     signal: signals.alerts,
-    transformer: (value: unknown) => value as typeof signals.alerts.value
+    transformer: (value: unknown) => normalizeAlertPrefs(value)
   },
   [SK.ACHIEVE]: {
     signal: signals.achievements,

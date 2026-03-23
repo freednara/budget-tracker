@@ -11,7 +11,7 @@
  */
 
 import { safeStorage } from './safe-storage.js';
-import type { StorageKeys } from '../../types/index.js';
+import type { AlertPrefs, StorageKeys } from '../../types/index.js';
 
 // ==========================================
 // STORAGE KEYS
@@ -65,7 +65,7 @@ export const STORAGE_DEFAULTS: Record<string, unknown> = {
   [SK.SECTIONS]: { envelope: true },
   [SK.PIN]: '',
   [SK.INSIGHT_PERS]: 'serious',
-  [SK.ALERTS]: { budgetThreshold: 0.8 },
+  [SK.ALERTS]: { budgetThreshold: 0.8, browserNotificationsEnabled: false, lastNotifiedAlertKeys: [] },
   [SK.ROLLOVER_SETTINGS]: { enabled: false, mode: 'all', categories: [], maxRollover: null, negativeHandling: 'zero' },
   [SK.FILTER_PRESETS]: [],
   [SK.TX_TEMPLATES]: [],
@@ -89,6 +89,23 @@ export const STORAGE_DEFAULTS: Record<string, unknown> = {
 export function getStored<T>(key: string, defaultValue?: T): T {
   const fallback = defaultValue ?? STORAGE_DEFAULTS[key] as T;
   return lsGet<T>(key, fallback ?? ('' as unknown as T));
+}
+
+export function normalizeAlertPrefs(value: unknown): AlertPrefs {
+  const raw = (value && typeof value === 'object') ? value as Partial<AlertPrefs> : {};
+  const budgetThreshold = raw.budgetThreshold === null
+    ? null
+    : (typeof raw.budgetThreshold === 'number' && raw.budgetThreshold >= 0 && raw.budgetThreshold <= 1
+      ? raw.budgetThreshold
+      : 0.8);
+
+  return {
+    budgetThreshold,
+    browserNotificationsEnabled: raw.browserNotificationsEnabled === true,
+    lastNotifiedAlertKeys: Array.isArray(raw.lastNotifiedAlertKeys)
+      ? raw.lastNotifiedAlertKeys.filter((key: unknown): key is string => typeof key === 'string')
+      : []
+  };
 }
 
 // ==========================================

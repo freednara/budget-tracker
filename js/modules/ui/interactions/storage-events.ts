@@ -8,7 +8,7 @@
  */
 'use strict';
 
-import { SK, lsGet } from '../../core/state.js';
+import { SK, lsGet, normalizeAlertPrefs } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
 import { emit, Events } from '../../core/event-bus.js';
 import { showToast } from '../core/ui.js';
@@ -134,7 +134,7 @@ export function initStorageEvents(cb: StorageEventCallbacks): void {
         break;
 
       case SK.ALERTS:
-        signals.alerts.value = lsGet(SK.ALERTS, { budgetThreshold: 0.8 }) as AlertPrefs;
+        signals.alerts.value = normalizeAlertPrefs(lsGet(SK.ALERTS, null));
         cb.checkAlerts();
         break;
 

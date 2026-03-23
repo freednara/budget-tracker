@@ -53,7 +53,7 @@ vi.mock('../js/modules/core/signals.js', () => ({
   filterPresets: { value: [] },
   txTemplates: { value: [] },
   lastBackup: { value: null },
-  alerts: { value: { budgetThreshold: 0.8 } },
+  alerts: { value: { budgetThreshold: 0.8, browserNotificationsEnabled: false, lastNotifiedAlertKeys: [] } },
   customCats: { value: [] },
   monthlyAlloc: { value: {} },
   debts: { value: [] },

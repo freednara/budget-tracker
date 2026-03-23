@@ -29,7 +29,7 @@ interface OnboardingStep {
   body: string;
   btn: string;
   target: string | null;
-  tab: 'dashboard' | 'transactions' | 'budget';
+  tab: 'dashboard' | 'transactions' | 'budget' | 'calendar';
   subTab?: 'expense' | 'income';
   position: TooltipPosition;
 }

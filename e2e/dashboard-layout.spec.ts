@@ -7,8 +7,9 @@ test.describe('Dashboard Layout', () => {
     await cleanAppState(page);
   });
 
-  test('prioritizes allowance and collapses deeper analysis by default', async ({ page }) => {
+  test('prioritizes allowance and keeps deeper analysis in analytics', async ({ page }) => {
     await expect(page.locator('#tab-dashboard')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#tab-calendar-btn')).toBeVisible();
 
     await expect(page.locator('#today-remaining')).toHaveCount(0);
     await expect(page.locator('.hero-card #pace-bar')).toBeVisible();
@@ -19,16 +20,19 @@ test.describe('Dashboard Layout', () => {
     await expect(page.locator('#hero-secondary-action')).toBeVisible();
     await expect(page.locator('#hero-primary-action')).toHaveText(/Plan Budget|Add Transaction|Review Budget/);
     await expect(page.locator('.hero-sidebar .dashboard-support-card')).toHaveCount(3);
+    await expect(page.locator('#tab-dashboard').locator('#spending-heatmap')).toHaveCount(0);
+    await expect(page.locator('#tab-dashboard').locator('#month-comparison')).toHaveCount(0);
+    await expect(page.locator('#tab-dashboard').locator('#budget-vs-actual-section')).toHaveCount(0);
 
-    const moreAnalysis = page.locator('#dashboard-more-analysis');
-    await expect(moreAnalysis).toBeVisible();
-    await expect(moreAnalysis).not.toHaveJSProperty('open', true);
-
-    await expect(page.locator('#spending-heatmap')).not.toBeVisible();
-    await expect(page.locator('#month-comparison')).not.toBeVisible();
+    await page.locator('#open-analytics').click();
+    await expect(page.locator('#analytics-modal')).toBeVisible();
+    await expect(page.locator('#analytics-trend-section')).toBeVisible();
+    await expect(page.locator('#analytics-category-trends')).toBeVisible();
+    await expect(page.locator('#analytics-month-comparison-section')).toBeVisible();
+    await expect(page.locator('#analytics-calendar-section')).toHaveCount(0);
   });
 
-  test('keeps budget focused on planning and transactions focused on ledger work', async ({ page }) => {
+  test('keeps budget focused on planning, transactions on ledger work, and calendar on time-based planning', async ({ page }) => {
     await page.locator('#tab-budget-btn').click();
     await expect(page.locator('#tab-budget')).toBeVisible({ timeout: 10000 });
     await expect(page.locator('#envelope-section')).toBeVisible();
@@ -37,10 +41,16 @@ test.describe('Dashboard Layout', () => {
 
     await page.locator('#tab-transactions-btn').click();
     await expect(page.locator('#tab-transactions')).toBeVisible({ timeout: 10000 });
-    await expect(page.locator('.transactions-top-grid')).toBeVisible();
-    await expect(page.locator('.transactions-main-grid')).toBeVisible();
     await expect(page.locator('#form-section')).toBeVisible();
+    await expect(page.locator('.transactions-column--ledger')).toBeVisible();
+    await expect(page.locator('.transactions-support-grid')).toBeVisible();
     await expect(page.locator('.transactions-ledger-card')).toBeVisible();
     await expect(page.locator('#toggle-advanced-filters')).toHaveAttribute('aria-expanded', 'false');
+
+    await page.locator('#tab-calendar-btn').click();
+    await expect(page.locator('#tab-calendar')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#calendar-upcoming-summary')).toBeVisible();
+    await expect(page.locator('#spending-heatmap')).toBeVisible();
+    await expect(page.locator('#cal-detail-panel')).toBeVisible();
   });
 });

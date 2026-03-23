@@ -8,7 +8,7 @@
  */
 'use strict';
 
-import { SK, persist, lsSet } from '../../core/state.js';
+import { SK, persist, lsSet, normalizeAlertPrefs } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
 import { modal, form, settings, savingsGoals as savingsActions } from '../../core/state-actions.js';
 import { openModal, closeModal, showToast, showUndoToast } from '../core/ui.js';
@@ -63,6 +63,10 @@ function loadAnalyticsModule() {
 
 function loadAppResetModule() {
   return import('../../orchestration/app-reset.js');
+}
+
+function loadBrowserNotificationsModule() {
+  return import('../../features/personalization/browser-notifications.js');
 }
 
 // ==========================================
@@ -131,6 +135,7 @@ export async function openSettingsModal(): Promise<void> {
   const settingsCurrency = DOM.get('settings-currency') as HTMLSelectElement | null;
   const insightPersonality = DOM.get('insight-personality') as HTMLSelectElement | null;
   const alertBudgetExceed = DOM.get('alert-budget-exceed') as HTMLInputElement | null;
+  const browserBudgetNotifications = DOM.get('browser-budget-notifications') as HTMLInputElement | null;
   const rolloverEnabled = DOM.get('rollover-enabled') as HTMLInputElement | null;
   const rolloverMode = DOM.get('rollover-mode') as HTMLSelectElement | null;
   const negativeHandling = DOM.get('negative-handling') as HTMLSelectElement | null;
@@ -145,6 +150,14 @@ export async function openSettingsModal(): Promise<void> {
   if (insightPersonality) insightPersonality.value = signals.insightPers.value as string;
   // Checkbox reflects whether budget alerts are active (any non-null threshold)
   if (alertBudgetExceed) alertBudgetExceed.checked = alerts.budgetThreshold !== null && alerts.budgetThreshold !== undefined;
+  if (browserBudgetNotifications) {
+    const { isBrowserNotificationSupported, getBrowserNotificationPermission } = await loadBrowserNotificationsModule();
+    browserBudgetNotifications.checked = alerts.browserNotificationsEnabled;
+    browserBudgetNotifications.disabled = !isBrowserNotificationSupported();
+    browserBudgetNotifications.title = isBrowserNotificationSupported()
+      ? `Current permission: ${getBrowserNotificationPermission()}`
+      : 'Browser notifications are not supported in this environment';
+  }
 
   // Rollover settings
   const { getRolloverSettings } = await loadFeatureEventInterface();
@@ -430,6 +443,7 @@ function setupSettingsModal(): void {
     const settingsCurrency = DOM.get('settings-currency') as HTMLSelectElement | null;
     const insightPersonality = DOM.get('insight-personality') as HTMLSelectElement | null;
     const alertBudgetExceed = DOM.get('alert-budget-exceed') as HTMLInputElement | null;
+    const browserBudgetNotificationsEl = DOM.get('browser-budget-notifications') as HTMLInputElement | null;
     const rolloverEnabledEl = DOM.get('rollover-enabled') as HTMLInputElement | null;
     const rolloverModeEl = DOM.get('rollover-mode') as HTMLSelectElement | null;
     const negativeHandlingEl = DOM.get('negative-handling') as HTMLSelectElement | null;
@@ -447,9 +461,31 @@ function setupSettingsModal(): void {
     persist(SK.CURRENCY, signals.currency.value);
     if (currencyDisplay) currencyDisplay.textContent = signals.currency.value.symbol;
 
-    const alertsVal = { ...signals.alerts.value };
-    alertsVal.budgetThreshold = alertBudgetExceed?.checked ? 0.8 : null;
-    signals.alerts.value = alertsVal;
+    let browserNotificationsEnabled = browserBudgetNotificationsEl?.checked || false;
+    if (browserNotificationsEnabled) {
+      const {
+        isBrowserNotificationSupported,
+        getBrowserNotificationPermission,
+        requestBrowserNotificationPermission
+      } = await loadBrowserNotificationsModule();
+      if (!isBrowserNotificationSupported()) {
+        browserNotificationsEnabled = false;
+        showToast('Browser notifications are not supported in this environment', 'warning');
+      } else if (getBrowserNotificationPermission() !== 'granted') {
+        const permission = await requestBrowserNotificationPermission();
+        if (permission !== 'granted') {
+          browserNotificationsEnabled = false;
+          showToast('Browser notifications were not enabled', permission === 'denied' ? 'warning' : 'info');
+        }
+      }
+    }
+
+    const alertsVal = normalizeAlertPrefs({
+      ...signals.alerts.value,
+      budgetThreshold: alertBudgetExceed?.checked ? 0.8 : null,
+      browserNotificationsEnabled
+    });
+    settings.setAlerts(alertsVal);
     persist(SK.ALERTS, signals.alerts.value);
 
     const newPers = insightPersonality?.value as InsightPersonality;

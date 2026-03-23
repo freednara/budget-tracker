@@ -75,6 +75,11 @@ export function renderMonthComparison(): void {
   const curSav = curInc - curExp;
   const prevSav = prevInc - prevExp;
 
+  if (curExp === 0 && prevExp === 0 && curInc === 0 && prevInc === 0) {
+    el.innerHTML = `<div class="p-4 rounded-lg text-center text-xs" style="background: var(--bg-input); color: var(--text-tertiary);">No current or previous month activity to compare yet.</div>`;
+    return;
+  }
+
   // Calculate percentage changes
   const expChange = prevExp > 0 ? Math.round(((curExp - prevExp) / prevExp) * 100) : 0;
   const incChange = prevInc > 0 ? Math.round(((curInc - prevInc) / prevInc) * 100) : 0;

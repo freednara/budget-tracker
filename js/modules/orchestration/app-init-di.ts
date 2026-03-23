@@ -123,7 +123,7 @@ export async function initializeApp(): Promise<InitializationStatus> {
 
     // Initialize alerts
     const { initAlerts } = await import('../features/personalization/alerts.js');
-    initAlerts();
+    registerCleanup(initAlerts());
     setStartupProgress('initialize:alerts-ready');
 
     // Initialize budget rollover system
@@ -332,8 +332,8 @@ async function postOnboardingInit(): Promise<void> {
       checkAlerts();
     },
     renderMonthComparison: async () => {
-      const { updateCharts } = await import('../ui/core/ui-render.js');
-      updateCharts();
+      const { renderMonthComparison } = await import('../ui/charts/analytics-ui.js');
+      renderMonthComparison();
     },
     renderRecurringBreakdown: async () => {
       const { updateCharts } = await import('../ui/core/ui-render.js');
@@ -385,6 +385,10 @@ async function postOnboardingInit(): Promise<void> {
   populateCategoryFilter();
   setRenderQuickShortcutsFn(() => renderQuickShortcuts());
   renderQuickShortcuts();
+  const { updateCharts } = await import('../ui/core/ui-render.js');
+  const { renderMonthComparison } = await import('../ui/charts/analytics-ui.js');
+  await updateCharts();
+  renderMonthComparison();
   registerCleanup(mountEditUI());
   void import('../ui/widgets/filters.js').then(({ renderFilterPresets }) => {
     renderFilterPresets();
@@ -394,7 +398,7 @@ async function postOnboardingInit(): Promise<void> {
   if (hasTransactions) {
     // Restore persisted tab or default to dashboard
     const savedTab = lsGet('budget_tracker_active_tab', 'dashboard') as string;
-    const validTabs = ['dashboard', 'budget', 'transactions'];
+    const validTabs = ['dashboard', 'budget', 'transactions', 'calendar'];
     switchMainTab((validTabs.includes(savedTab) ? savedTab : 'dashboard') as any);
     
     // Render transactions

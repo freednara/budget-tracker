@@ -11,6 +11,7 @@ import { parseMonthKey, parseLocalDate, getMonthKey } from '../../core/utils.js'
 import { getCatInfo } from '../../core/categories.js';
 import { isTrackedExpenseTransaction } from '../../core/transaction-classification.js';
 import { getMonthTx } from '../../features/financial/calculations.js';
+import { openTransactionsForDate, openTransactionsEdit } from '../core/ui-navigation.js';
 import DOM from '../../core/dom-cache.js';
 import { html, render, repeat, classMap } from '../../core/lit-helpers.js';
 import { effect, computed } from '@preact/signals-core';
@@ -115,6 +116,7 @@ export function mountCalendar(): () => void {
   const container = DOM.get('spending-heatmap');
   const detailContainer = DOM.get('cal-detail-panel');
   const badgeContainer = DOM.get('calendar-badge');
+  const summaryContainer = DOM.get('calendar-upcoming-summary');
   if (!container) return () => {};
 
   const cleanup = effect(() => {
@@ -130,12 +132,49 @@ export function mountCalendar(): () => void {
       render(html`<span class="time-badge">${monthName}</span>`, badgeContainer);
     }
 
+    if (txs.length === 0 && bills.size === 0) {
+      render(html`<div class="p-4 rounded-lg text-center text-xs" style="background: var(--bg-input); color: var(--text-tertiary);">No calendar activity for this month yet.</div>`, container);
+      if (detailContainer) {
+        render(html`
+          <div class="calendar-detail-empty">
+            <p class="calendar-detail-empty__title">No calendar activity yet</p>
+            <p class="calendar-detail-empty__body">Add transactions or recurring bills to plan the month day by day.</p>
+          </div>
+        `, detailContainer);
+      }
+      if (summaryContainer) {
+        render(html`
+          <div class="calendar-summary-card">
+            <p class="calendar-summary-card__label">Activity Days</p>
+            <p class="calendar-summary-card__value">0</p>
+            <p class="calendar-summary-card__meta">No recorded days in this month yet.</p>
+          </div>
+          <div class="calendar-summary-card">
+            <p class="calendar-summary-card__label">Recurring Bills</p>
+            <p class="calendar-summary-card__value">0</p>
+            <p class="calendar-summary-card__meta">No recurring bill activity scheduled for this month.</p>
+          </div>
+          <div class="calendar-summary-card">
+            <p class="calendar-summary-card__label">Next Planning Step</p>
+            <p class="calendar-summary-card__value calendar-summary-card__value--small">Add your first transaction</p>
+            <p class="calendar-summary-card__meta">The calendar tab will start highlighting busy days automatically.</p>
+          </div>
+        `, summaryContainer);
+      }
+      return;
+    }
+
     // 2. Render Main Grid
     renderCalendarGrid(container, mk, txs, bills, selectedDay);
 
     // 3. Render Detail Panel
     if (detailContainer) {
-      renderDetailPanel(detailContainer, selectedDay, txs, bills);
+      renderDetailPanel(detailContainer, mk, selectedDay, txs, bills);
+    }
+
+    // 4. Render Summary Strip
+    if (summaryContainer) {
+      renderSummaryStrip(summaryContainer, mk, txs, bills, selectedDay);
     }
   });
 
@@ -231,23 +270,120 @@ function renderCalendarGrid(container: HTMLElement, mk: string, txs: Transaction
   `, container);
 }
 
-function renderDetailPanel(container: HTMLElement, day: number | null, txs: Transaction[], billsMap: Map<number, BillInfo[]>): void {
+function renderSummaryStrip(
+  container: HTMLElement,
+  mk: string,
+  txs: Transaction[],
+  billsMap: Map<number, BillInfo[]>,
+  selectedDay: number | null
+): void {
+  const monthDate = parseMonthKey(mk);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const activeDays = new Set<number>();
+  txs.forEach((tx) => activeDays.add(parseLocalDate(tx.date).getDate()));
+  billsMap.forEach((_bills, day) => activeDays.add(day));
+
+  const billEntries = Array.from(billsMap.values()).flat();
+  const upcomingBills = billEntries
+    .filter((bill) => !bill.isPaid && (getMonthKey(today) !== mk || parseLocalDate(bill.date) >= today))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const nextUpcomingBill = upcomingBills[0] || null;
+
+  const selectedDateLabel = selectedDay
+    ? new Date(monthDate.getFullYear(), monthDate.getMonth(), selectedDay).toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric'
+      })
+    : 'No day selected';
+
+  render(html`
+    <div class="calendar-summary-card">
+      <p class="calendar-summary-card__label">Activity Days</p>
+      <p class="calendar-summary-card__value">${activeDays.size}</p>
+      <p class="calendar-summary-card__meta">${activeDays.size === 1 ? '1 active day' : `${activeDays.size} days with spending, income, or recurring activity`}</p>
+    </div>
+    <div class="calendar-summary-card">
+      <p class="calendar-summary-card__label">Upcoming Bills</p>
+      <p class="calendar-summary-card__value">${upcomingBills.length}</p>
+      <p class="calendar-summary-card__meta">
+        ${nextUpcomingBill
+          ? `Next due: ${nextUpcomingBill.description || nextUpcomingBill.categoryName} on ${new Date(nextUpcomingBill.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+          : 'No unpaid recurring bills left in this month.'}
+      </p>
+    </div>
+    <div class="calendar-summary-card">
+      <p class="calendar-summary-card__label">Selected Day</p>
+      <p class="calendar-summary-card__value calendar-summary-card__value--small">${selectedDateLabel}</p>
+      <p class="calendar-summary-card__meta">
+        ${selectedDay ? 'Inspect the day details or jump straight into the transaction form.' : 'Pick a day on the calendar to review activity and plan from that date.'}
+      </p>
+    </div>
+  `, container);
+}
+
+function renderDetailPanel(container: HTMLElement, mk: string, day: number | null, txs: Transaction[], billsMap: Map<number, BillInfo[]>): void {
   if (!day) {
-    render(html``, container);
+    render(html`
+      <div class="calendar-detail-empty">
+        <p class="calendar-detail-empty__title">Select a day</p>
+        <p class="calendar-detail-empty__body">Choose a date to inspect transactions, review recurring bills, or jump into the transaction form for that day.</p>
+      </div>
+    `, container);
     return;
   }
 
   const dayTx = txs.filter(t => parseLocalDate(t.date).getDate() === day);
   const dayBills = billsMap.get(day) || [];
   const fmtCur = getDefaultContainer().resolveSync<CurrencyFormatter>(Services.CURRENCY_FORMATTER);
+  const selectedDate = `${mk}-${String(day).padStart(2, '0')}`;
+  const selectedDateLabel = new Date(`${selectedDate}T00:00:00`).toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric'
+  });
 
   if (dayTx.length === 0 && dayBills.length === 0) {
-    render(html`<div class="mt-3 p-4 text-center text-xs text-tertiary">No activity on this day</div>`, container);
+    render(html`
+      <div class="calendar-detail-panel">
+        <div class="calendar-day-actions">
+          <div>
+            <p class="calendar-day-actions__label">${selectedDateLabel}</p>
+            <p class="calendar-day-actions__meta">No activity recorded on this day yet.</p>
+          </div>
+          <button
+            type="button"
+            class="btn btn-primary calendar-day-actions__button"
+            @click=${() => void openTransactionsForDate(selectedDate)}
+          >
+            Add Transaction
+          </button>
+        </div>
+      </div>
+    `, container);
     return;
   }
 
   render(html`
-    <div class="mt-3 space-y-2">
+    <div class="calendar-detail-panel">
+      <div class="calendar-day-actions">
+        <div>
+          <p class="calendar-day-actions__label">${selectedDateLabel}</p>
+          <p class="calendar-day-actions__meta">
+            ${dayTx.length} transaction${dayTx.length === 1 ? '' : 's'} · ${dayBills.length} recurring bill${dayBills.length === 1 ? '' : 's'}
+          </p>
+        </div>
+        <button
+          type="button"
+          class="btn btn-primary calendar-day-actions__button"
+          @click=${() => void openTransactionsForDate(selectedDate)}
+        >
+          Add Transaction
+        </button>
+      </div>
+
+      <div class="mt-3 space-y-2">
       ${dayBills.length > 0 ? html`
         <div class="p-3 rounded-xl bg-warning/10 border border-warning/20">
           <p class="text-[10px] font-black uppercase tracking-widest text-warning mb-2">Recurring Bills</p>
@@ -272,15 +408,28 @@ function renderDetailPanel(container: HTMLElement, day: number | null, txs: Tran
             const cat = getCatInfo(t.type, t.category);
             return html`
               <div class="flex justify-between items-center py-1">
-                <span class="text-xs font-medium text-primary">${cat.emoji} ${t.description || cat.name}</span>
-                <span class="text-xs font-black ${t.type === 'expense' ? 'text-expense' : 'text-income'}">
-                  ${t.type === 'expense' ? '-' : '+'}${fmtCur(t.amount)}
-                </span>
+                <div class="flex-1 min-w-0 pr-2">
+                  <span class="text-xs font-medium text-primary">${cat.emoji} ${t.description || cat.name}</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-xs font-black ${t.type === 'expense' ? 'text-expense' : 'text-income'}">
+                    ${t.type === 'expense' ? '-' : '+'}${fmtCur(t.amount)}
+                  </span>
+                  <button
+                    type="button"
+                    class="calendar-detail-edit-btn"
+                    aria-label="Edit transaction ${t.description || cat.name}"
+                    @click=${() => void openTransactionsEdit(t)}
+                  >
+                    Edit
+                  </button>
+                </div>
               </div>
             `;
           })}
         </div>
       ` : ''}
+      </div>
     </div>
   `, container);
 }

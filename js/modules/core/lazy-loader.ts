@@ -399,7 +399,7 @@ export function initLazyLoading(): void {
     },
     {
       name: 'alert-banner',
-      selector: '#alert-banner-container',
+      selector: '#alert-banner',
       loader: async () => {
         const module = await import('../features/personalization/alerts.js');
         return { mount: () => module.mountAlertBanner() };

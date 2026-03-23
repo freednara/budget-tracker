@@ -117,11 +117,13 @@ export function renderSettingsModal(): TemplateResult {
           <button id="add-custom-cat-btn" class="w-full py-2 rounded-lg text-sm font-semibold" style="background: var(--bg-input); color: var(--text-secondary); border: 1px dashed var(--border-input);">+ Add Custom Category</button>
         </div>
 
-        <!-- Notifications -->
-        <p class="text-xs font-black mb-3" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Notifications</p>
+        <!-- Alerts & Notifications -->
+        <p class="text-xs font-black mb-3" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Alerts & Notifications</p>
         <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
-          <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Alerts</label>
-          <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" id="alert-budget-exceed" checked class="w-4 h-4"> <span class="text-sm text-primary">Alert when budget exceeds 80%</span></label>
+          <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Budget Alerts</label>
+          <label class="flex items-center gap-3 cursor-pointer mb-2"><input type="checkbox" id="alert-budget-exceed" checked class="w-4 h-4"> <span class="text-sm text-primary">In-app alert when budget exceeds 80%</span></label>
+          <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" id="browser-budget-notifications" class="w-4 h-4"> <span class="text-sm text-primary">Browser notifications for new budget alerts</span></label>
+          <p class="text-xs mt-2" style="color: var(--text-tertiary);">Browser notifications are local-only, require permission, and work only while the app or installed PWA is open.</p>
         </div>
 
         <!-- Security -->

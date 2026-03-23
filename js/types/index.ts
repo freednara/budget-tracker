@@ -222,6 +222,8 @@ export interface StreakData {
 
 export interface AlertPrefs {
   budgetThreshold: number | null;
+  browserNotificationsEnabled: boolean;
+  lastNotifiedAlertKeys: string[];
 }
 
 // ==========================================
@@ -326,7 +328,7 @@ export type InsightPersonality = 'serious' | 'casual' | 'motivating';
 // MAIN TAB
 // ==========================================
 
-export type MainTab = 'dashboard' | 'transactions' | 'budget';
+export type MainTab = 'dashboard' | 'transactions' | 'budget' | 'calendar';
 
 // ==========================================
 // FULL APPLICATION STATE

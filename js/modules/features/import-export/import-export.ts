@@ -7,7 +7,7 @@
  */
 'use strict';
 
-import { SK } from '../../core/state.js';
+import { SK, STORAGE_DEFAULTS, normalizeAlertPrefs } from '../../core/state.js';
 import { safeStorage } from '../../core/safe-storage.js';
 import * as signals from '../../core/signals.js';
 import { CURRENCY_MAP, getTodayStr, parseAmount, generateId, toCents } from '../../core/utils.js';
@@ -55,7 +55,11 @@ interface ImportData {
   insightPersonality?: string;
   filterPresets?: unknown[];
   txTemplates?: unknown[];
-  alertPrefs?: { budgetThreshold?: number | null };
+  alertPrefs?: {
+    budgetThreshold?: number | null;
+    browserNotificationsEnabled?: boolean;
+    lastNotifiedAlertKeys?: string[];
+  };
   customCategories?: unknown[];
   monthlyAllocations?: Record<string, Record<string, unknown>>;
   debts?: unknown[];
@@ -414,15 +418,11 @@ export function buildImportState(
   // L8 + M-new-1: Validate alert prefs; in merge mode with no backup alertPrefs, keep existing
   const rawAlerts = d.alertPrefs;
   if (rawAlerts) {
-    newS.alerts = {
-      budgetThreshold: rawAlerts.budgetThreshold === null ? null :
-        (typeof rawAlerts.budgetThreshold === 'number' && rawAlerts.budgetThreshold >= 0 && rawAlerts.budgetThreshold <= 1)
-          ? rawAlerts.budgetThreshold : 0.8,
-    };
+    newS.alerts = normalizeAlertPrefs(rawAlerts);
   } else if (mode === 'merge') {
-    newS.alerts = signals.alerts.value; // keep existing in merge mode when backup has no alertPrefs
+    newS.alerts = normalizeAlertPrefs(signals.alerts.value); // keep existing in merge mode when backup has no alertPrefs
   } else {
-    newS.alerts = { budgetThreshold: 0.8 }; // overwrite → reset to defaults
+    newS.alerts = normalizeAlertPrefs(STORAGE_DEFAULTS[SK.ALERTS]); // overwrite → reset to defaults
   }
   writes.push({ key: SK.ALERTS, value: newS.alerts });
 

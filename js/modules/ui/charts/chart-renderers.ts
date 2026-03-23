@@ -223,6 +223,12 @@ function renderDonutSegment(
 export function renderDonutChart(containerId: string, data: DonutChartData[], trends: Record<string, CategoryTrendChange> = {}): void {
   const el = DOM.get(containerId) as ChartElement | null;
   if (!el) return;
+  const isDashboardSnapshot = containerId === 'donut-chart-container';
+  const categoryTrendSection = DOM.get('category-trend-section');
+
+  if (isDashboardSnapshot && categoryTrendSection) {
+    categoryTrendSection.classList.add('hidden');
+  }
   
   const noDataTemplate = html`
     <p class="text-xs text-center py-8" style="color: var(--text-tertiary);">
@@ -241,9 +247,13 @@ export function renderDonutChart(containerId: string, data: DonutChartData[], tr
     return;
   }
   
-  const cx = 90, cy = 90, r = 70, ir = 42;
+  const cx = 90;
+  const cy = 90;
+  const r = isDashboardSnapshot ? 52 : 70;
+  const ir = isDashboardSnapshot ? 30 : 42;
   const processedData = processDonutData(data, total);
   const tooltip = DOM.get('chart-tooltip') as HTMLElement | null;
+  const legendItems = isDashboardSnapshot ? data.slice(0, 4) : data;
   
   // Event handlers for segments
   const handleSegmentEnter = (d: ProcessedDonutData) => (e: Event) => {
@@ -282,6 +292,7 @@ export function renderDonutChart(containerId: string, data: DonutChartData[], tr
   };
   
   const handleSegmentClick = (d: ProcessedDonutData) => (e: Event) => {
+    if (isDashboardSnapshot) return;
     if (!d.catId) return;
     const catInfo = getCatInfo('expense', d.catId) as CategoryChild;
     const catName = catInfo ? catInfo.name : d.catId;
@@ -290,8 +301,8 @@ export function renderDonutChart(containerId: string, data: DonutChartData[], tr
   };
   
   render(html`
-    <div class="flex items-start gap-4">
-      <svg viewBox="0 0 180 180" class="shrink-0" style="width:140px;height:140px;" 
+    <div class="flex items-start gap-${isDashboardSnapshot ? '2' : '4'} dashboard-category-breakdown">
+      <svg viewBox="0 0 180 180" class="shrink-0" style="width:${isDashboardSnapshot ? '96px' : '140px'};height:${isDashboardSnapshot ? '96px' : '140px'};" 
         role="img" aria-label="Expense breakdown by category">
         <title>Category Breakdown</title>
         <desc>Donut chart showing ${data.length} expense categories totaling ${fmtCur(total)}</desc>
@@ -306,17 +317,17 @@ export function renderDonutChart(containerId: string, data: DonutChartData[], tr
             handleSegmentClick(d)
           )
         )}
-        <text x="${cx}" y="${cy - 4}" text-anchor="middle" fill="var(--text-tertiary)" font-size="10">
+        <text x="${cx}" y="${cy - 4}" text-anchor="middle" fill="var(--text-tertiary)" font-size="${isDashboardSnapshot ? '9' : '10'}">
           Total
         </text>
         <text x="${cx}" y="${cy + 12}" text-anchor="middle" fill="var(--text-primary)" 
-          font-size="15" font-weight="800">
+          font-size="${isDashboardSnapshot ? '12' : '15'}" font-weight="800">
           ${fmtCur(total)}
         </text>
       </svg>
       
-      <div class="flex-1 space-y-2 pt-1">
-        ${data.map(d => {
+      <div class="flex-1 space-y-${isDashboardSnapshot ? '1' : '2'} pt-${isDashboardSnapshot ? '0.5' : '1'}">
+        ${legendItems.map(d => {
           const pct = (d.value / total * 100).toFixed(0);
           const trend = d.catId && trends[d.catId];
           let trendArrow = '';
@@ -327,16 +338,16 @@ export function renderDonutChart(containerId: string, data: DonutChartData[], tr
                         trend.direction === 'down' ? 'var(--color-income)' : 'var(--text-tertiary)';
           }
           return html`
-            <div class="flex items-center gap-2 text-xs">
+            <div class="flex items-center gap-${isDashboardSnapshot ? '1.5' : '2'} text-xs ${isDashboardSnapshot ? 'dashboard-category-breakdown__row' : ''}">
               <span class="w-3 h-3 rounded-full shrink-0" style="background:${d.color};"></span>
-              <span class="flex-1" style="color:var(--text-secondary);">${d.label}</span>
-              <span class="font-bold text-right" style="color:var(--text-primary); min-width: 70px;">
+              <span class="flex-1 truncate" style="color:var(--text-secondary);">${d.label}</span>
+              <span class="font-bold text-right" style="color:var(--text-primary); min-width: ${isDashboardSnapshot ? '52px' : '70px'};">
                 ${fmtCur(d.value)}
               </span>
-              <span class="text-right" style="color:var(--text-tertiary); min-width: 32px;">
+              <span class="text-right" style="color:var(--text-tertiary); min-width: ${isDashboardSnapshot ? '22px' : '32px'};">
                 ${pct}%
               </span>
-              <span class="text-right" style="min-width: 42px;">
+              <span class="text-right" style="min-width: ${isDashboardSnapshot ? '30px' : '42px'};">
                 ${trend && trendArrow ? html`
                   <span style="color:${trendColor};" title="vs last month">
                     ${trendArrow}${Math.abs(trend.change)}%
@@ -346,6 +357,9 @@ export function renderDonutChart(containerId: string, data: DonutChartData[], tr
             </div>
           `;
         })}
+        ${isDashboardSnapshot && data.length > legendItems.length ? html`
+          <p class="text-[10px]" style="color: var(--text-tertiary);">+${data.length - legendItems.length} more categories in Analytics</p>
+        ` : ''}
       </div>
     </div>
   `, el);
@@ -504,6 +518,7 @@ export function renderBarChart(containerId: string, labels: string[], datasets: 
 export async function renderTrendChart(containerId: string, monthCount: number = trendChartMonths): Promise<void> {
   const el = DOM.get(containerId) as ChartElement | null;
   if (!el) return;
+  const isDashboardSnapshot = containerId === 'trend-chart-container';
 
   const now = new Date();
   const months: string[] = [];
@@ -519,8 +534,26 @@ export async function renderTrendChart(containerId: string, monthCount: number =
       isTrackedExpenseTransaction(tx) ? sum + toCents(tx.amount) : sum
     ), 0)
   ));
+  const activeMonths = months.filter((_, idx) => incVals[idx] > 0 || expVals[idx] > 0);
+  if (activeMonths.length < 2) {
+    render(html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">Need at least two months of activity to chart a trend.</p>`, el);
+    return;
+  }
+  const activeIndexes = months.reduce<number[]>((indexes: number[], _month: string, idx: number) => {
+    if (incVals[idx] > 0 || expVals[idx] > 0) indexes.push(idx);
+    return indexes;
+  }, []);
+  const activeCount = Math.max(activeIndexes.length, 1);
+  const avgIncome = activeIndexes.reduce((sum: number, idx: number) => sum + incVals[idx], 0) / activeCount;
+  const avgExpenses = activeIndexes.reduce((sum: number, idx: number) => sum + expVals[idx], 0) / activeCount;
+  const netAverage = avgIncome - avgExpenses;
   const maxVal = Math.max(...incVals, ...expVals, 1);
-  const w = 500, h = 220, padL = 55, padB = 45, padT = 20, padR = 15;
+  const w = 500;
+  const h = isDashboardSnapshot ? 148 : 220;
+  const padL = isDashboardSnapshot ? 40 : 55;
+  const padB = isDashboardSnapshot ? 28 : 45;
+  const padT = isDashboardSnapshot ? 14 : 20;
+  const padR = 15;
   const chartW = w - padL - padR, chartH = h - padT - padB;
   const step = chartW / (months.length - 1 || 1);
   const labels = months.map(mk => { 
@@ -579,7 +612,25 @@ export async function renderTrendChart(containerId: string, monthCount: number =
   };
   
   render(html`
-    <svg viewBox="0 0 ${w} ${h}" class="w-full" 
+    ${isDashboardSnapshot ? html`
+      <div class="dashboard-trend-summary" aria-label="Trend summary">
+        <div class="dashboard-trend-metric">
+          <span class="dashboard-trend-metric__label">Avg Income</span>
+          <span class="dashboard-trend-metric__value" style="color: var(--color-income);">${fmtCur(avgIncome)}</span>
+        </div>
+        <div class="dashboard-trend-metric">
+          <span class="dashboard-trend-metric__label">Avg Expenses</span>
+          <span class="dashboard-trend-metric__value" style="color: var(--color-expense);">${fmtCur(avgExpenses)}</span>
+        </div>
+        <div class="dashboard-trend-metric">
+          <span class="dashboard-trend-metric__label">Net Avg</span>
+          <span class="dashboard-trend-metric__value" style="color: ${netAverage >= 0 ? 'var(--color-income)' : 'var(--color-expense)'};">
+            ${netAverage >= 0 ? '+' : '-'}${fmtCur(Math.abs(netAverage))}
+          </span>
+        </div>
+      </div>
+    ` : ''}
+    <svg viewBox="0 0 ${w} ${h}" class="w-full ${isDashboardSnapshot ? 'dashboard-trend-svg' : ''}" 
       role="img" aria-label="Income and expense trends over time">
       <title>Trend Chart</title>
       <desc>Line chart showing ${monthCount}-month trend of income and expenses</desc>
@@ -701,10 +752,12 @@ export async function renderTrendChart(containerId: string, monthCount: number =
               stroke="var(--bg-primary)" 
               stroke-width="1.5"/>
             ${income > 0 ? svg`
-              <text x="${incX}" y="${incY - 8}" text-anchor="middle" 
-                fill="var(--color-income)" font-size="8" font-weight="700">
-                ${fmtShort(income)}
-              </text>
+              ${!isDashboardSnapshot ? svg`
+                <text x="${incX}" y="${incY - 8}" text-anchor="middle" 
+                  fill="var(--color-income)" font-size="8" font-weight="700">
+                  ${fmtShort(income)}
+                </text>
+              ` : ''}
             ` : ''}
             
             <!-- Expense point -->
@@ -713,10 +766,12 @@ export async function renderTrendChart(containerId: string, monthCount: number =
               stroke="var(--bg-primary)" 
               stroke-width="1.5"/>
             ${expense > 0 ? svg`
-              <text x="${expX}" y="${expY + 14}" text-anchor="middle" 
-                fill="var(--color-expense)" font-size="8" font-weight="700">
-                ${fmtShort(expense)}
-              </text>
+              ${!isDashboardSnapshot ? svg`
+                <text x="${expX}" y="${expY + 14}" text-anchor="middle" 
+                  fill="var(--color-expense)" font-size="8" font-weight="700">
+                  ${fmtShort(expense)}
+                </text>
+              ` : ''}
             ` : ''}
             
             <!-- Interactive hitbox (covers both points) -->
@@ -746,16 +801,16 @@ export async function renderTrendChart(containerId: string, monthCount: number =
       ${labels.map((lbl, i) => svg`
         <text 
           x="${padL + i * step}" 
-          y="${baseY + 14}" 
+          y="${baseY + (isDashboardSnapshot ? 12 : 14)}" 
           text-anchor="middle" 
           fill="var(--text-secondary)" 
-          font-size="10">
+          font-size="${isDashboardSnapshot ? '9' : '10'}">
           ${lbl}
         </text>
       `)}
     </svg>
     
-    <div class="flex gap-4 justify-center mt-1">
+      <div class="${isDashboardSnapshot ? 'dashboard-trend-legend' : 'flex gap-4 justify-center mt-1'}">
       <div class="flex items-center gap-1 text-xs">
         <span class="w-3 h-3 rounded-full" style="background:var(--color-income);"></span>
         <span style="color:var(--text-secondary);">Income</span>
