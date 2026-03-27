@@ -8,30 +8,28 @@
  */
 'use strict';
 
-import { SK, persist, lsSet } from '../../core/state.js';
+import { SK, persist } from '../../core/state.js';
 import { dataSdk } from '../../data/data-manager.js';
 import * as signals from '../../core/signals.js';
-import { pagination, form } from '../../core/state-actions.js';
+import { filters, form, data } from '../../core/state-actions.js';
 import { DOM } from '../../core/dom-cache.js';
 import { getAllCats, getCatInfo, DEFAULT_CATEGORY_COLOR } from '../../core/categories.js';
 import { showToast, openModal } from './ui.js';
 import { asyncConfirm } from '../components/async-modal.js';
 import { emit, Events } from '../../core/event-bus.js';
 import { monthLabel, parseLocalDate, toCents, toDollars } from '../../core/utils.js';
-import { renderTrendChart, renderDonutChart, renderBarChart, getTrendChartMonths } from '../charts/chart-renderers.js';
+import { renderTrendChart, renderDonutChart, renderBarChart, getTrendChartMonths, setTrendChartMonths } from '../charts/chart-renderers.js';
 import { calculateMonthlyTotalsWithCacheSync } from '../../core/monthly-totals-cache.js';
-import { calculateCategoryTrends } from '../../orchestration/analytics.js';
+import { calculateCategoryTrends } from '../../features/analytics/trend-analysis.js';
 import { getMonthBadge } from '../widgets/calendar.js';
-import { revealTransactionsForm } from './ui-navigation.js';
+import { revealTransactionsForm, switchMainTab } from './ui-navigation.js';
 import { html, render } from '../../core/lit-helpers.js';
+import { applyTransactionFilters } from '../../data/transaction-surface-coordinator.js';
 import type { Transaction, CustomCategory, TransactionType, CategoryTrendChange } from '../../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
 // ==========================================
-
-type SwitchMainTabCallback = (tab: string) => void;
-type RenderTransactionsCallback = () => void;
 
 interface InsightActionData {
   category?: string;
@@ -50,48 +48,9 @@ function revealAfterTabSwitch(sectionId: string, focusId?: string): void {
   }, 80);
 }
 
-// ==========================================
-// DEPENDENCY INJECTION
-// ==========================================
-
-import { getDefaultContainer, Services } from '../../core/di-container.js';
-
-/**
- * Get switch main tab function from DI container
- */
-function getSwitchMainTab(): SwitchMainTabCallback {
-  try {
-    return getDefaultContainer().resolveSync<SwitchMainTabCallback>(Services.SWITCH_MAIN_TAB);
-  } catch {
-    return () => {};
-  }
-}
-
-/**
- * Get render transactions function from DI container
- */
-function getRenderTransactions(): RenderTransactionsCallback {
-  try {
-    return getDefaultContainer().resolveSync<RenderTransactionsCallback>(Services.RENDER_TRANSACTIONS);
-  } catch {
-    return () => {};
-  }
-}
-
 // Legacy setter functions - deprecated but kept for backwards compatibility
-/**
- * @deprecated Use DI container instead
- */
-export function setSwitchMainTabFn(fn: SwitchMainTabCallback): void {
-  if (import.meta.env.DEV) console.warn('setSwitchMainTabFn is deprecated. Services are now resolved from DI container.');
-}
-
-/**
- * @deprecated Use DI container instead
- */
-export function setRenderTransactionsFn(fn: RenderTransactionsCallback): void {
-  if (import.meta.env.DEV) console.warn('setRenderTransactionsFn is deprecated. Services are now resolved from DI container.');
-}
+export function setSwitchMainTabFn(_fn: (tab: string) => void): void {}
+export function setRenderTransactionsFn(_fn: () => void): void {}
 
 // ==========================================
 // RENDER FUNCTIONS
@@ -112,24 +71,21 @@ export function renderMonthNav(): void {
 export function handleInsightAction(actionType: string, data: InsightActionData): void {
   switch (actionType) {
     case 'filter-category':
-      getSwitchMainTab()('transactions');
-      // Update filter signal directly (not just DOM) so the filter actually applies
+      switchMainTab('transactions');
       if (data.category) {
-        signals.filters.value = { ...signals.filters.value, category: data.category, showAllMonths: false };
+        void applyTransactionFilters({ category: data.category, showAllMonths: false });
       }
-      signals.filtersExpanded.value = true;
+      filters.setExpanded(true);
       persist(SK.FILTER_EXPANDED, true);
-      pagination.resetPage();
-      getRenderTransactions()();
       revealAfterTabSwitch('filter-category', 'filter-category');
       showToast(data.category === 'savings_transfer' ? 'Showing savings transfers' : 'Filtered by category', 'info');
       break;
     case 'goto-budget':
-      getSwitchMainTab()('budget');
+      switchMainTab('budget');
       revealAfterTabSwitch('envelope-section', 'open-plan-budget');
       break;
     case 'goto-budget-goals':
-      getSwitchMainTab()('budget');
+      switchMainTab('budget');
       revealAfterTabSwitch('savings-goals-section', 'add-savings-goal-btn');
       break;
   }
@@ -145,6 +101,16 @@ export function renderQuickShortcuts(): void {
 
   const currentType = signals.currentType.value;
   const cats = getAllCats(currentType).slice(0, 6);
+  const renderKey = JSON.stringify(cats.map((cat) => ({
+    id: cat.id,
+    emoji: cat.emoji,
+    color: cat.color,
+    name: cat.name
+  })));
+
+  if (container.dataset.renderKey === renderKey) {
+    return;
+  }
 
   const template = html`
     ${cats.map(cat => html`
@@ -152,12 +118,7 @@ export function renderQuickShortcuts(): void {
               class="quick-add-shortcut quick-shortcut p-3 rounded-lg text-center transition-all hover:opacity-80"
               data-category="${cat.id}" 
               data-type="${currentType}"
-              style="background: ${cat.color}20; border: 2px solid ${cat.color}; color: ${cat.color}; font-weight: 600;"
-              @click=${() => {
-                form.setSelectedCategory(cat.id);
-                renderCategories();
-                revealTransactionsForm('amount', true);
-              }}>
+              style="background: ${cat.color}20; border: 2px solid ${cat.color}; color: ${cat.color}; font-weight: 600;">
         <div class="text-2xl mb-1">${cat.emoji}</div>
         <div class="text-xs">${cat.name}</div>
       </button>
@@ -165,6 +126,8 @@ export function renderQuickShortcuts(): void {
   `;
 
   render(template, container);
+  bindQuickShortcutHandlers(container);
+  container.dataset.renderKey = renderKey;
 }
 
 /**
@@ -178,70 +141,58 @@ export function renderCategories(): void {
   const currentType = signals.currentType.value;
   const selectedCategory = signals.selectedCategory.value;
   const cats = getAllCats(currentType);
+  const renderKey = JSON.stringify(cats.map((cat) => ({
+    id: cat.id,
+    emoji: cat.emoji,
+    color: cat.color,
+    name: cat.name
+  })));
+
+  if (container.dataset.renderKey === renderKey) {
+    syncCategoryChipSelection(container, selectedCategory);
+    return;
+  }
 
   const template = html`
     ${cats.map(cat => html`
       <button type="button" 
               data-category="${cat.id}"
+              data-color="${cat.color}"
               class="category-chip px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all"
-              style="background: ${selectedCategory === cat.id ? cat.color : 'var(--bg-chip-unselected)'};
-                     color: ${selectedCategory === cat.id ? 'white' : 'var(--text-secondary)'}; 
-                     border: 1px solid ${selectedCategory === cat.id ? 'transparent' : 'var(--border-input)'};"
-              @click=${() => {
-                form.setSelectedCategory(cat.id);
-                const chips = DOM.get('category-chips');
-                const catErr = DOM.get('category-error');
-                if (chips) {
-                  chips.style.outline = '';
-                  chips.style.outlineOffset = '';
-                  chips.removeAttribute('aria-invalid');
-                }
-                if (catErr) catErr.classList.add('hidden');
-                renderCategories();
-              }}>
+              >
         <span class="text-lg">${cat.emoji}</span>
         <span>${cat.name}</span>
       </button>
     `)}
     <button type="button" id="inline-add-cat"
             class="px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all"
-            style="background: transparent; color: var(--text-tertiary); border: 1px dashed var(--border-input);"
-            @click=${() => {
-              const catName = document.getElementById('custom-cat-name') as HTMLInputElement | null;
-              const catColor = document.getElementById('custom-cat-color') as HTMLInputElement | null;
-              const catType = document.getElementById('custom-cat-type') as HTMLSelectElement | null;
-              if (catName) catName.value = '';
-              if (catColor) catColor.value = DEFAULT_CATEGORY_COLOR;
-              if (catType) catType.value = signals.currentType.value;
-              if (window.resetEmojiPicker) window.resetEmojiPicker();
-              openModal('category-modal');
-            }}>
+            style="background: transparent; color: var(--text-tertiary); border: 1px dashed var(--border-input);">
       <span class="text-lg">+</span>
       <span>Custom</span>
     </button>
   `;
 
   render(template, container);
+  bindCategoryChipHandlers(container);
+  container.dataset.renderKey = renderKey;
+  syncCategoryChipSelection(container, selectedCategory);
 }
 
 // renderCategories is available as a direct function reference
 
+function getTrackedMonths(): string[] {
+  return signals.activeTransactionMonths.value;
+}
+
 /**
- * Orchestrates all chart updates in the dashboard.
- * FIXED: Uses cached monthly totals instead of manual filtering/summing
+ * Update the dashboard trend chart without re-rendering unrelated charts.
  */
-export async function updateCharts(): Promise<void> {
-  const currentMonth = signals.currentMonth.value;
+export function updateTrendChart(): void {
   const trendContainer = DOM.get('trend-chart-container');
-  const donutContainer = DOM.get('donut-chart-container');
-  const trackedMonths = Array.from(signals.transactionsByMonth.value.keys()).filter(monthKey => {
-    const totals = calculateMonthlyTotalsWithCacheSync(monthKey);
-    return totals.income > 0 || totals.expenses > 0;
-  });
+  const trackedMonths = getTrackedMonths();
   
-  // 1. Trend Chart (uses its own multi-month logic)
   if (trendContainer) {
-    if (signals.transactions.value.length === 0) {
+    if (signals.transactionCount.value === 0) {
       render(html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">Add transactions to unlock your income and expense trend.</p>`, trendContainer);
     } else if (trackedMonths.length < 2) {
       render(
@@ -254,37 +205,138 @@ export async function updateCharts(): Promise<void> {
       renderTrendChart('trend-chart-container');
     }
   }
+}
 
-  // 2. Donut Chart - use pre-calculated category totals from cache
-  const totals = calculateMonthlyTotalsWithCacheSync(currentMonth);
-  const donutData = Object.entries(totals.categoryTotals || {})
+function openInlineCategoryModal(): void {
+  const catName = document.getElementById('custom-cat-name') as HTMLInputElement | null;
+  const catColor = document.getElementById('custom-cat-color') as HTMLInputElement | null;
+  const catType = document.getElementById('custom-cat-type') as HTMLSelectElement | null;
+  if (catName) catName.value = '';
+  if (catColor) catColor.value = DEFAULT_CATEGORY_COLOR;
+  if (catType) catType.value = signals.currentType.value;
+  if (window.resetEmojiPicker) window.resetEmojiPicker();
+  openModal('category-modal');
+}
+
+function clearCategoryValidationState(): void {
+  const chips = DOM.get('category-chips');
+  const catErr = DOM.get('category-error');
+  if (chips) {
+    chips.style.outline = '';
+    chips.style.outlineOffset = '';
+    chips.removeAttribute('aria-invalid');
+  }
+  if (catErr) catErr.classList.add('hidden');
+}
+
+function syncCategoryChipSelection(container: HTMLElement, selectedCategory: string): void {
+  container.querySelectorAll<HTMLButtonElement>('.category-chip').forEach((button) => {
+    const isSelected = button.dataset.category === selectedCategory;
+    const color = button.dataset.color || 'var(--color-accent)';
+    button.style.background = isSelected ? color : 'var(--bg-chip-unselected)';
+    button.style.color = isSelected ? 'white' : 'var(--text-secondary)';
+    button.style.border = `1px solid ${isSelected ? 'transparent' : 'var(--border-input)'}`;
+    button.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+  });
+}
+
+function bindCategoryChipHandlers(container: HTMLElement): void {
+  if (container.dataset.bound === 'true') return;
+  container.dataset.bound = 'true';
+
+  container.addEventListener('click', (event: Event) => {
+    const target = event.target as HTMLElement | null;
+    const customButton = target?.closest('#inline-add-cat') as HTMLButtonElement | null;
+    if (customButton) {
+      openInlineCategoryModal();
+      return;
+    }
+
+    const chip = target?.closest('.category-chip') as HTMLButtonElement | null;
+    if (!chip) return;
+
+    const categoryId = chip.dataset.category || '';
+    if (!categoryId) return;
+
+    form.setSelectedCategory(categoryId);
+    clearCategoryValidationState();
+    syncCategoryChipSelection(container, categoryId);
+  });
+}
+
+function bindQuickShortcutHandlers(container: HTMLElement): void {
+  if (container.dataset.bound === 'true') return;
+  container.dataset.bound = 'true';
+
+  container.addEventListener('click', (event: Event) => {
+    const target = event.target as HTMLElement | null;
+    const shortcut = target?.closest('.quick-shortcut') as HTMLButtonElement | null;
+    if (!shortcut) return;
+
+    const categoryId = shortcut.dataset.category || '';
+    if (!categoryId) return;
+
+    form.setSelectedCategory(categoryId);
+    renderCategories();
+    revealTransactionsForm('amount', true);
+  });
+}
+
+/**
+ * Update the dashboard category breakdown without touching other charts.
+ */
+export function updateCategoryBreakdownChart(): void {
+  const currentMonth = signals.currentMonth.value;
+  const donutContainer = DOM.get('donut-chart-container');
+  const categoryTrends = calculateCategoryTrends(2);
+  const donutTrends: Record<string, CategoryTrendChange> = {};
+
+  categoryTrends.trends.forEach((trend) => {
+    const previousAmount = trend.monthlyData.at(-2)?.amount || 0;
+    const currentAmount = trend.monthlyData.at(-1)?.amount || 0;
+
+    if (currentAmount > 0 && previousAmount <= 0) {
+      donutTrends[trend.category.id] = { change: 100, direction: 'new' };
+      return;
+    }
+
+    if (previousAmount <= 0) {
+      donutTrends[trend.category.id] = { change: 0, direction: 'flat' };
+      return;
+    }
+
+    const percentChange = ((currentAmount - previousAmount) / Math.abs(previousAmount)) * 100;
+    donutTrends[trend.category.id] = {
+      change: Math.abs(percentChange),
+      direction: percentChange > 0 ? 'up' : percentChange < 0 ? 'down' : 'flat'
+    };
+  });
+
+  const donutData = Object.entries(signals.currentMonthSummary.value.categoryTotals)
     .map(([catId, amount]) => {
       const c = getCatInfo('expense', catId);
       return { catId, label: c.name, value: amount, color: c.color };
     })
     .sort((a, b) => b.value - a.value);
-
-  const trendsResult = calculateCategoryTrends();
-  const trends: Record<string, CategoryTrendChange> = {};
-  for (const t of trendsResult.trends) {
-    trends[t.category.id] = {
-      change: Math.round(t.percentageChange),
-      direction: t.trend.direction === 'increasing' ? 'up' : t.trend.direction === 'decreasing' ? 'down' : 'flat'
-    };
-  }
   
   if (donutContainer) {
     if (donutData.length === 0) {
       render(html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">No expense categories yet for this month.</p>`, donutContainer);
     } else {
-      renderDonutChart('donut-chart-container', donutData, trends);
+      renderDonutChart('donut-chart-container', donutData, donutTrends);
     }
   }
   
   const breakdownBadge = DOM.get('category-breakdown-badge');
   if (breakdownBadge) breakdownBadge.innerHTML = getMonthBadge(signals.currentMonth.value);
+}
 
-  // 3. Budget vs Actual
+/**
+ * Update the budget-vs-actual chart without re-rendering other dashboard charts.
+ */
+export function updateBudgetVsActualChart(): void {
+  const currentMonth = signals.currentMonth.value;
+  const totals = calculateMonthlyTotalsWithCacheSync(currentMonth);
   const bvaSec = DOM.get('budget-vs-actual-section');
   const alloc = signals.monthlyAlloc.value[currentMonth] || {};
   const allocCats = Object.keys(alloc);
@@ -310,6 +362,61 @@ export async function updateCharts(): Promise<void> {
       bvaSec.classList.add('hidden'); 
     }
   }
+}
+
+/**
+ * Orchestrates all chart updates in the dashboard.
+ */
+export async function updateCharts(): Promise<void> {
+  updateTrendChart();
+  updateCategoryBreakdownChart();
+  updateBudgetVsActualChart();
+}
+
+function syncDashboardTrendRangeButtons(): void {
+  const selector = DOM.get('trend-range-selector');
+  if (!selector) return;
+
+  const activeMonths = getTrendChartMonths();
+  selector.querySelectorAll('.trend-range-btn').forEach((node) => {
+    const button = node as HTMLButtonElement;
+    const months = Number(button.dataset.months || 0);
+    const isActive = months === activeMonths;
+
+    button.classList.toggle('active', isActive);
+    button.classList.toggle('btn-primary', isActive);
+    button.classList.toggle('text-tertiary', !isActive);
+    button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  });
+}
+
+/**
+ * Wires the dashboard trend range buttons to the compact income vs expenses chart.
+ */
+export function initDashboardTrendRangeSelector(): void {
+  const selector = DOM.get('trend-range-selector');
+  if (!selector) return;
+
+  syncDashboardTrendRangeButtons();
+
+  if (selector.dataset.bound === 'true') return;
+  selector.dataset.bound = 'true';
+
+  selector.addEventListener('click', (event: Event) => {
+    const target = event.target as HTMLElement | null;
+    const button = target?.closest('.trend-range-btn') as HTMLButtonElement | null;
+    if (!button) return;
+
+    const months = Number(button.dataset.months || 0);
+    if (![3, 6, 12].includes(months)) return;
+
+    if (months !== getTrendChartMonths()) {
+      setTrendChartMonths(months);
+    }
+
+    syncDashboardTrendRangeButtons();
+    void updateCharts();
+  });
 }
 
 /**
@@ -387,7 +494,7 @@ async function handleDeleteCustomCat(catId: string): Promise<void> {
   if (!confirmed) return;
 
   // 1. Remove from signals (by ID, not index — safe against stale closures)
-  signals.customCats.value = cats.filter(c => c.id !== catId);
+  data.setCustomCategories(cats.filter(c => c.id !== catId));
   persist(SK.CUSTOM_CAT, signals.customCats.value);
   
   // 2. Clean orphaned allocations
@@ -398,7 +505,7 @@ async function handleDeleteCustomCat(catId: string): Promise<void> {
       delete monthlyAlloc[mk][catId];
     }
   });
-  signals.monthlyAlloc.value = monthlyAlloc;
+  data.setMonthlyAllocations(monthlyAlloc);
   persist(SK.ALLOC, signals.monthlyAlloc.value);
 
   // 3. Migrate transactions to fallback category in a single batch operation
@@ -417,17 +524,18 @@ async function handleDeleteCustomCat(catId: string): Promise<void> {
   });
 
   if (txModified) {
-    // Update all transactions in one write via dataSdk's internal persist
-    signals.transactions.value = updatedTransactions;
-    lsSet(SK.TX, updatedTransactions);
-    emit(Events.TRANSACTION_UPDATED);
+    const replaceResult = await dataSdk.replaceAllTransactions(updatedTransactions);
+    if (!replaceResult.isOk) {
+      showToast('Failed to update transactions for deleted category', 'error');
+      return;
+    }
+    emit(Events.TRANSACTIONS_REPLACED);
   }
 
   // 4. Update UI
   renderCustomCatsList();
   renderCategories();
   populateCategoryFilter();
-  emit(Events.BUDGET_UPDATED);
 }
 
 // ==========================================

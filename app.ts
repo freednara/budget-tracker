@@ -8,10 +8,14 @@
 import { initializeApp, cleanupApp, isAppInitialized } from './js/modules/orchestration/app-init-di.js';
 import { showToast } from './js/modules/ui/core/ui.js';
 import { perfMonitor } from './js/modules/core/performance-monitor.js';
-import { initShellNavigation, switchMainTab } from './js/modules/ui/core/ui-navigation.js';
+import { switchMainTab } from './js/modules/ui/core/ui-navigation.js';
 
 function setAppDataset(name: string, value: string): void {
   document.documentElement.dataset[name] = value;
+}
+
+function isStartupDebugEnabled(): boolean {
+  return import.meta.env.DEV && typeof window !== 'undefined' && (window as any).__APP_DEBUG_STARTUP__ === true;
 }
 
 // ==========================================
@@ -26,24 +30,26 @@ async function main(): Promise<void> {
     (window as any).__APP_ERRORS__ = null;
     (window as any).__APP_STARTUP_PROGRESS__ = null;
     (window as any).__APP_SHELL_READY__ = false;
+    (window as any).__APP_INTERACTIVE_READY__ = false;
+    (window as any).__APP_BACKGROUND_READY__ = false;
     (window as any).__APP_INITIALIZED__ = false;
     (window as any).__APP_TEST_API__ = null;
     setAppDataset('appError', 'false');
     setAppDataset('appInitialized', 'false');
+    setAppDataset('appInteractiveReady', 'false');
+    setAppDataset('appBackgroundReady', 'false');
 
     // Mark initialization start
     perfMonitor.mark('app.init.start');
 
     // Check if already initialized
     if (isAppInitialized()) {
-      if (import.meta.env.DEV) console.warn('Application already initialized');
+    if (isStartupDebugEnabled()) console.warn('Application already initialized');
       return;
     }
 
-    initShellNavigation();
-
     // Initialize application with DI container
-    if (import.meta.env.DEV) console.log('Starting Budget Tracker Elite...');
+    if (isStartupDebugEnabled()) console.log('Starting Budget Tracker Elite...');
     const status = await initializeApp();
     
     // Check initialization status
@@ -53,7 +59,7 @@ async function main(): Promise<void> {
 
     // Measure initialization time
     const initTime = perfMonitor.measure('app.init', 'app.init.start');
-    if (import.meta.env.DEV) console.log(`Budget Tracker initialized in ${initTime.toFixed(2)}ms`);
+    if (isStartupDebugEnabled()) console.log(`Budget Tracker initialized in ${initTime.toFixed(2)}ms`);
 
     // Show success message
     showToast('Budget Tracker ready', 'success');
@@ -79,9 +85,13 @@ async function main(): Promise<void> {
     (window as any).__APP_ERRORS__ = error instanceof Error ? error.message : String(error);
     (window as any).__APP_STARTUP_PROGRESS__ = 'initialize:error';
     (window as any).__APP_SHELL_READY__ = false;
+    (window as any).__APP_INTERACTIVE_READY__ = false;
+    (window as any).__APP_BACKGROUND_READY__ = false;
     (window as any).__APP_INITIALIZED__ = false;
     setAppDataset('appError', 'true');
     setAppDataset('appInitialized', 'false');
+    setAppDataset('appInteractiveReady', 'false');
+    setAppDataset('appBackgroundReady', 'false');
     
     // Show error to user
     showToast('Failed to start application. Please refresh the page.', 'error');
@@ -156,24 +166,9 @@ function setupPerformanceMonitoring(): void {
     cleanupApp();
   });
 
-  // Setup performance observer for long tasks
-  if ('PerformanceObserver' in window) {
-    try {
-      const observer = new PerformanceObserver((list) => {
-        for (const entry of list.getEntries()) {
-          if (entry.duration > 50) {
-            perfMonitor.recordMetric('app.longtask', entry.duration, 'ms', {
-              name: entry.name
-            });
-            if (import.meta.env.DEV) console.warn(`Long task detected: ${entry.duration.toFixed(2)}ms`);
-          }
-        }
-      });
-      observer.observe({ entryTypes: ['longtask'] });
-    } catch (e) {
-      // Long task monitoring not available
-    }
-  }
+  // Long task monitoring is registered centrally by performance-integration.ts
+  // during development. Keep app-level monitoring focused on lifecycle events
+  // so dev logs do not duplicate every long task warning.
 }
 
 // ==========================================

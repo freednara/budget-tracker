@@ -2,6 +2,9 @@ import { expect, type Page } from '@playwright/test';
 
 interface AppStatusSnapshot {
   initialized: string | null;
+  shellReady: string | null;
+  interactiveReady: string | null;
+  backgroundReady: string | null;
   error: string | null;
   monthLabel: string;
   transactionsTabSelected: string | null;
@@ -19,6 +22,9 @@ type InstrumentedPage = Page & {
   __budgetTrackerDiagnostics__?: PageDiagnostics;
   __budgetTrackerDiagnosticsInstalled__?: boolean;
 };
+
+type AppReadyPhase = 'shell' | 'interactive' | 'background';
+type ImportMode = 'overwrite' | 'merge';
 
 function getDiagnostics(page: Page): PageDiagnostics {
   const instrumentedPage = page as InstrumentedPage;
@@ -75,8 +81,11 @@ async function getAppStatus(page: Page): Promise<AppStatusSnapshot> {
   const monthLabelLocator = page.locator('#current-month-label');
   const transactionsTabButton = page.locator('#tab-transactions-btn');
 
-  const [initialized, error, monthLabel, transactionsTabSelected] = await Promise.all([
+  const [initialized, shellReady, interactiveReady, backgroundReady, error, monthLabel, transactionsTabSelected] = await Promise.all([
     root.getAttribute('data-app-initialized'),
+    root.getAttribute('data-app-shell-ready'),
+    root.getAttribute('data-app-interactive-ready'),
+    root.getAttribute('data-app-background-ready'),
     root.getAttribute('data-app-error'),
     monthLabelLocator.textContent(),
     transactionsTabButton.getAttribute('aria-selected'),
@@ -84,6 +93,9 @@ async function getAppStatus(page: Page): Promise<AppStatusSnapshot> {
 
   return {
     initialized,
+    shellReady,
+    interactiveReady,
+    backgroundReady,
     error,
     monthLabel: monthLabel?.trim() || '',
     transactionsTabSelected,
@@ -140,32 +152,30 @@ async function resetBrowserState(page: Page, skipOnboarding: boolean): Promise<v
   }
 }
 
-/**
- * Clean all app state before a test.
- * Navigates to the app, clears state, then reloads for a clean start.
- */
-export async function cleanAppState(page: Page): Promise<void> {
-  installPageDiagnostics(page);
-  await resetBrowserState(page, true);
-
-  await page.addInitScript(() => {
-    (window as any).__PW_TEST__ = true;
+async function openFreshApp(page: Page): Promise<void> {
+  await page.goto('/', {
+    waitUntil: 'domcontentloaded',
+    timeout: 30000,
   });
-
-  await Promise.all([
-    page.waitForURL(/\/$/, { timeout: 30000 }),
-    page.evaluate(() => {
-      window.location.assign('/');
-    }),
-  ]);
-  await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
-  await waitForAppReady(page);
 }
 
-/**
- * Wait for the app to fully initialize.
- */
-export async function waitForAppReady(page: Page, timeout = 50000): Promise<void> {
+async function getRuntimeFlags(page: Page): Promise<{
+  shellReady: boolean;
+  interactiveReady: boolean;
+  backgroundReady: boolean;
+  initialized: boolean;
+  startupProgress: string | null;
+}> {
+  return await page.evaluate(() => ({
+    shellReady: (window as any).__APP_SHELL_READY__ === true,
+    interactiveReady: (window as any).__APP_INTERACTIVE_READY__ === true,
+    backgroundReady: (window as any).__APP_BACKGROUND_READY__ === true,
+    initialized: (window as any).__APP_INITIALIZED__ === true,
+    startupProgress: (window as any).__APP_STARTUP_PROGRESS__ || null,
+  }));
+}
+
+export async function waitForAppPhase(page: Page, phase: AppReadyPhase, timeout = 50000): Promise<void> {
   installPageDiagnostics(page);
 
   try {
@@ -173,18 +183,26 @@ export async function waitForAppReady(page: Page, timeout = 50000): Promise<void
       .poll(
         async () => {
           const status = await getAppStatus(page);
+          const runtime = await getRuntimeFlags(page);
+
           if (status.error === 'true') {
-            return 'error';
+            return `error:${runtime.startupProgress || 'unknown'}`;
           }
-          if (status.initialized === 'true' && status.monthLabel.length > 0) {
-            return 'ready';
+
+          if (phase === 'shell') {
+            return runtime.shellReady && status.initialized === 'true' ? 'ready' : `waiting:${runtime.startupProgress || 'unknown'}`;
           }
-          return `waiting:${status.initialized || 'null'}:${status.error || 'null'}:${status.monthLabel || 'no-month-label'}:${status.url}`;
+
+          if (phase === 'interactive') {
+            return runtime.interactiveReady ? 'ready' : `waiting:${runtime.startupProgress || 'unknown'}`;
+          }
+
+          return runtime.backgroundReady ? 'ready' : `waiting:${runtime.startupProgress || 'unknown'}`;
         },
         {
           timeout,
           intervals: [100, 250, 500, 1000],
-          message: 'App did not reach a stable ready state',
+          message: `App did not reach ${phase} readiness`,
         }
       )
       .toBe('ready');
@@ -197,10 +215,213 @@ export async function waitForAppReady(page: Page, timeout = 50000): Promise<void
       ].join('\n')
     );
   }
+}
 
+/**
+ * Clean all app state before a test.
+ * Navigates to the app, clears state, then reloads for a clean start.
+ */
+export async function cleanAppState(page: Page): Promise<void> {
+  installPageDiagnostics(page);
+  await resetBrowserState(page, true);
+
+  await page.addInitScript(() => {
+    (window as any).__PW_TEST__ = true;
+  });
+
+  await openFreshApp(page);
+  await waitForAppReady(page);
+}
+
+/**
+ * Wait for the app to fully initialize.
+ */
+export async function waitForAppReady(page: Page, timeout = 50000): Promise<void> {
+  installPageDiagnostics(page);
+  await waitForAppPhase(page, 'interactive', timeout);
   await expect(page.locator('#tab-transactions-btn')).toBeVisible({ timeout: 10000 });
   await expect(page.locator('#prev-month')).toBeVisible({ timeout: 10000 });
   await expect(page.locator('#current-month-label')).not.toHaveText('', { timeout: 10000 });
+}
+
+async function switchMainTabForTest(page: Page, tab: 'dashboard' | 'transactions' | 'budget' | 'calendar'): Promise<void> {
+  const buttonByTab = {
+    dashboard: '#tab-dashboard-btn',
+    transactions: '#tab-transactions-btn',
+    budget: '#tab-budget-btn',
+    calendar: '#tab-calendar-btn',
+  } as const;
+  const panelByTab = {
+    dashboard: '#tab-dashboard',
+    transactions: '#tab-transactions',
+    budget: '#tab-budget',
+    calendar: '#tab-calendar',
+  } as const;
+
+  const button = page.locator(buttonByTab[tab]);
+  const panel = page.locator(panelByTab[tab]);
+  await expect(button).toBeVisible({ timeout: 10000 });
+
+  if ((await button.getAttribute('aria-selected')) !== 'true') {
+    await button.click({ timeout: 5000 });
+  }
+
+  await expect(button).toHaveAttribute('aria-selected', 'true', { timeout: 10000 });
+  await expect(panel).toBeVisible({ timeout: 10000 });
+}
+
+export async function waitForTransactionsSurfaceReady(page: Page, timeout = 20000): Promise<void> {
+  await waitForAppPhase(page, 'interactive', timeout);
+  await switchMainTabForTest(page, 'transactions');
+  await expect(page.locator('#amount')).toBeVisible({ timeout });
+  await expect(page.locator('#amount')).toBeEditable({ timeout });
+  await expect(page.locator('#submit-btn')).toBeVisible({ timeout });
+  await expect(page.locator('#submit-btn')).toBeEnabled({ timeout });
+  await expect(page.locator('#transactions-list')).toBeVisible({ timeout });
+}
+
+export async function bootSecondaryPage(
+  page: Page,
+  options: { clearStorage?: boolean; skipOnboarding?: boolean; timeout?: number } = {}
+): Promise<void> {
+  const { clearStorage = false, skipOnboarding = true, timeout = 50000 } = options;
+  await page.addInitScript(
+    ({ shouldClearStorage, shouldSkipOnboarding }) => {
+      (window as any).__PW_TEST__ = true;
+      if (shouldClearStorage) {
+        localStorage.clear();
+      }
+      if (shouldSkipOnboarding) {
+        localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
+      }
+    },
+    { shouldClearStorage: clearStorage, shouldSkipOnboarding: skipOnboarding }
+  );
+
+  await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await waitForAppReady(page, timeout);
+}
+
+export async function openSettingsModal(page: Page, timeout = 15000): Promise<void> {
+  await waitForAppReady(page, timeout);
+  await page.locator('#open-settings').click();
+  await expect(page.locator('#settings-modal')).toBeVisible({ timeout });
+  await expect(page.locator('#close-settings')).toBeVisible({ timeout });
+}
+
+export async function openResetAppDataModal(page: Page, timeout = 15000): Promise<void> {
+  await openSettingsModal(page, timeout);
+  await page.locator('#clear-all-data').click();
+  await expect(page.locator('#reset-app-data-modal')).toBeVisible({ timeout });
+  await expect(page.locator('#confirm-reset-keep-backups')).toBeVisible({ timeout });
+  await expect(page.locator('#confirm-reset-clear-backups')).toBeVisible({ timeout });
+}
+
+export async function assertModalClosedAndInteractive(page: Page, timeout = 15000): Promise<void> {
+  await expect(page.locator('#settings-modal')).not.toBeVisible({ timeout });
+  await expect(page.locator('#reset-app-data-modal')).not.toBeVisible({ timeout });
+  await expect(page.locator('#import-options-modal')).not.toBeVisible({ timeout });
+  await expect(page.locator('#async-confirm-modal')).not.toBeVisible({ timeout });
+  await waitForAppPhase(page, 'interactive', timeout);
+}
+
+export async function assertDashboardPopulated(page: Page, timeout = 15000): Promise<void> {
+  await switchMainTabForTest(page, 'dashboard');
+  await expect(page.locator('#hero-daily-amount')).not.toHaveText('—', { timeout });
+  await expect(page.locator('#total-expenses')).not.toHaveText('', { timeout });
+  await expect(page.locator('#total-expenses')).not.toContainText('—', { timeout });
+}
+
+export async function assertDashboardTotal(
+  page: Page,
+  selector: string,
+  expectedAmount: string,
+  timeout = 15000
+): Promise<void> {
+  await switchMainTabForTest(page, 'dashboard');
+  await expect(page.locator(selector)).toContainText(expectedAmount, { timeout });
+}
+
+export async function assertDashboardEmpty(page: Page, timeout = 15000): Promise<void> {
+  await switchMainTabForTest(page, 'dashboard');
+  await expect(page.locator('#total-expenses')).toContainText('$0.00', { timeout });
+}
+
+export async function assertLedgerHasRows(page: Page, minimumRows = 1, timeout = 15000): Promise<void> {
+  await waitForAppPhase(page, 'interactive', timeout);
+  await switchMainTabForTest(page, 'transactions');
+  await expect(page.locator('#transactions-list')).toBeVisible({ timeout });
+  await expect
+    .poll(async () => page.locator('.transaction-row').count(), {
+      timeout,
+      intervals: [250, 500, 1000],
+    })
+    .toBeGreaterThanOrEqual(minimumRows);
+}
+
+export async function assertTransactionVisible(page: Page, description: string, timeout = 15000): Promise<void> {
+  await waitForAppPhase(page, 'interactive', timeout);
+  await switchMainTabForTest(page, 'transactions');
+  await expect(page.locator('#transactions-list')).toContainText(description, { timeout });
+}
+
+export async function assertLedgerEmpty(page: Page, timeout = 15000): Promise<void> {
+  await waitForAppPhase(page, 'interactive', timeout);
+  await switchMainTabForTest(page, 'transactions');
+  await expect(page.locator('#transactions-list')).toBeVisible({ timeout });
+  await expect(page.locator('#tx-display-count')).toContainText('0', { timeout });
+  await expect(page.locator('.transaction-row')).toHaveCount(0, { timeout });
+}
+
+export async function resetAppDataFromModal(
+  page: Page,
+  options: { clearBackups: boolean; timeout?: number }
+): Promise<void> {
+  const { clearBackups, timeout = 20000 } = options;
+  await openResetAppDataModal(page, timeout);
+  const actionButton = page.locator(
+    clearBackups ? '#confirm-reset-clear-backups' : '#confirm-reset-keep-backups'
+  );
+  await actionButton.click();
+  await assertModalClosedAndInteractive(page, timeout);
+  await assertDashboardEmpty(page, timeout);
+  await assertLedgerEmpty(page, timeout);
+}
+
+export async function submitJsonDataImport(
+  page: Page,
+  file: { name: string; mimeType: string; buffer: Buffer },
+  mode: ImportMode,
+  timeout = 20000
+): Promise<void> {
+  await waitForTransactionsSurfaceReady(page, timeout);
+  await page.locator('#import-file').setInputFiles(file);
+  await expect(page.locator('#import-options-modal')).toBeVisible({ timeout });
+  await page.locator(mode === 'overwrite' ? '#import-overwrite' : '#import-merge').click();
+}
+
+export async function importJsonData(
+  page: Page,
+  file: { name: string; mimeType: string; buffer: Buffer },
+  mode: ImportMode,
+  timeout = 20000
+): Promise<void> {
+  await submitJsonDataImport(page, file, mode, timeout);
+  await assertModalClosedAndInteractive(page, timeout);
+}
+
+export async function loadSampleDataFromSettings(page: Page, timeout = 20000): Promise<void> {
+  await openSettingsModal(page, timeout);
+  await page.locator('#load-sample-data').click();
+  await expect(page.locator('#async-confirm-modal')).toBeVisible({ timeout });
+  await expect(page.locator('#confirm-title')).toHaveText('Load Demo Account', { timeout });
+
+  await page.locator('#confirm-ok').click();
+
+  await expect(page.locator('#settings-modal')).not.toBeVisible({ timeout: 15000 });
+  await assertDashboardPopulated(page, 15000);
+  await waitForTransactionsSurfaceReady(page, timeout);
+  await expect(page.locator('.transaction-row').first()).toBeVisible({ timeout: 15000 });
 }
 
 /**
@@ -214,12 +435,6 @@ export async function cleanAppStateRaw(page: Page): Promise<void> {
     (window as any).__PW_TEST__ = true;
   });
 
-  await Promise.all([
-    page.waitForURL(/\/$/, { timeout: 30000 }),
-    page.evaluate(() => {
-      window.location.assign('/');
-    }),
-  ]);
-  await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
+  await openFreshApp(page);
   await waitForAppReady(page);
 }

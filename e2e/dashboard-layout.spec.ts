@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { cleanAppState } from './test-helpers.js';
+import { cleanAppState, loadSampleDataFromSettings } from './test-helpers.js';
 
 test.describe('Dashboard Layout', () => {
   test.beforeEach(async ({ page }, testInfo) => {
@@ -52,5 +52,39 @@ test.describe('Dashboard Layout', () => {
     await expect(page.locator('#calendar-upcoming-summary')).toBeVisible();
     await expect(page.locator('#spending-heatmap')).toBeVisible();
     await expect(page.locator('#cal-detail-panel')).toBeVisible();
+  });
+
+  test('mounts the dashboard budget gauge on its real shell anchor', async ({ page }) => {
+    await loadSampleDataFromSettings(page);
+
+    await page.locator('#tab-dashboard-btn').click();
+    await expect(page.locator('#budget-gauge-section')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#budget-gauge-container svg')).toBeVisible({ timeout: 10000 });
+  });
+
+  test('hero CTA buttons navigate to their intended surfaces', async ({ page }) => {
+    const primaryAction = page.locator('#hero-primary-action');
+    const secondaryAction = page.locator('#hero-secondary-action');
+
+    const primaryTarget = await primaryAction.getAttribute('data-action');
+    await primaryAction.click();
+
+    if (primaryTarget === 'budget') {
+      await expect(page.locator('#tab-budget')).toBeVisible({ timeout: 10000 });
+    } else {
+      await expect(page.locator('#tab-transactions')).toBeVisible({ timeout: 10000 });
+    }
+
+    await page.locator('#tab-dashboard-btn').click();
+    await expect(page.locator('#tab-dashboard')).toBeVisible({ timeout: 10000 });
+
+    const secondaryTarget = await secondaryAction.getAttribute('data-action');
+    await secondaryAction.click();
+
+    if (secondaryTarget === 'budget') {
+      await expect(page.locator('#tab-budget')).toBeVisible({ timeout: 10000 });
+    } else {
+      await expect(page.locator('#tab-transactions')).toBeVisible({ timeout: 10000 });
+    }
   });
 });

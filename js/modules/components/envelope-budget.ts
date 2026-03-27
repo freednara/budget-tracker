@@ -138,11 +138,10 @@ export function mountEnvelopeBudget(): () => void {
     if (cards.length === 0) {
       render(
         html`
-          <div class="budget-empty-panel budget-empty-panel--compact">
-            <div>
-              <p class="text-sm font-semibold mb-2" style="color: var(--text-primary);">No budget allocated yet</p>
-              <p class="text-xs" style="color: var(--text-tertiary);">Create category targets when you want a real spending plan instead of a loose monthly estimate.</p>
-            </div>
+          <div class="app-panel-empty app-panel-empty--compact">
+            <div class="app-panel-empty__icon">📋</div>
+            <p class="app-panel-empty__title">No budget allocated yet</p>
+            <p class="app-panel-empty__copy">Create category targets when you want a real spending plan instead of a loose monthly estimate.</p>
           </div>
         `,
         grid

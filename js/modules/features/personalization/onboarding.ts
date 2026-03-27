@@ -7,11 +7,11 @@
 'use strict';
 
 import { SK } from '../../core/state.js';
-import { safeStorage } from '../../core/safe-storage.js';
 import * as signals from '../../core/signals.js';
+import { onboarding as onboardingActions } from '../../core/state-actions.js';
 import { showToast } from '../../ui/core/ui.js';
 import { switchMainTab, switchTab } from '../../ui/core/ui-navigation.js';
-import { on } from '../../core/event-bus.js';
+import { on, createListenerGroup, destroyListenerGroup } from '../../core/event-bus.js';
 import { FeatureEvents } from '../../core/feature-event-interface.js';
 import DOM from '../../core/dom-cache.js';
 import { html, render, repeat, classMap } from '../../core/lit-helpers.js';
@@ -42,7 +42,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     emoji: '💎',
     title: 'Welcome to Budget Tracker Elite!',
-    body: 'Your personal finance command center. Let me show you around in 30 seconds.',
+    body: 'Track what matters, plan the month, and know what you can safely spend next.',
     btn: 'Start Tour',
     target: null,
     tab: 'dashboard',
@@ -50,8 +50,8 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
   },
   {
     emoji: '🎯',
-    title: 'Set Your Monthly Income',
-    body: 'First, tell us how much money you have to work with each month. This powers your daily allowance calculation.',
+    title: 'Plan Your Month',
+    body: 'Start here each month. Set your budget so the app knows how much money each category and goal should handle.',
     btn: 'Next',
     target: '#open-plan-budget',
     tab: 'budget',
@@ -77,18 +77,27 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
     position: 'below'
   },
   {
-    emoji: '📊',
-    title: 'Monitor Your Dashboard',
-    body: 'Your dashboard shows the big picture: daily allowance, spending pace, and insights.',
+    emoji: '🗓️',
+    title: 'Use Calendar to Plan Timing',
+    body: 'Calendar shows when money moves. Review daily activity, recurring bills, and jump into transactions for a specific date.',
     btn: 'Next',
-    target: '#dashboard-summary',
+    target: '.calendar-main-card',
+    tab: 'calendar',
+    position: 'below'
+  },
+  {
+    emoji: '📊',
+    title: 'Watch the Dashboard',
+    body: 'Come back here to react. The dashboard tells you your daily allowance, spending pace, and next action.',
+    btn: 'Next',
+    target: '#hero-dashboard-card',
     tab: 'dashboard',
     position: 'below'
   },
   {
     emoji: '🚀',
     title: 'You\'re All Set!',
-    body: 'Start tracking today and watch your financial clarity improve. Pro tip: Add transactions daily for best results.',
+    body: 'You now have the core workflow: budget the month, log money movement, check Calendar for timing, and use Dashboard to stay on track.',
     btn: 'Start Tracking!',
     target: null,
     tab: 'dashboard',
@@ -104,15 +113,17 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
  * Start or resume the onboarding tour
  */
 export function startOnboarding(): void {
-  const state = signals.onboarding.value;
-  signals.onboarding.value = { ...state, active: true };
+  onboardingActions.start();
 }
 
 // Retry timeout for target element detection
 let _retryTimeout: number | null = null;
+const TARGET_RETRY_DELAY_MS = 180;
+const TARGET_RETRY_LIMIT = 10;
 
 // Track ESC keydown listener for cleanup
 let _escKeydownListener: ((e: KeyboardEvent) => void) | null = null;
+let _listenerGroupId: string | null = null;
 
 /**
  * Move to next step in tour
@@ -126,7 +137,7 @@ export function nextStep(): void {
   if (nextIdx >= ONBOARDING_STEPS.length) {
     completeOnboarding();
   } else {
-    signals.onboarding.value = { ...state, step: nextIdx };
+    onboardingActions.setState({ ...state, step: nextIdx });
   }
 }
 
@@ -136,7 +147,7 @@ export function nextStep(): void {
 export function completeOnboarding(): void {
   // Clear any pending retry timeout to prevent stale step-skip firing after completion
   if (_retryTimeout) { clearTimeout(_retryTimeout); _retryTimeout = null; }
-  signals.onboarding.value = { active: false, step: 0, completed: true };
+  onboardingActions.complete();
   showToast('You\'re ready to track!');
 }
 
@@ -155,7 +166,7 @@ export function mountOnboarding(): () => void {
     const { active, step: stepIdx } = signals.onboarding.value;
     
     if (!active) {
-      container.classList.remove('active', 'no-transition');
+      container.classList.remove('active', 'no-transition', 'onboarding-overlay--centered', 'onboarding-overlay--targeted');
       render(html``, container);
       document.querySelectorAll('.onboarding-highlight').forEach(el => el.classList.remove('onboarding-highlight'));
       return;
@@ -172,19 +183,15 @@ export function mountOnboarding(): () => void {
       switchTab(step.subTab);
     }
 
-    // Position spotlight & tooltip after tab render
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        updateSpotlightPosition(step);
-      });
-    });
+    container.classList.toggle('onboarding-overlay--centered', !step.target);
+    container.classList.toggle('onboarding-overlay--targeted', Boolean(step.target));
 
     render(html`
-        <div id="onboarding-backdrop" class="absolute inset-0 bg-black/60 backdrop-blur-[2px]" @click=${completeOnboarding}></div>
-        <div id="onboarding-spotlight" class="absolute transition-all duration-300 rounded-xl shadow-[0_0_0_9999px_rgba(0,0,0,0.6)] z-[9998] pointer-events-none"></div>
+        <div id="onboarding-backdrop" class="onboarding-backdrop" @click=${completeOnboarding}></div>
+        <div id="onboarding-spotlight" class="onboarding-spotlight"></div>
         
-        <div id="onboarding-tooltip" class="absolute z-[9999] w-[320px] md:w-[400px] transition-all duration-300">
-          <div class="bg-card-section p-6 rounded-2xl shadow-2xl border border-white/10">
+        <div id="onboarding-tooltip" class="onboarding-tooltip">
+          <div class="onboarding-tooltip-content">
             <div class="text-4xl mb-4" id="onboarding-emoji">${step.emoji}</div>
             <h3 class="text-xl font-black text-primary mb-2" id="onboarding-title">${step.title}</h3>
             <p class="text-sm text-secondary leading-relaxed mb-6" id="onboarding-body">${step.body}</p>
@@ -193,8 +200,13 @@ export function mountOnboarding(): () => void {
               <div class="flex gap-1" id="onboard-progress">
                 ${repeat(ONBOARDING_STEPS, (_, i) => i, (_, i) => html`
                   <div class=${classMap({
-                    'w-2 h-2 rounded-full transition-all duration-300': true,
-                    'bg-accent w-6': i === stepIdx,
+                    'w-2': true,
+                    'h-2': true,
+                    'rounded-full': true,
+                    'transition-all': true,
+                    'duration-300': true,
+                    'bg-accent': i === stepIdx,
+                    'w-6': i === stepIdx,
                     'bg-accent/40': i < stepIdx,
                     'bg-tertiary/20': i > stepIdx
                   })}></div>
@@ -211,6 +223,13 @@ export function mountOnboarding(): () => void {
           </div>
         </div>
     `, container);
+
+    // Position spotlight & tooltip after the live onboarding DOM has been rendered.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        updateSpotlightPosition(step);
+      });
+    });
   });
 
   return cleanup;
@@ -219,15 +238,20 @@ export function mountOnboarding(): () => void {
 /**
  * Position the spotlight and tooltip based on target element
  */
-function updateSpotlightPosition(step: OnboardingStep): void {
-  const spotlight = DOM.get('onboarding-spotlight');
-  const tooltip = DOM.get('onboarding-tooltip');
-  if (!spotlight || !tooltip) return;
+function updateSpotlightPosition(step: OnboardingStep, attempt = 0): void {
+  const overlay = document.getElementById('onboarding-overlay');
+  const spotlight = document.getElementById('onboarding-spotlight');
+  const tooltip = document.getElementById('onboarding-tooltip');
+  if (!overlay || !spotlight || !tooltip) return;
 
   document.querySelectorAll('.onboarding-highlight').forEach(el => el.classList.remove('onboarding-highlight'));
+  overlay.classList.toggle('onboarding-overlay--centered', !step.target);
+  overlay.classList.toggle('onboarding-overlay--targeted', Boolean(step.target));
 
   if (!step.target) {
     spotlight.style.opacity = '0';
+    spotlight.classList.remove('active');
+    tooltip.classList.add('visible');
     tooltip.style.top = '50%';
     tooltip.style.left = '50%';
     tooltip.style.transform = 'translate(-50%, -50%)';
@@ -235,46 +259,78 @@ function updateSpotlightPosition(step: OnboardingStep): void {
   }
 
   const target = document.querySelector(step.target) as HTMLElement;
-  if (!target) {
+  const targetRect = target?.getBoundingClientRect();
+  const targetStyle = target ? window.getComputedStyle(target) : null;
+  const targetVisible = Boolean(
+    target &&
+    targetRect &&
+    targetRect.width > 0 &&
+    targetRect.height > 0 &&
+    targetStyle &&
+    targetStyle.display !== 'none' &&
+    targetStyle.visibility !== 'hidden'
+  );
+
+  if (!targetVisible || !targetRect) {
     if (import.meta.env.DEV) console.warn(`Onboarding target not found: ${step.target}, waiting for render...`);
     // Clear any existing retry timeout to prevent stale step skips
     if (_retryTimeout) clearTimeout(_retryTimeout);
-    // Retry once after a short delay to let pending DOM updates complete.
+
+    const activeStep = signals.onboarding.value.step;
+    if (attempt < TARGET_RETRY_LIMIT && signals.onboarding.value.active) {
+      _retryTimeout = window.setTimeout(() => {
+        _retryTimeout = null;
+        if (!signals.onboarding.value.active || signals.onboarding.value.step !== activeStep) return;
+        updateSpotlightPosition(step, attempt + 1);
+      }, TARGET_RETRY_DELAY_MS);
+      return;
+    }
+
     _retryTimeout = window.setTimeout(() => {
       _retryTimeout = null;
-      const retryTarget = document.querySelector(step.target!) as HTMLElement;
-      if (!retryTarget) {
-        if (import.meta.env.DEV) console.warn(`Onboarding target still not found after retry: ${step.target}, skipping`);
-        nextStep();
-      } else {
-        updateSpotlightPosition(step);
-      }
-    }, 500);
+      if (!signals.onboarding.value.active || signals.onboarding.value.step !== activeStep) return;
+      if (import.meta.env.DEV) console.warn(`Onboarding target still not found after retry: ${step.target}, skipping`);
+      nextStep();
+    }, 0);
     return;
   }
 
   target.classList.add('onboarding-highlight');
-  const rect = target.getBoundingClientRect();
   const pad = 8;
 
   spotlight.style.opacity = '1';
-  spotlight.style.left = `${rect.left - pad}px`;
-  spotlight.style.top = `${rect.top - pad}px`;
-  spotlight.style.width = `${rect.width + pad * 2}px`;
-  spotlight.style.height = `${rect.height + pad * 2}px`;
+  spotlight.classList.add('active');
+  spotlight.style.left = `${targetRect.left - pad}px`;
+  spotlight.style.top = `${targetRect.top - pad}px`;
+  spotlight.style.width = `${targetRect.width + pad * 2}px`;
+  spotlight.style.height = `${targetRect.height + pad * 2}px`;
 
   // Position tooltip
   let top = 0, left = 0;
   const margin = 20;
-  const tw = tooltip.offsetWidth || 400;
-  const th = tooltip.offsetHeight || 250;
+  tooltip.classList.add('visible');
+  const tooltipRect = tooltip.getBoundingClientRect();
+  const tw = tooltipRect.width || 400;
+  const th = tooltipRect.height || 250;
 
   if (step.position === 'below') {
-    top = rect.bottom + margin;
-    left = rect.left + rect.width / 2 - tw / 2;
+    top = targetRect.bottom + margin;
+    left = targetRect.left + targetRect.width / 2 - tw / 2;
+    if (top + th > window.innerHeight - margin) {
+      top = targetRect.top - th - margin;
+    }
   } else if (step.position === 'above') {
-    top = rect.top - th - margin;
-    left = rect.left + rect.width / 2 - tw / 2;
+    top = targetRect.top - th - margin;
+    left = targetRect.left + targetRect.width / 2 - tw / 2;
+    if (top < margin) {
+      top = targetRect.bottom + margin;
+    }
+  } else if (step.position === 'right') {
+    top = targetRect.top + targetRect.height / 2 - th / 2;
+    left = targetRect.right + margin;
+  } else if (step.position === 'left') {
+    top = targetRect.top + targetRect.height / 2 - th / 2;
+    left = targetRect.left - tw - margin;
   }
 
   // Keep on screen
@@ -290,9 +346,12 @@ function updateSpotlightPosition(step: OnboardingStep): void {
  * Initialize onboarding listeners
  */
 export function initOnboarding(): void {
+  cleanupOnboarding();
+  _listenerGroupId = createListenerGroup('onboarding');
+
   on(FeatureEvents.START_ONBOARDING, () => {
-    signals.onboarding.value = { active: true, step: 0, completed: false };
-  });
+    onboardingActions.reset();
+  }, { groupId: _listenerGroupId });
   
   // Remove previous ESC listener before re-registering
   if (_escKeydownListener) {
@@ -312,6 +371,10 @@ export function initOnboarding(): void {
  * Clean up onboarding listeners
  */
 export function cleanupOnboarding(): void {
+  if (_listenerGroupId) {
+    destroyListenerGroup(_listenerGroupId);
+    _listenerGroupId = null;
+  }
   if (_escKeydownListener) {
     window.removeEventListener('keydown', _escKeydownListener);
     _escKeydownListener = null;

@@ -1,21 +1,21 @@
 # Budget Tracker Elite - Agent Guidelines
 
-TypeScript PWA (~41,000 lines) using Preact Signals, Lit HTML, DI Container, and IndexedDB. Strict layered architecture with reactive state management.
+TypeScript PWA (~41,000 lines) using Preact Signals, Lit HTML, DI Container, and IndexedDB. Layered architecture with explicit bridge exceptions and reactive state management.
 
 ## Architecture Rules
 
-### Layer Dependencies (strict ordering)
+### Layer Dependencies (enforced default ordering)
 
 ```
 types/ --> core/ --> data/ --> features/ --> orchestration/ --> ui/ + components/
 ```
 
-- **core/** imports only from **types/**
-- **data/** imports from **core/**, **types/**
-- **features/** imports from **core/**, **data/**, **types/** -- NEVER from **ui/** or **components/**
-- **ui/** and **components/** import from **core/**, **data/**, **types/**
+- **core/** defaults to **types/**-only dependencies, with a small bridge allowlist for shell/error/sync adapters that must surface UI state
+- **data/** imports from **core/** and **types/**, plus the transaction rendering surface that intentionally bridges into **ui/**
+- **features/** should prefer **core/**, **data/**, and **types/** and use the **Event Bus** or feature-event interface for UI-triggered workflows
+- **ui/** and **components/** import from **core/**, **data/**, and **types/**
 - **orchestration/** can import from all layers (app startup coordinator)
-- Features and UI communicate via the **Event Bus**, not direct imports
+- When a boundary exception is required, keep it narrow and add/update the architecture guard test rather than silently introducing another ad hoc import path
 
 ### Import Conventions
 
@@ -69,7 +69,18 @@ export const budgetUsagePercent = computed(() => {
 
 ### Mutations via Action Objects (`js/modules/core/state-actions.ts`)
 
-All state changes go through action methods -- never write to signals directly from UI or feature code:
+Default all app-facing state changes through action methods. Direct signal writes are reserved for a narrow low-level allowlist that is enforced by tests:
+- `js/modules/core/state-actions.ts`
+- `js/modules/data/transaction-renderer.ts`
+- `js/modules/features/backup/auto-backup.ts`
+- `js/modules/features/gamification/achievements.ts`
+- `js/modules/features/gamification/streak-tracker.ts`
+- `js/modules/orchestration/app-reset.ts`
+- `js/modules/orchestration/backup-reminder.ts`
+- `js/modules/transactions/edit-mode.ts`
+- `js/modules/ui/core/ui-render.ts`
+
+Use actions everywhere else:
 
 ```typescript
 // CORRECT - use action methods
@@ -77,13 +88,13 @@ navigation.setCurrentMonth('2026-03');
 modal.clearDeleteTargetId();
 settings.setPin(bundle);
 
-// WRONG - direct signal mutation from outside state-actions
+// WRONG - direct signal mutation from outside approved low-level writers
 signals.currentMonth.value = '2026-03';
 ```
 
 **Action object groups:** `navigation`, `form`, `modal`, `settings`, `data`, `savingsGoals`, `pagination`
 
-Each action method:
+Action methods should:
 
 1. Validates input
 2. Updates the signal
@@ -371,9 +382,9 @@ Before submitting changes, verify:
 - [ ] All imports use `.js` extensions
 - [ ] All new signals have corresponding action methods in `state-actions.ts`
 - [ ] All new storage keys use `SK` constants with defaults in `STORAGE_DEFAULTS`
-- [ ] No direct signal writes outside `state-actions.ts`
+- [ ] No new direct signal writes outside the approved low-level writer allowlist
 - [ ] Optional properties accessed with guards (`|| {}`, `?.`)
 - [ ] All async functions are `await`ed when their result is used
 - [ ] Barrel file re-exports match actual source module exports
 - [ ] Test Transaction objects include all required fields
-- [ ] No circular imports between layers (features never import ui)
+- [ ] No new forbidden cross-layer imports outside the documented bridge allowlist

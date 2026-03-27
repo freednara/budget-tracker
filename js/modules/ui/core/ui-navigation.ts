@@ -69,6 +69,7 @@ const { SWIPE_THRESHOLD, VERTICAL_THRESHOLD } = CONFIG.GESTURES;
 let _swipeListenersAttached = false;
 let _shellNavigationInitialized = false;
 let _navigationListenersInitialized = false;
+const _navigationListenerCleanups: Array<() => void> = [];
 
 // Stored handler references for cleanup
 let _swipeTouchStartHandler: ((e: TouchEvent) => void) | null = null;
@@ -81,6 +82,26 @@ let _transactionsLayoutBound = false;
 let _transactionsLayoutResizeObserver: ResizeObserver | null = null;
 let _transactionsLayoutMutationObserver: MutationObserver | null = null;
 let _transactionsLayoutRaf = 0;
+let _transactionsLayoutResizeHandler: (() => void) | null = null;
+let _transactionsLayoutDetailsEl: HTMLDetailsElement | null = null;
+let _transactionsLayoutToggleHandler: (() => void) | null = null;
+
+function addNavigationListener(
+  target: EventTarget,
+  type: string,
+  handler: EventListenerOrEventListenerObject,
+  options?: boolean | AddEventListenerOptions
+): void {
+  target.addEventListener(type, handler, options);
+  _navigationListenerCleanups.push(() => {
+    target.removeEventListener(type, handler, options);
+  });
+}
+
+function cleanupNavigationListeners(): void {
+  const cleanups = _navigationListenerCleanups.splice(0, _navigationListenerCleanups.length);
+  cleanups.forEach((cleanup) => cleanup());
+}
 
 function resetTransactionsEntryViewport(): void {
   const entryBody = document.querySelector('.transactions-entry-body');
@@ -143,7 +164,7 @@ function bindAppShellMetrics(): void {
   requestAnimationFrame(() => syncAppShellMetrics());
 
   _shellResizeHandler = () => syncAppShellMetrics();
-  window.addEventListener('resize', _shellResizeHandler, { passive: true });
+  addNavigationListener(window, 'resize', _shellResizeHandler, { passive: true });
 
   const appShell = document.querySelector('header.app-shell');
   if (appShell instanceof HTMLElement && typeof ResizeObserver !== 'undefined') {
@@ -179,10 +200,13 @@ function bindTransactionsEntryLayout(): void {
   }
 
   if (detailsEl instanceof HTMLDetailsElement) {
-    detailsEl.addEventListener('toggle', scheduleTransactionsEntryLayoutSync);
+    _transactionsLayoutDetailsEl = detailsEl;
+    _transactionsLayoutToggleHandler = () => scheduleTransactionsEntryLayoutSync();
+    addNavigationListener(detailsEl, 'toggle', _transactionsLayoutToggleHandler);
   }
 
-  window.addEventListener('resize', scheduleTransactionsEntryLayoutSync, { passive: true });
+  _transactionsLayoutResizeHandler = () => scheduleTransactionsEntryLayoutSync();
+  addNavigationListener(window, 'resize', _transactionsLayoutResizeHandler, { passive: true });
   scheduleTransactionsEntryLayoutSync();
 }
 
@@ -354,8 +378,8 @@ export function setupMonthNavigation(): void {
   const prevBtn = DOM.get('prev-month');
   const nextBtn = DOM.get('next-month');
 
-  if (prevBtn) prevBtn.addEventListener('click', goToPrevMonth);
-  if (nextBtn) nextBtn.addEventListener('click', goToNextMonth);
+  if (prevBtn) addNavigationListener(prevBtn, 'click', goToPrevMonth);
+  if (nextBtn) addNavigationListener(nextBtn, 'click', goToNextMonth);
 }
 
 // ==========================================
@@ -406,18 +430,14 @@ export function setupSwipeGestures(): void {
     }
   };
 
-  mainContent.addEventListener('touchstart', _swipeTouchStartHandler, { passive: true });
-  mainContent.addEventListener('touchend', _swipeTouchEndHandler, { passive: true });
+  addNavigationListener(mainContent, 'touchstart', _swipeTouchStartHandler as EventListener, { passive: true });
+  addNavigationListener(mainContent, 'touchend', _swipeTouchEndHandler as EventListener, { passive: true });
 }
 
 /**
  * Remove swipe gesture listeners and reset state
  */
 export function cleanupSwipeGestures(): void {
-  if (_swipeTarget && _swipeTouchStartHandler && _swipeTouchEndHandler) {
-    _swipeTarget.removeEventListener('touchstart', _swipeTouchStartHandler as EventListener);
-    _swipeTarget.removeEventListener('touchend', _swipeTouchEndHandler as EventListener);
-  }
   _swipeTouchStartHandler = null;
   _swipeTouchEndHandler = null;
   _swipeTarget = null;
@@ -433,7 +453,7 @@ export function cleanupSwipeGestures(): void {
  */
 export function setupMainTabListeners(): void {
   document.querySelectorAll('.main-tab').forEach(btn => {
-    btn.addEventListener('click', () => {
+    addNavigationListener(btn, 'click', () => {
       const tab = btn.getAttribute('data-tab') as MainTab | null;
       if (tab) switchMainTab(tab);
     });
@@ -451,8 +471,8 @@ export function setupExpenseIncomeTabs(): void {
   const tabExpense = DOM.get('tab-expense');
   const tabIncome = DOM.get('tab-income');
 
-  if (tabExpense) tabExpense.addEventListener('click', () => switchTab('expense'));
-  if (tabIncome) tabIncome.addEventListener('click', () => switchTab('income'));
+  if (tabExpense) addNavigationListener(tabExpense, 'click', () => switchTab('expense'));
+  if (tabIncome) addNavigationListener(tabIncome, 'click', () => switchTab('income'));
 }
 
 /**
@@ -462,15 +482,49 @@ export function setupExpenseIncomeTabs(): void {
 export function initShellNavigation(): void {
   if (_shellNavigationInitialized) return;
   _shellNavigationInitialized = true;
+  _navigationListenersInitialized = true;
 
   bindAppShellMetrics();
   bindTransactionsEntryLayout();
   setupExpenseIncomeTabs();
   setupMonthNavigation();
   setupMainTabListeners();
+  setupSwipeGestures();
 
   syncMainTabDOM(signals.activeMainTab.value);
   syncTransactionTabDOM(signals.currentTab.value);
+}
+
+export function cleanupShellNavigation(): void {
+  cleanupNavigationListeners();
+  cleanupSwipeGestures();
+
+  if (_shellResizeObserver) {
+    _shellResizeObserver.disconnect();
+    _shellResizeObserver = null;
+  }
+  _shellResizeHandler = null;
+  _shellMetricsBound = false;
+
+  if (_transactionsLayoutResizeObserver) {
+    _transactionsLayoutResizeObserver.disconnect();
+    _transactionsLayoutResizeObserver = null;
+  }
+  if (_transactionsLayoutMutationObserver) {
+    _transactionsLayoutMutationObserver.disconnect();
+    _transactionsLayoutMutationObserver = null;
+  }
+  if (_transactionsLayoutRaf) {
+    cancelAnimationFrame(_transactionsLayoutRaf);
+    _transactionsLayoutRaf = 0;
+  }
+  _transactionsLayoutResizeHandler = null;
+  _transactionsLayoutDetailsEl = null;
+  _transactionsLayoutToggleHandler = null;
+  _transactionsLayoutBound = false;
+
+  _shellNavigationInitialized = false;
+  _navigationListenersInitialized = false;
 }
 
 // ==========================================
@@ -482,8 +536,5 @@ export function initShellNavigation(): void {
  */
 export function init(): void {
   if (_navigationListenersInitialized) return;
-  _navigationListenersInitialized = true;
-
   initShellNavigation();
-  setupSwipeGestures();
 }

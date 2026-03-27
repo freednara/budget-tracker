@@ -21,7 +21,8 @@ import type {
   WorkerFilterResult,
   WorkerResponse,
   WorkerSortField,
-  WorkerSortDirection
+  WorkerSortDirection,
+  WorkerUpdatePayload
 } from '../types/index.js';
 
 // Import shared money functions for consistency
@@ -63,6 +64,8 @@ let categoryMap: Record<string, any> = {};
 let lastUpdateTimestamp = 0;
 let datasetVersion = 0;
 let lastDatasetHash = '';
+let datasetInitialized = false;
+const DEV = typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV;
 
 // Performance tracking
 let operationStats = {
@@ -136,6 +139,7 @@ function updateDatasetSync(transactions: Transaction[], categories?: Record<stri
   }
 
   lastUpdateTimestamp = Date.now();
+  datasetInitialized = true;
 }
 
 // ==========================================
@@ -394,11 +398,11 @@ async function updateDataset(transactions: Transaction[], categoryMapData?: Reco
   
   // Only update if data actually changed
   if (datasetHash === lastDatasetHash && transactionDataset.length === transactions.length) {
-    console.log('🚀 Dataset unchanged, skipping update (secure hash verified)');
+    if (DEV) console.debug('Worker dataset unchanged, skipping full sync');
     return;
   }
 
-  console.log(`📦 Updating worker dataset: ${transactions.length} transactions`);
+  if (DEV) console.debug(`Worker full dataset sync: ${transactions.length} transactions`);
   
   // Clear existing dataset
   transactionDataset = [];
@@ -421,9 +425,10 @@ async function updateDataset(transactions: Transaction[], categoryMapData?: Reco
   datasetVersion++;
   lastUpdateTimestamp = Date.now();
   operationStats.datasetUpdates++;
+  datasetInitialized = true;
   
   const updateTime = performance.now() - startTime;
-  console.log(`✅ Dataset updated in ${updateTime.toFixed(2)}ms (version ${datasetVersion}, secure hash: ${datasetHash.substring(0, 8)}...)`);
+  if (DEV) console.debug(`Worker dataset updated in ${updateTime.toFixed(2)}ms`);
 }
 
 /**
@@ -510,13 +515,11 @@ function updateDatasetIncremental(
     case 'add':
       const indexedTx = indexTransaction(transaction);
       transactionDataset.push(indexedTx);
-      console.log(`➕ Added transaction ${transaction.__backendId} to worker dataset`);
       break;
       
     case 'update':
       if (index !== undefined && index < transactionDataset.length) {
         transactionDataset[index] = indexTransaction(transaction);
-        console.log(`✏️ Updated transaction ${transaction.__backendId} in worker dataset`);
       } else {
         // Fallback: find by ID and update
         const existingIndex = transactionDataset.findIndex(tx => tx.__backendId === transaction.__backendId);
@@ -536,7 +539,6 @@ function updateDatasetIncremental(
           transactionDataset.splice(existingIndex, 1);
         }
       }
-      console.log(`🗑️ Removed transaction ${transaction.__backendId} from worker dataset`);
       break;
   }
   
@@ -585,9 +587,45 @@ self.onmessage = async function(e: MessageEvent<WorkerMessage>): Promise<void> {
     switch (type) {
       case 'init':
       case 'update': {
-        // FIXED: Store data in worker memory with secure checksums
-        const { transactions, categories } = payload as any;
-        await updateDataset(transactions, categories);
+        const { transactions, categories, change } = payload as WorkerUpdatePayload;
+        if (change) {
+          if (!datasetInitialized) {
+            throw new Error('Worker dataset must be initialized before applying deltas');
+          }
+          switch (change.type) {
+            case 'add':
+              if (change.item) updateDatasetIncremental('add', change.item);
+              break;
+            case 'update':
+              if (change.item) updateDatasetIncremental('update', change.item);
+              break;
+            case 'delete':
+              if (change.item) updateDatasetIncremental('delete', change.item);
+              else if (change.id) {
+                updateDatasetIncremental('delete', { __backendId: change.id } as Transaction);
+              }
+              break;
+            case 'batch-add':
+              (change.items || []).forEach((transaction: Transaction) => updateDatasetIncremental('add', transaction));
+              break;
+            case 'batch-delete':
+              (change.ids || []).forEach((id: string) => {
+                updateDatasetIncremental('delete', { __backendId: id } as Transaction);
+              });
+              break;
+            case 'split':
+              if (change.id) {
+                updateDatasetIncremental('delete', { __backendId: change.id } as Transaction);
+              }
+              (change.items || []).forEach((transaction: Transaction) => updateDatasetIncremental('add', transaction));
+              break;
+          }
+          if (categories) {
+            categoryMap = categories;
+          }
+        } else if (transactions !== undefined) {
+          await updateDataset(transactions, categories);
+        }
         result = { 
           success: true, 
           datasetSize: transactionDataset.length,

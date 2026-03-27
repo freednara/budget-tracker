@@ -227,6 +227,8 @@ class LazyComponentLoader {
       this.observer.disconnect();
       this.observer = null;
     }
+
+    this.initialized = false;
   }
 
   /**
@@ -291,7 +293,7 @@ export function initLazyLoading(): void {
     },
     {
       name: 'budget-gauge',
-      selector: '[data-component="budget-gauge"]',
+      selector: '#budget-gauge-section',
       loader: async () => {
         const module = await import('../components/budget-gauge.js');
         return { mount: () => module.mountBudgetGauge() };
@@ -408,7 +410,7 @@ export function initLazyLoading(): void {
     },
     {
       name: 'onboarding-ui',
-      selector: '#onboarding-container',
+      selector: '#onboarding-overlay',
       loader: async () => {
         const module = await import('../features/personalization/onboarding.js');
         return { mount: () => module.mountOnboarding() };
@@ -426,7 +428,7 @@ export function initLazyLoading(): void {
     },
     {
       name: 'backup-reminder',
-      selector: '#backup-reminder-container',
+      selector: '#backup-reminder',
       loader: async () => {
         const module = await import('../orchestration/backup-reminder.js');
         return { mount: () => module.mountBackupReminder() };
@@ -436,6 +438,10 @@ export function initLazyLoading(): void {
   ];
 
   componentConfigs.forEach(config => lazyLoader.register(config));
+}
+
+export function cleanupLazyLoading(): void {
+  lazyLoader.cleanup();
 }
 
 /**

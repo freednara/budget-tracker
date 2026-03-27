@@ -13,7 +13,8 @@
 
 import { SK, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
-import { pagination, data } from '../../core/state-actions.js';
+import { pagination, data, filters } from '../../core/state-actions.js';
+import { replaceTransactionFilters } from '../../data/transaction-surface-coordinator.js';
 import { formatDateForInput } from '../../core/utils.js';
 import { showToast } from '../core/ui.js';
 import DOM from '../../core/dom-cache.js';
@@ -51,7 +52,7 @@ export function mountFilterPanel(): () => void {
     if (!normalizedInitialExpansion) {
       normalizedInitialExpansion = true;
       if (signals.filtersExpanded.value && !hasAdvancedFiltersActive) {
-        signals.filtersExpanded.value = false;
+        filters.setExpanded(false);
         persist(SK.FILTER_EXPANDED, false);
       }
     }
@@ -225,8 +226,7 @@ export function renderFilterPresets(): void {
   }
 
   const handleLoadPreset = (preset: FilterPreset) => {
-    signals.filters.value = { ...preset.filters as any };
-    pagination.resetPage();
+    void replaceTransactionFilters({ ...preset.filters as any }, { resetPage: true });
     showToast(`Filter preset "${preset.name}" applied`);
   };
 

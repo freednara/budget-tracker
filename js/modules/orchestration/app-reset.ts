@@ -6,6 +6,9 @@ import { storageManager } from '../data/storage-manager.js';
 import { clearRecurringTemplates } from '../data/recurring-templates.js';
 import { clearBackupStorage } from '../features/backup/reset-backup-storage.js';
 import { getTodayStr } from '../core/utils.js';
+import { invalidateAllCache } from '../core/monthly-totals-cache.js';
+import { terminateWorker } from './worker-manager.js';
+import { dataSdk } from '../data/data-manager.js';
 import type {
   AlertPrefs,
   CurrencySettings,
@@ -76,7 +79,7 @@ function resetSignalsToFirstUseState(): void {
   const currentMonth = getTodayStr().slice(0, 7);
 
   signals.batch(() => {
-    signals.transactions.value = cloneDefault(STORAGE_DEFAULTS[SK.TX] as []);
+    signals.replaceTransactionLedger(cloneDefault(STORAGE_DEFAULTS[SK.TX] as []));
     signals.savingsGoals.value = cloneDefault(STORAGE_DEFAULTS[SK.SAVINGS] as Record<string, never>);
     signals.savingsContribs.value = cloneDefault(STORAGE_DEFAULTS[SK.SAVINGS_CONTRIB] as []);
     signals.monthlyAlloc.value = cloneDefault(STORAGE_DEFAULTS[SK.ALLOC] as Record<string, never>);
@@ -149,14 +152,6 @@ export async function resetAppData(options: ResetAppDataOptions = {}): Promise<R
   const clearBackups = !!options.clearBackups;
 
   try {
-    const cleared = await storageManager.clearAll();
-    if (!cleared) {
-      return { ok: false, clearBackups };
-    }
-
-    clearRecurringTemplates();
-    removeAppLocalStorageKeys();
-
     const backupsCleared = await clearBackupStorage({
       clearPayloads: clearBackups,
       clearMetadata: true
@@ -165,6 +160,17 @@ export async function resetAppData(options: ResetAppDataOptions = {}): Promise<R
       return { ok: false, clearBackups };
     }
 
+    const cleared = await storageManager.clearAll();
+    if (!cleared) {
+      return { ok: false, clearBackups };
+    }
+
+    clearRecurringTemplates();
+    removeAppLocalStorageKeys();
+
+    terminateWorker();
+    invalidateAllCache();
+    dataSdk.resetRuntimeState();
     resetSignalsToFirstUseState();
     restoreMigrationMarkers();
 

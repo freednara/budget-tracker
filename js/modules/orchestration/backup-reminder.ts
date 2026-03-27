@@ -43,6 +43,11 @@ const SNOOZE_COUNT_KEY = 'backup_reminder_snooze_count';
 const snoozeUntil = signals.signal<number>(safeStorage.getJSON(SNOOZE_KEY, 0));
 const snoozeCount = signals.signal<number>(safeStorage.getJSON(SNOOZE_COUNT_KEY, 0));
 
+async function triggerBackupExport(): Promise<void> {
+  const { triggerJsonExport } = await import('../features/import-export/import-export-events.js');
+  triggerJsonExport();
+}
+
 /**
  * Computed backup status
  */
@@ -178,7 +183,7 @@ export function mountBackupReminder(): () => void {
               </button>
             ` : ''}
             
-            <button @click=${() => window.dispatchEvent(new CustomEvent('request-export'))}
+            <button @click=${() => { void triggerBackupExport(); }}
                     class="px-4 py-1.5 rounded-lg text-[10px] font-bold bg-white text-black hover:scale-105 active:scale-95 transition-all shadow-sm">
               ${status.isUrgent ? 'BACKUP NOW!' : 'Create Backup'}
             </button>

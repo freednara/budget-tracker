@@ -8,6 +8,10 @@ import { on } from './event-bus.js';
 import { DataSyncEvents, requestDataSync } from './data-sync-interface.js';
 import type { Transaction } from '../../types/index.js';
 
+function isPerfDebugEnabled(): boolean {
+  return import.meta.env.DEV && typeof window !== 'undefined' && (window as any).__APP_DEBUG_PERF__ === true;
+}
+
 // ==========================================
 // DATA OPERATIONS MONITORING (Event-Based)
 // ==========================================
@@ -245,7 +249,7 @@ export function setupPerformanceMonitoring(): void {
           );
           
           if (entry.duration > 50) {
-            if (import.meta.env.DEV) console.warn(`Long task detected: ${entry.duration.toFixed(2)}ms`);
+            if (isPerfDebugEnabled()) console.warn(`Long task detected: ${entry.duration.toFixed(2)}ms`);
           }
         }
       });

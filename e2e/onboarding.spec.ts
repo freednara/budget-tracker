@@ -20,22 +20,16 @@ test.describe('Onboarding', () => {
     const overlay = page.locator('#onboarding-overlay.active');
     await expect(overlay).toBeVisible({ timeout: 10000 });
 
-    // Click Next button to proceed through steps (button ID is onboard-next)
     const nextBtn = page.locator('#onboard-next');
+    const title = page.locator('#onboarding-title');
 
-    // Try to go through a few steps
-    for (let i = 0; i < 3; i++) {
-      if (await nextBtn.isVisible()) {
-        await nextBtn.click();
-        await page.waitForTimeout(300); // Wait for animation
-      }
-    }
+    await expect(title).toContainText('Welcome');
+    await expect(nextBtn).toBeVisible({ timeout: 5000 });
 
-    // Should still have onboarding content or have completed
-    const stillOnboarding = await overlay.isVisible();
-    if (stillOnboarding) {
-      await expect(page.locator('#onboarding-tooltip')).toBeVisible();
-    }
+    await nextBtn.click();
+
+    await expect(title).not.toContainText('Welcome', { timeout: 5000 });
+    await expect(title).toContainText(/Plan Your Month|Track Your Spending|Categorize Everything|Use Calendar to Plan Timing|Watch the Dashboard|You're All Set!/, { timeout: 5000 });
   });
 
   test('can skip onboarding with skip button', async ({ page }) => {
@@ -53,10 +47,6 @@ test.describe('Onboarding', () => {
   });
 
   test('persists completion state', async ({ page }) => {
-    // For this test, we need to NOT use addInitScript since it clears on reload
-    // Instead, we'll check that after skipping, the localStorage is set correctly
-
-    // Wait for and skip onboarding
     const overlay = page.locator('#onboarding-overlay.active');
     await expect(overlay).toBeVisible({ timeout: 10000 });
 
@@ -65,15 +55,12 @@ test.describe('Onboarding', () => {
     await skipBtn.click();
     await expect(overlay).not.toBeVisible({ timeout: 5000 });
 
-    // Verify localStorage was set correctly after skipping
-    const onboardingState = await page.evaluate(() => {
-      const data = localStorage.getItem('budget_tracker_onboarding');
-      return data ? JSON.parse(data) : null;
-    });
-
-    // The onboarding should be marked as completed
-    expect(onboardingState).not.toBeNull();
-    expect(onboardingState.completed).toBe(true);
+    await expect
+      .poll(async () => page.evaluate(() => {
+        const data = localStorage.getItem('budget_tracker_onboarding');
+        return data ? JSON.parse(data) : null;
+      }))
+      .toMatchObject({ completed: true, active: false, step: 0 });
   });
 
   test('shows progress dots during onboarding', async ({ page }) => {

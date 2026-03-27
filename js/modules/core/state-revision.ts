@@ -8,7 +8,7 @@
 import { SK, lsSet } from './state.js';
 import { safeStorage } from './safe-storage.js';
 import { getTabId } from './tab-id.js';
-import type { Transaction } from '../../types/index.js';
+import type { Transaction, TransactionDataChange } from '../../types/index.js';
 
 const DEV = import.meta.env.DEV;
 
@@ -46,12 +46,21 @@ interface AtomicGroupRevision {
   lastUpdatedBy: string;
 }
 
+interface TransactionDeltaLogEntry {
+  revision: number;
+  timestamp: number;
+  tabId: string;
+  change: TransactionDataChange;
+}
+
 // ==========================================
 // CONSTANTS
 // ==========================================
 
 const REVISION_KEY = 'budget_tracker_state_revision';
 const CHECKSUM_KEYS = [SK.TX]; // Keys requiring checksum validation
+const TRANSACTION_DELTA_LOG_KEY = 'budget_tracker_tx_delta_log';
+const MAX_TRANSACTION_DELTA_LOG_ENTRIES = 64;
 
 // ==========================================
 // MODULE STATE
@@ -241,6 +250,50 @@ export async function recordStateChange(
   return stateRevision;
 }
 
+export function recordTransactionDelta(
+  revision: number,
+  change: TransactionDataChange,
+  tabId: string
+): void {
+  const existingEntries = safeStorage.getJSON<TransactionDeltaLogEntry[]>(TRANSACTION_DELTA_LOG_KEY, []);
+  const nextEntries = existingEntries
+    .filter((entry) => entry.revision !== revision)
+    .concat({
+      revision,
+      timestamp: Date.now(),
+      tabId,
+      change
+    })
+    .sort((a, b) => a.revision - b.revision)
+    .slice(-MAX_TRANSACTION_DELTA_LOG_ENTRIES);
+
+  safeStorage.setJSON(TRANSACTION_DELTA_LOG_KEY, nextEntries);
+}
+
+export function getTransactionDeltaReplay(
+  fromRevisionExclusive: number,
+  toRevisionInclusive: number
+): TransactionDataChange[] | null {
+  if (toRevisionInclusive <= fromRevisionExclusive) return [];
+
+  const entries = safeStorage.getJSON<TransactionDeltaLogEntry[]>(TRANSACTION_DELTA_LOG_KEY, [])
+    .filter((entry) => entry.revision > fromRevisionExclusive && entry.revision <= toRevisionInclusive)
+    .sort((a, b) => a.revision - b.revision);
+
+  const expectedCount = toRevisionInclusive - fromRevisionExclusive;
+  if (entries.length !== expectedCount) {
+    return null;
+  }
+
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i].revision !== fromRevisionExclusive + i + 1) {
+      return null;
+    }
+  }
+
+  return entries.map((entry) => entry.change);
+}
+
 /**
  * Check if full sync is needed based on revision differences
  */
@@ -308,6 +361,19 @@ export function getKeysNeedingSync(): string[] {
 export function markKeySynced(key: string, revision: StateRevision): void {
   localManifest.key_revisions[key] = revision;
   saveManifest();
+}
+
+/**
+ * Get the current in-memory revision for a key.
+ */
+export function getKeyRevision(key: string): {
+  revision: number;
+  timestamp: number;
+  logicalClock: number;
+  tabId: string;
+  key: string;
+} | undefined {
+  return localManifest.key_revisions[key];
 }
 
 /**
@@ -457,6 +523,7 @@ export function resetRevisionTracking(): void {
   currentRevision = 0;
   logicalClock = 0;
   saveManifest();
+  safeStorage.setJSON(TRANSACTION_DELTA_LOG_KEY, []);
 }
 
 // ==========================================
@@ -761,8 +828,11 @@ export function getEnhancedRevisionStats(): {
 export default {
   init: initRevisionTracking,
   recordStateChange,
+  recordTransactionDelta,
+  getTransactionDeltaReplay,
   needsFullSync,
   getKeysNeedingSync,
+  getKeyRevision,
   markKeySynced,
   detectConcurrentModification,
   resolveConflict,

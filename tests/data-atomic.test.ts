@@ -18,37 +18,27 @@ const { mockStorageMap } = vi.hoisted(() => {
   return { mockStorageMap: new Map<string, string>() };
 });
 
-vi.mock('../js/modules/core/state.js', () => {
+vi.mock('../js/modules/core/state.js', async () => {
+  const actual = await vi.importActual<typeof import('../js/modules/core/state.js')>('../js/modules/core/state.js');
+  const lsGet = vi.fn((key: string, fallback: any) => {
+    const stored = mockStorageMap.get(key);
+    if (stored === undefined) return fallback;
+    try {
+      return JSON.parse(stored);
+    } catch {
+      return fallback;
+    }
+  });
+  const lsSet = vi.fn((key: string, value: any) => {
+    mockStorageMap.set(key, JSON.stringify(value));
+    return true;
+  });
+
   return {
-    SK: {
-      TX: 'budget_tracker_transactions',
-      SAVINGS: 'budget_tracker_savings_goals',
-      ALLOC: 'budget_tracker_monthly_allocations',
-      THEME: 'budget_tracker_theme',
-      ACHIEVE: 'budget_tracker_achievements',
-      STREAK: 'budget_tracker_streak',
-      ONBOARD: 'budget_tracker_onboarding',
-      CUSTOM_CAT: 'budget_tracker_custom_categories',
-      CURRENCY: 'budget_tracker_currency',
-      SECTIONS: 'budget_tracker_sections',
-      PIN: 'budget_tracker_pin',
-      DEBTS: 'budget_tracker_debts',
-      RECURRING: 'budget_tracker_recurring_templates',
-      LOCALE: 'budget_tracker_locale_settings',
-    },
-    lsGet: vi.fn((key: string, fallback: any) => {
-      const stored = mockStorageMap.get(key);
-      if (stored === undefined) return fallback;
-      try {
-        return JSON.parse(stored);
-      } catch {
-        return fallback;
-      }
-    }),
-    lsSet: vi.fn((key: string, value: any) => {
-      mockStorageMap.set(key, JSON.stringify(value));
-      return true;
-    }),
+    ...actual,
+    lsGet,
+    lsSet,
+    getStored: vi.fn((key: string, fallback?: unknown) => lsGet(key, fallback))
   };
 });
 
@@ -56,6 +46,7 @@ vi.mock('../js/modules/data/storage-manager.js', () => ({
   storageManager: {
     init: vi.fn(async () => ({ isOk: false })),
     isUsingIndexedDB: vi.fn(() => false),
+    replaceTransactionWithSplits: vi.fn(async () => true),
   },
   STORES: { TRANSACTIONS: 'transactions' },
 }));
@@ -74,11 +65,13 @@ vi.mock('../js/modules/core/event-bus.js', () => ({
 vi.mock('../js/modules/core/data-sync-interface.js', () => ({
   DataSyncEvents: {
     REQUEST_RELOAD: 'data:request:reload',
+    REQUEST_APPLY_DELTA: 'data:request:apply_delta',
     REQUEST_SYNC: 'data:request:sync',
     SYNC_COMPLETE: 'data:sync:complete',
     SYNC_ERROR: 'data:sync:error',
     TRANSACTION_UPDATED: 'data:transaction:updated',
-    BULK_UPDATE: 'data:bulk:update',
+    TRANSACTION_DELTA_APPLIED: 'data:transaction:delta_applied',
+    BULK_UPDATE: 'data:bulk:update'
   },
   notifyDataSyncComplete: vi.fn(),
   notifyDataSyncError: vi.fn(),
@@ -173,18 +166,20 @@ describe('DataManager Atomic Operations', () => {
     });
 
     it('should handle storage write failures gracefully', async () => {
-      // Make lsSet fail for the next call inside _atomicOperation
-      // _atomicOperation retries 3 times, so fail all 3
-      vi.mocked(lsSet)
-        .mockReturnValueOnce(false)
-        .mockReturnValueOnce(false)
-        .mockReturnValueOnce(false);
+      const realImpl = vi.mocked(lsSet).getMockImplementation();
+      vi.mocked(lsSet).mockImplementation(() => false);
 
-      const transaction = createTestTransaction();
-      const result = await dataManager.create(transaction);
+      try {
+        const transaction = createTestTransaction();
+        const result = await dataManager.create(transaction);
 
-      expect(result.isOk).toBe(false);
-      expect(result.error).toBe('Storage write failed');
+        expect(result.isOk).toBe(false);
+        expect(result.error).toBe('Storage write failed');
+      } finally {
+        if (realImpl) {
+          vi.mocked(lsSet).mockImplementation(realImpl);
+        }
+      }
     });
   });
 

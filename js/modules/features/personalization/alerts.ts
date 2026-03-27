@@ -6,6 +6,7 @@
 'use strict';
 
 import * as signals from '../../core/signals.js';
+import { alerts as alertActions } from '../../core/state-actions.js';
 import { on } from '../../core/event-bus.js';
 import { FeatureEvents } from '../../core/feature-event-interface.js';
 import DOM from '../../core/dom-cache.js';
@@ -21,14 +22,7 @@ import { initBrowserBudgetNotifications } from './browser-notifications.js';
  * Dismiss an alert (won't show again this month)
  */
 export function dismissAlert(alertText: string): void {
-  // Remove the "(+X more)" suffix if present
-  const cleanText = alertText.replace(/ \(\+\d+ more\)$/, '');
-  const mk = signals.currentMonth.value;
-  
-  // Update signal to trigger re-render
-  const nextDismissed = new Set(signals.dismissedAlerts.value);
-  nextDismissed.add(`${mk}:${cleanText}`);
-  signals.dismissedAlerts.value = nextDismissed;
+  alertActions.dismissAlert(alertText, signals.currentMonth.value);
 }
 
 // ==========================================

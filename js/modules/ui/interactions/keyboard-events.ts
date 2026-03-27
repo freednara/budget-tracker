@@ -42,6 +42,29 @@ let renderCategoriesFn: (() => void) | null = null;
 
 // Store previous keyboard handler for cleanup
 let _keydownHandler: ((e: KeyboardEvent) => void) | null = null;
+let _amountInput: HTMLElement | null = null;
+let _dateInput: HTMLElement | null = null;
+let _amountInputHandler: (() => void) | null = null;
+let _dateInputHandler: (() => void) | null = null;
+
+function cleanupKeyboardListeners(): void {
+  if (_keydownHandler) {
+    document.removeEventListener('keydown', _keydownHandler);
+    _keydownHandler = null;
+  }
+
+  if (_amountInput && _amountInputHandler) {
+    _amountInput.removeEventListener('input', _amountInputHandler);
+  }
+  if (_dateInput && _dateInputHandler) {
+    _dateInput.removeEventListener('change', _dateInputHandler);
+  }
+
+  _amountInput = null;
+  _dateInput = null;
+  _amountInputHandler = null;
+  _dateInputHandler = null;
+}
 
 // ==========================================
 // INITIALIZATION
@@ -52,36 +75,17 @@ let _keydownHandler: ((e: KeyboardEvent) => void) | null = null;
  * Returns a cleanup function that removes the global keydown listener.
  */
 export function initKeyboardEvents(callbacks: KeyboardCallbacks): () => void {
-  // Guard: if handler is already attached, just update callbacks and return existing cleanup
-  if (_keydownHandler) {
-    if (callbacks.switchMainTab) switchMainTabFn = callbacks.switchMainTab;
-    if (callbacks.switchTab) switchTabFn = callbacks.switchTab;
-    if (callbacks.cancelEditing) cancelEditingFn = callbacks.cancelEditing;
-    if (callbacks.openSettingsModal) openSettingsModalFn = callbacks.openSettingsModal;
-    if (callbacks.renderCategories) renderCategoriesFn = callbacks.renderCategories;
-    return () => {
-      if (_keydownHandler) {
-        document.removeEventListener('keydown', _keydownHandler);
-        _keydownHandler = null;
-      }
-    };
-  }
-
   if (callbacks.switchMainTab) switchMainTabFn = callbacks.switchMainTab;
   if (callbacks.switchTab) switchTabFn = callbacks.switchTab;
   if (callbacks.cancelEditing) cancelEditingFn = callbacks.cancelEditing;
   if (callbacks.openSettingsModal) openSettingsModalFn = callbacks.openSettingsModal;
   if (callbacks.renderCategories) renderCategoriesFn = callbacks.renderCategories;
 
+  cleanupKeyboardListeners();
   setupKeyboardShortcuts();
   setupClearValidationOnInput();
 
-  return () => {
-    if (_keydownHandler) {
-      document.removeEventListener('keydown', _keydownHandler);
-      _keydownHandler = null;
-    }
-  };
+  return cleanupKeyboardListeners;
 }
 
 // ==========================================
@@ -185,6 +189,11 @@ function setupKeyboardShortcuts(): void {
  * Delegates to the shared clearFieldError utility from validator.ts.
  */
 function setupClearValidationOnInput(): void {
-  DOM.get('amount')?.addEventListener('input', () => clearFieldError('amount'));
-  DOM.get('date')?.addEventListener('change', () => clearFieldError('date'));
+  _amountInput = DOM.get('amount');
+  _dateInput = DOM.get('date');
+  _amountInputHandler = () => clearFieldError('amount');
+  _dateInputHandler = () => clearFieldError('date');
+
+  _amountInput?.addEventListener('input', _amountInputHandler);
+  _dateInput?.addEventListener('change', _dateInputHandler);
 }

@@ -20,7 +20,7 @@ import {
   validateRecoveryPhrase,
   verifyPin
 } from '../../features/security/pin-crypto.js';
-import { on, emit } from '../../core/event-bus.js';
+import { on, emit, createListenerGroup, destroyListenerGroup } from '../../core/event-bus.js';
 import { FeatureEvents } from '../../core/feature-event-interface.js';
 import DOM from '../../core/dom-cache.js';
 import { checkRateLimit, recordAttempt, formatLockoutTime } from '../../features/security/rate-limiter.js';
@@ -48,6 +48,31 @@ let lockoutIntervalId: ReturnType<typeof setInterval> | null = null;
 let pinConfig: PinConfig = {
   PIN_ERROR_DISPLAY: 2000
 };
+let pinListenerGroupId: string | null = null;
+const pinUiCleanups: Array<() => void> = [];
+
+function bindPinUiEvent(
+  target: EventTarget,
+  type: string,
+  handler: EventListenerOrEventListenerObject
+): void {
+  target.addEventListener(type, handler);
+  pinUiCleanups.push(() => {
+    target.removeEventListener(type, handler);
+  });
+}
+
+export function cleanupPinHandlers(): void {
+  const cleanups = pinUiCleanups.splice(0, pinUiCleanups.length);
+  cleanups.forEach((cleanup) => cleanup());
+
+  if (pinListenerGroupId) {
+    destroyListenerGroup(pinListenerGroupId);
+    pinListenerGroupId = null;
+  }
+
+  clearLockoutInterval();
+}
 
 /**
  * Set PIN UI configuration
@@ -182,6 +207,9 @@ async function checkPinEntry(entered: string, explicit: boolean = false): Promis
  * Initialize all PIN-related event handlers and register feature event listeners
  */
 export function initPinHandlers(): void {
+  cleanupPinHandlers();
+  pinListenerGroupId = createListenerGroup('pin-ui-handlers');
+
   // Register Feature Event Listeners
   // Request: PIN check
   on(FeatureEvents.REQUEST_PIN_CHECK, async (data: any) => {
@@ -192,22 +220,23 @@ export function initPinHandlers(): void {
       const result = await verifyPin(pin, storedPin);
       emit(responseEvent, { type: FeatureEvents.REQUEST_PIN_CHECK, result });
     }
-  });
+  }, { groupId: pinListenerGroupId });
 
   // Action: Update PIN
   on(FeatureEvents.UPDATE_PIN, async (bundle: any) => {
     settings.setPin(bundle);
     persist(SK.PIN, bundle);
-  });
+  }, { groupId: pinListenerGroupId });
 
   // Action: Clear PIN
   on(FeatureEvents.CLEAR_PIN, () => {
     settings.setPin('');
     persist(SK.PIN, '');
-  });
+  }, { groupId: pinListenerGroupId });
 
   // PIN setup with recovery phrase
-  DOM.get('save-pin-btn')?.addEventListener('click', async () => {
+  const savePinButton = DOM.get('save-pin-btn');
+  if (savePinButton) bindPinUiEvent(savePinButton, 'click', async () => {
     const settingsPin = DOM.get('settings-pin') as HTMLInputElement | null;
     const pin = settingsPin?.value.trim() || '';
     const pinValidation = validator.validatePin(pin);
@@ -246,7 +275,8 @@ export function initPinHandlers(): void {
   });
 
   // Copy recovery phrase to clipboard
-  DOM.get('copy-recovery-btn')?.addEventListener('click', () => {
+  const copyRecoveryButton = DOM.get('copy-recovery-btn');
+  if (copyRecoveryButton) bindPinUiEvent(copyRecoveryButton, 'click', () => {
     if (pendingRecoveryPhrase) {
       navigator.clipboard.writeText(pendingRecoveryPhrase).then(() => {
         showToast('Recovery phrase copied!', 'success');
@@ -257,21 +287,24 @@ export function initPinHandlers(): void {
   });
 
   // Confirm recovery phrase saved
-  DOM.get('confirm-recovery-btn')?.addEventListener('click', () => {
+  const confirmRecoveryButton = DOM.get('confirm-recovery-btn');
+  if (confirmRecoveryButton) bindPinUiEvent(confirmRecoveryButton, 'click', () => {
     pendingRecoveryPhrase = null;
     closeModal('recovery-phrase-modal');
     showToast('PIN set with recovery!', 'success');
   });
 
   // Clear PIN
-  DOM.get('clear-pin-btn')?.addEventListener('click', () => {
+  const clearPinButton = DOM.get('clear-pin-btn');
+  if (clearPinButton) bindPinUiEvent(clearPinButton, 'click', () => {
     settings.clearPin();
     persist(SK.PIN, '');
     showToast('PIN removed', 'info');
   });
 
   // Forgot PIN - show recovery modal
-  DOM.get('forgot-pin-btn')?.addEventListener('click', () => {
+  const forgotPinButton = DOM.get('forgot-pin-btn');
+  if (forgotPinButton) bindPinUiEvent(forgotPinButton, 'click', () => {
     const pin = signals.pin.value;
     if (!hasRecoveryEnabled(pin)) {
       showToast('No recovery phrase set for this PIN', 'error');
@@ -284,12 +317,14 @@ export function initPinHandlers(): void {
   });
 
   // Cancel recovery
-  DOM.get('cancel-recovery-btn')?.addEventListener('click', () => {
+  const cancelRecoveryButton = DOM.get('cancel-recovery-btn');
+  if (cancelRecoveryButton) bindPinUiEvent(cancelRecoveryButton, 'click', () => {
     closeModal('recovery-input-modal');
   });
 
   // Submit recovery phrase
-  DOM.get('submit-recovery-btn')?.addEventListener('click', async () => {
+  const submitRecoveryButton = DOM.get('submit-recovery-btn');
+  if (submitRecoveryButton) bindPinUiEvent(submitRecoveryButton, 'click', async () => {
     const phraseInput = DOM.get('recovery-phrase-input') as HTMLInputElement | null;
     const phrase = phraseInput?.value.trim() || '';
 
@@ -335,21 +370,23 @@ export function initPinHandlers(): void {
   });
 
   // PIN unlock input handlers
-  DOM.get('pin-input')?.addEventListener('input', (e: Event) => {
+  const pinInput = DOM.get('pin-input');
+  if (pinInput) bindPinUiEvent(pinInput, 'input', (e: Event) => {
     const target = e.target as HTMLInputElement;
     const pin = signals.pin.value;
     const isHashed = hasRecoveryEnabled(pin) || pin.includes(':') || /^[0-9a-f]{64}$/.test(pin);
     if (!isHashed) checkPinEntry(target.value); // auto-verify legacy plaintext PINs only
   });
 
-  DOM.get('pin-input')?.addEventListener('keydown', (e: KeyboardEvent) => {
+  if (pinInput) bindPinUiEvent(pinInput, 'keydown', ((e: KeyboardEvent) => {
     const target = e.target as HTMLInputElement;
     if (e.key === 'Enter') checkPinEntry(target.value, true);
-  });
+  }) as EventListener);
 
-  DOM.get('pin-submit-btn')?.addEventListener('click', () => {
-    const pinInput = DOM.get('pin-input') as HTMLInputElement | null;
-    if (pinInput) checkPinEntry(pinInput.value, true);
+  const pinSubmitButton = DOM.get('pin-submit-btn');
+  if (pinSubmitButton) bindPinUiEvent(pinSubmitButton, 'click', () => {
+    const pinInputEl = DOM.get('pin-input') as HTMLInputElement | null;
+    if (pinInputEl) checkPinEntry(pinInputEl.value, true);
   });
 }
 

@@ -19,6 +19,9 @@ export interface BroadcastMessage {
   type: 'state_update' | 'full_sync' | 'ping' | 'reload_request' | 'atomic_sync' | 'conflict_warning';
   key?: string;
   value?: unknown;
+  revision?: number;
+  changedIds?: string[];
+  changeType?: string;
   timestamp: number;
   tabId: string;
   messageId?: string;
@@ -162,11 +165,18 @@ export class BroadcastChannelManager {
   /**
    * Send state update
    */
-  sendStateUpdate(key: string, value: unknown): void {
+  sendStateUpdate(
+    key: string,
+    value: unknown,
+    metadata: { revision?: number; changedIds?: string[]; changeType?: string } = {}
+  ): void {
     this.send({
       type: 'state_update',
       key,
-      value
+      value,
+      revision: metadata.revision,
+      changedIds: metadata.changedIds,
+      changeType: metadata.changeType
     });
   }
 

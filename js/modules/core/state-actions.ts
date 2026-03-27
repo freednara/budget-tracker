@@ -9,6 +9,7 @@
 import * as signals from './signals.js';
 import { batch } from '@preact/signals-core';
 import { emit, Events } from './event-bus.js';
+import { SK, normalizeAlertPrefs } from './state.js';
 import { dataSdk } from '../data/data-manager.js';
 import { generateSecureId } from './utils-dom.js';
 import {
@@ -28,7 +29,13 @@ import type {
   AlertPrefs,
   MonthlyAllocation,
   RolloverSettings,
-  PaginationState
+  PaginationState,
+  Theme,
+  Debt,
+  CustomCategory,
+  CurrencySettings,
+  SectionsConfig,
+  StreakData
 } from '../../types/index.js';
 
 // ==========================================
@@ -131,6 +138,10 @@ export const navigation = {
     signals.filtersExpanded.value = !signals.filtersExpanded.value;
   },
 
+  setFiltersExpanded(expanded: boolean): void {
+    signals.filtersExpanded.value = expanded;
+  },
+
   goToMonth(monthKey: string): boolean {
     return this.setCurrentMonth(monthKey);
   }
@@ -207,6 +218,30 @@ export const modal = {
 
   clearPendingEditTx(): void {
     signals.pendingEditTx.value = null;
+  },
+
+  setSplitRows(rows: signals.SplitRow[]): void {
+    signals.splitRows.value = [...rows];
+  },
+
+  addSplitRow(row: signals.SplitRow): void {
+    signals.splitRows.value = [...signals.splitRows.value, row];
+  },
+
+  updateSplitRow(rowId: string, updates: Partial<signals.SplitRow>): boolean {
+    const existing = signals.splitRows.value.some((row) => row.id === rowId);
+    if (!existing) return false;
+    signals.splitRows.value = signals.splitRows.value.map((row) =>
+      row.id === rowId ? { ...row, ...updates } : row
+    );
+    return true;
+  },
+
+  removeSplitRow(rowId: string): boolean {
+    const nextRows = signals.splitRows.value.filter((row) => row.id !== rowId);
+    if (nextRows.length === signals.splitRows.value.length) return false;
+    signals.splitRows.value = nextRows;
+    return true;
   }
 };
 
@@ -221,12 +256,23 @@ export const settings = {
 
   setRolloverSettings(settings: Partial<RolloverSettings>): void {
     signals.rolloverSettings.value = {
-      enabled: !!settings.enabled,
-      mode: settings.mode || 'all',
-      categories: Array.isArray(settings.categories) ? settings.categories : [],
-      maxRollover: settings.maxRollover ?? null,
-      negativeHandling: settings.negativeHandling || 'zero'
+      ...(signals.rolloverSettings.value || {
+        enabled: false,
+        mode: 'all',
+        categories: [],
+        maxRollover: null,
+        negativeHandling: 'zero'
+      }),
+      ...settings,
+      enabled: settings.enabled ?? signals.rolloverSettings.value.enabled ?? false,
+      mode: settings.mode || signals.rolloverSettings.value.mode || 'all',
+      categories: Array.isArray(settings.categories)
+        ? settings.categories
+        : (signals.rolloverSettings.value.categories || []),
+      maxRollover: settings.maxRollover ?? signals.rolloverSettings.value.maxRollover ?? null,
+      negativeHandling: settings.negativeHandling || signals.rolloverSettings.value.negativeHandling || 'zero'
     };
+    queueEvent(Events.ROLLOVER_SETTINGS_CHANGED, signals.rolloverSettings.value);
   },
 
   setPin(value: string): void {
@@ -243,6 +289,23 @@ export const settings = {
 
   setAlerts(nextAlerts: AlertPrefs): void {
     signals.alerts.value = nextAlerts;
+  },
+
+  setTheme(theme: Theme): void {
+    signals.theme.value = theme;
+    queueEvent(Events.THEME_CHANGED, theme);
+  },
+
+  setSections(nextSections: SectionsConfig): void {
+    signals.sections.value = { ...nextSections };
+  },
+
+  setAchievements(achievements: Record<string, boolean>): void {
+    signals.achievements.value = { ...achievements };
+  },
+
+  setStreak(streak: StreakData): void {
+    signals.streak.value = { ...streak };
   }
 };
 
@@ -250,6 +313,11 @@ export const data = {
   setMonthlyAllocations(allocations: Record<string, MonthlyAllocation>): void {
     signals.monthlyAlloc.value = allocations;
     queueEvent(Events.BUDGET_UPDATED, allocations);
+  },
+
+  setCustomCategories(categories: CustomCategory[]): void {
+    signals.customCats.value = [...categories];
+    queueEvent(Events.CATEGORY_UPDATED, categories);
   },
 
   setFilterPresets(presets: FilterPreset[]): void {
@@ -270,6 +338,10 @@ export const data = {
 
   removeTxTemplate(templateId: string): void {
     signals.txTemplates.value = signals.txTemplates.value.filter(t => t.id !== templateId);
+  },
+
+  setCurrencySettings(currency: CurrencySettings): void {
+    signals.currency.value = { ...currency };
   }
 };
 
@@ -285,6 +357,17 @@ interface SavingsGoalData {
 }
 
 export const savingsGoals = {
+  setGoals(goals: Record<string, SavingsGoal>, options: { emitEvent?: boolean } = {}): void {
+    signals.savingsGoals.value = { ...goals };
+    if (options.emitEvent !== false) {
+      queueEvent(Events.SAVINGS_UPDATED, goals);
+    }
+  },
+
+  setContributions(contributions: SavingsContribution[]): void {
+    signals.savingsContribs.value = [...contributions];
+  },
+
   addGoal(goalData: SavingsGoalData): string {
     const id = `sg_${generateSecureId()}`;
     const newGoal: SavingsGoal = {
@@ -369,6 +452,177 @@ export const pagination = {
 };
 
 // ==========================================
+// FILTER / CALENDAR / ALERT / ONBOARDING / DEBT ACTIONS
+// ==========================================
+
+const DEFAULT_FILTER_STATE: signals.FilterState = {
+  searchText: '',
+  type: 'all',
+  category: '',
+  tags: '',
+  dateFrom: '',
+  dateTo: '',
+  minAmount: '',
+  maxAmount: '',
+  reconciled: 'all',
+  recurring: false,
+  showAllMonths: false,
+  sortBy: 'date-desc'
+};
+
+export const filters = {
+  setFilters(nextFilters: signals.FilterState): void {
+    signals.filters.value = { ...nextFilters };
+    queueEvent(Events.FILTER_CHANGED, signals.filters.value);
+  },
+
+  updateFilters(updates: Partial<signals.FilterState>): void {
+    signals.filters.value = { ...signals.filters.value, ...updates };
+    queueEvent(Events.FILTER_CHANGED, signals.filters.value);
+  },
+
+  clearFilters(): void {
+    this.setFilters(DEFAULT_FILTER_STATE);
+  },
+
+  setExpanded(expanded: boolean): void {
+    navigation.setFiltersExpanded(expanded);
+  }
+};
+
+export const calendar = {
+  setSelectedDay(day: number | null): void {
+    signals.selectedCalendarDay.value = day;
+  },
+
+  clearSelectedDay(): void {
+    signals.selectedCalendarDay.value = null;
+  }
+};
+
+export const alerts = {
+  dismissAlert(alertText: string, monthKey?: string): void {
+    const cleanText = alertText.replace(/ \(\+\d+ more\)$/, '');
+    const activeMonth = monthKey || signals.currentMonth.value;
+    const nextDismissed = new Set(signals.dismissedAlerts.value);
+    nextDismissed.add(`${activeMonth}:${cleanText}`);
+    signals.dismissedAlerts.value = nextDismissed;
+  }
+};
+
+export const onboarding = {
+  setState(nextState: signals.OnboardingState): void {
+    signals.onboarding.value = { ...nextState };
+  },
+
+  start(): void {
+    signals.onboarding.value = { ...signals.onboarding.value, active: true };
+  },
+
+  nextStep(totalSteps: number): void {
+    const currentState = signals.onboarding.value;
+    const nextStep = currentState.step + 1;
+    if (nextStep >= totalSteps) {
+      signals.onboarding.value = { active: false, step: 0, completed: true };
+      return;
+    }
+    signals.onboarding.value = { ...currentState, step: nextStep };
+  },
+
+  complete(): void {
+    signals.onboarding.value = { active: false, step: 0, completed: true };
+  },
+
+  reset(): void {
+    signals.onboarding.value = { active: true, step: 0, completed: false };
+  }
+};
+
+export const debts = {
+  setDebts(nextDebts: Debt[]): void {
+    signals.debts.value = [...nextDebts];
+  },
+
+  addDebt(nextDebt: Debt): void {
+    signals.debts.value = [...signals.debts.value, nextDebt];
+  },
+
+  replaceDebt(debtId: string, nextDebt: Debt): boolean {
+    const exists = signals.debts.value.some((debt) => debt.id === debtId);
+    if (!exists) return false;
+    signals.debts.value = signals.debts.value.map((debt) => debt.id === debtId ? nextDebt : debt);
+    return true;
+  },
+
+  removeDebt(debtId: string): boolean {
+    const nextDebts = signals.debts.value.filter((debt) => debt.id !== debtId);
+    if (nextDebts.length === signals.debts.value.length) return false;
+    signals.debts.value = nextDebts;
+    return true;
+  }
+};
+
+export const syncState = {
+  applyKeyUpdate(key: string, value: unknown): boolean {
+    switch (key) {
+      case SK.TX:
+        signals.replaceTransactionLedger(value as Transaction[]);
+        return true;
+      case SK.THEME:
+        settings.setTheme(value as Theme);
+        return true;
+      case SK.PIN:
+        settings.setPin(value as string);
+        return true;
+      case SK.ALLOC:
+        data.setMonthlyAllocations(value as Record<string, MonthlyAllocation>);
+        return true;
+      case SK.SAVINGS:
+        savingsGoals.setGoals(value as Record<string, SavingsGoal>);
+        return true;
+      case SK.CUSTOM_CAT:
+        data.setCustomCategories(value as CustomCategory[]);
+        return true;
+      case SK.DEBTS:
+        debts.setDebts(value as Debt[]);
+        return true;
+      case SK.CURRENCY:
+        data.setCurrencySettings(value as CurrencySettings);
+        return true;
+      case SK.SAVINGS_CONTRIB:
+        savingsGoals.setContributions(value as SavingsContribution[]);
+        return true;
+      case SK.ROLLOVER_SETTINGS:
+        settings.setRolloverSettings(value as Partial<RolloverSettings>);
+        return true;
+      case SK.SECTIONS:
+        settings.setSections(value as SectionsConfig);
+        return true;
+      case SK.ALERTS:
+        settings.setAlerts(normalizeAlertPrefs(value));
+        return true;
+      case SK.INSIGHT_PERS:
+        settings.setInsightPersonality(value as InsightPersonality);
+        return true;
+      case SK.ACHIEVE:
+        settings.setAchievements(value as Record<string, boolean>);
+        return true;
+      case SK.STREAK:
+        settings.setStreak(value as StreakData);
+        return true;
+      case SK.FILTER_PRESETS:
+        data.setFilterPresets(value as FilterPreset[]);
+        return true;
+      case SK.TX_TEMPLATES:
+        data.setTxTemplates(value as TxTemplate[]);
+        return true;
+      default:
+        return false;
+    }
+  }
+};
+
+// ==========================================
 // COMBINED ACTIONS EXPORT
 // ==========================================
 
@@ -380,7 +634,13 @@ export const actions = {
   settings,
   data,
   savingsGoals,
-  pagination
+  pagination,
+  filters,
+  calendar,
+  alerts,
+  onboarding,
+  debts,
+  syncState
 };
 
 export default actions;

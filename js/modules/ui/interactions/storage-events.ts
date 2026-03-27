@@ -9,9 +9,7 @@
 'use strict';
 
 import { SK, lsGet, normalizeAlertPrefs } from '../../core/state.js';
-import * as signals from '../../core/signals.js';
-import { emit, Events } from '../../core/event-bus.js';
-import { showToast } from '../core/ui.js';
+import { syncState } from '../../core/state-actions.js';
 import { setTheme } from '../../core/feature-event-interface.js';
 import { shouldShowPinLock, showPinLock } from '../widgets/pin-ui-handlers.js';
 import { DOM } from '../../core/dom-cache.js';
@@ -44,6 +42,14 @@ let callbacks: StorageEventCallbacks | null = null;
 // Store previous handler for cleanup on re-init
 let _storageHandler: ((e: StorageEvent) => void) | null = null;
 
+export function cleanupStorageEvents(): void {
+  if (_storageHandler) {
+    window.removeEventListener('storage', _storageHandler);
+    _storageHandler = null;
+  }
+  callbacks = null;
+}
+
 // ==========================================
 // PUBLIC API
 // ==========================================
@@ -55,21 +61,13 @@ export function initStorageEvents(cb: StorageEventCallbacks): void {
   callbacks = cb;
 
   // Remove previous handler to prevent accumulation on re-init
-  if (_storageHandler) {
-    window.removeEventListener('storage', _storageHandler);
-  }
+  cleanupStorageEvents();
+  callbacks = cb;
 
   _storageHandler = (e: StorageEvent) => {
     if (!e.key || !Object.values(SK).includes(e.key)) return;
 
     switch (e.key) {
-      case SK.TX:
-        // Reload transactions from storage
-        signals.transactions.value = lsGet(SK.TX, []) as typeof signals.transactions.value;
-        emit(Events.DATA_IMPORTED);
-        showToast('Data updated from another tab', 'info');
-        break;
-
       case SK.THEME:
         try {
           setTheme(JSON.parse(e.newValue || '"dark"') as Theme);
@@ -81,9 +79,9 @@ export function initStorageEvents(cb: StorageEventCallbacks): void {
       case SK.PIN:
         // If PIN changed in another tab, re-check lock status
         try {
-          signals.pin.value = JSON.parse(e.newValue || '""') || '';
+          syncState.applyKeyUpdate(SK.PIN, JSON.parse(e.newValue || '""') || '');
         } catch {
-          signals.pin.value = e.newValue || '';
+          syncState.applyKeyUpdate(SK.PIN, e.newValue || '');
         }
         if (shouldShowPinLock()) {
           showPinLock();
@@ -91,75 +89,76 @@ export function initStorageEvents(cb: StorageEventCallbacks): void {
         break;
 
       case SK.ALLOC:
-        signals.monthlyAlloc.value = lsGet(SK.ALLOC, {}) as Record<string, Record<string, number>>;
-        emit(Events.BUDGET_UPDATED);
+        syncState.applyKeyUpdate(SK.ALLOC, lsGet(SK.ALLOC, {}) as Record<string, Record<string, number>>);
         break;
 
       case SK.SAVINGS:
-        signals.savingsGoals.value = lsGet(SK.SAVINGS, {}) as Record<string, SavingsGoal>;
-        emit(Events.SAVINGS_UPDATED);
+        syncState.applyKeyUpdate(SK.SAVINGS, lsGet(SK.SAVINGS, {}) as Record<string, SavingsGoal>);
         break;
 
       case SK.CUSTOM_CAT:
-        signals.customCats.value = lsGet(SK.CUSTOM_CAT, []) as CustomCategory[];
-        emit(Events.CATEGORY_UPDATED);
+        syncState.applyKeyUpdate(SK.CUSTOM_CAT, lsGet(SK.CUSTOM_CAT, []) as CustomCategory[]);
         break;
 
       case SK.DEBTS:
-        signals.debts.value = lsGet(SK.DEBTS, []) as typeof signals.debts.value;
+        syncState.applyKeyUpdate(SK.DEBTS, lsGet(SK.DEBTS, []) as unknown[]);
         cb.refreshAll();
         break;
 
       case SK.CURRENCY:
-        signals.currency.value = lsGet(SK.CURRENCY, { home: 'USD', symbol: '$' }) as CurrencySettings;
+        const nextCurrency = lsGet(SK.CURRENCY, { home: 'USD', symbol: '$' }) as CurrencySettings;
+        syncState.applyKeyUpdate(SK.CURRENCY, nextCurrency);
         const currDisplaySync = DOM.get('currency-display');
-        if (currDisplaySync) currDisplaySync.textContent = signals.currency.value.symbol;
+        if (currDisplaySync) currDisplaySync.textContent = nextCurrency.symbol;
         cb.refreshAll();
         break;
 
       case SK.SAVINGS_CONTRIB:
-        signals.savingsContribs.value = lsGet(SK.SAVINGS_CONTRIB, []) as SavingsContribution[];
+        syncState.applyKeyUpdate(SK.SAVINGS_CONTRIB, lsGet(SK.SAVINGS_CONTRIB, []) as SavingsContribution[]);
         cb.updateSummary();
         cb.renderSavingsGoals();
         break;
 
       case SK.ROLLOVER_SETTINGS:
-        signals.rolloverSettings.value = lsGet(SK.ROLLOVER_SETTINGS, { enabled: false, mode: 'all', categories: [], maxRollover: null, negativeHandling: 'zero' }) as RolloverSettings;
+        syncState.applyKeyUpdate(
+          SK.ROLLOVER_SETTINGS,
+          lsGet(SK.ROLLOVER_SETTINGS, { enabled: false, mode: 'all', categories: [], maxRollover: null, negativeHandling: 'zero' }) as RolloverSettings
+        );
         cb.refreshAll();
         break;
 
       case SK.SECTIONS:
-        signals.sections.value = lsGet(SK.SECTIONS, { envelope: true }) as { envelope: boolean };
+        syncState.applyKeyUpdate(SK.SECTIONS, lsGet(SK.SECTIONS, { envelope: true }) as { envelope: boolean });
         cb.refreshAll();
         break;
 
       case SK.ALERTS:
-        signals.alerts.value = normalizeAlertPrefs(lsGet(SK.ALERTS, null));
+        syncState.applyKeyUpdate(SK.ALERTS, normalizeAlertPrefs(lsGet(SK.ALERTS, null)));
         cb.checkAlerts();
         break;
 
       case SK.INSIGHT_PERS:
-        signals.insightPers.value = lsGet(SK.INSIGHT_PERS, 'serious') as 'serious' | 'casual' | 'motivating';
+        syncState.applyKeyUpdate(SK.INSIGHT_PERS, lsGet(SK.INSIGHT_PERS, 'serious') as 'serious' | 'casual' | 'motivating');
         cb.updateInsights();
         break;
 
       case SK.ACHIEVE:
-        signals.achievements.value = lsGet(SK.ACHIEVE, {}) as Record<string, boolean>;
+        syncState.applyKeyUpdate(SK.ACHIEVE, lsGet(SK.ACHIEVE, {}) as Record<string, boolean>);
         cb.renderBadges();
         break;
 
       case SK.STREAK:
-        signals.streak.value = lsGet(SK.STREAK, { current: 0, longest: 0, lastDate: '' }) as StreakData;
+        syncState.applyKeyUpdate(SK.STREAK, lsGet(SK.STREAK, { current: 0, longest: 0, lastDate: '' }) as StreakData);
         cb.renderStreak();
         break;
 
       case SK.FILTER_PRESETS:
-        signals.filterPresets.value = lsGet(SK.FILTER_PRESETS, []) as FilterPreset[];
+        syncState.applyKeyUpdate(SK.FILTER_PRESETS, lsGet(SK.FILTER_PRESETS, []) as FilterPreset[]);
         cb.renderFilterPresets();
         break;
 
       case SK.TX_TEMPLATES:
-        signals.txTemplates.value = lsGet(SK.TX_TEMPLATES, []) as TxTemplate[];
+        syncState.applyKeyUpdate(SK.TX_TEMPLATES, lsGet(SK.TX_TEMPLATES, []) as TxTemplate[]);
         cb.renderTemplates();
         break;
     }

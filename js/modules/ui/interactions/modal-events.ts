@@ -48,6 +48,23 @@ let refreshAllFn: (() => void) | null = null;
 let resetFormFn: (() => void | Promise<void>) | null = null;
 let startEditingFn: ((tx: Transaction) => void) | null = null;
 let loadSampleDataFn: (() => boolean | Promise<boolean>) | null = null;
+const modalEventCleanups: Array<() => void> = [];
+
+function bindModalEvent(
+  target: EventTarget,
+  type: string,
+  handler: EventListenerOrEventListenerObject
+): void {
+  target.addEventListener(type, handler);
+  modalEventCleanups.push(() => {
+    target.removeEventListener(type, handler);
+  });
+}
+
+export function cleanupModalEvents(): void {
+  const cleanups = modalEventCleanups.splice(0, modalEventCleanups.length);
+  cleanups.forEach((cleanup) => cleanup());
+}
 
 function loadFeatureEventInterface() {
   return import('../../core/feature-event-interface.js');
@@ -77,6 +94,8 @@ function loadBrowserNotificationsModule() {
  * Initialize modal event handlers
  */
 export function initModalEvents(callbacks: ModalEventCallbacks): void {
+  cleanupModalEvents();
+
   if (callbacks.fmtCur) fmtCurFn = callbacks.fmtCur;
   if (callbacks.renderSavingsGoals) renderSavingsGoalsFn = callbacks.renderSavingsGoals;
   if (callbacks.updateSummary) updateSummaryFn = callbacks.updateSummary;
@@ -101,21 +120,24 @@ export function initModalEvents(callbacks: ModalEventCallbacks): void {
  * Set up sync conflict modal handlers
  */
 function setupSyncConflictModal(): void {
-  DOM.get('sync-accept-remote')?.addEventListener('click', () => {
+  const acceptRemoteButton = DOM.get('sync-accept-remote');
+  if (acceptRemoteButton) bindModalEvent(acceptRemoteButton, 'click', () => {
     window.dispatchEvent(new CustomEvent('sync-conflict-resolution', { 
       detail: { action: 'accept' } 
     }));
     closeModal('sync-conflict-modal');
   });
 
-  DOM.get('sync-keep-local')?.addEventListener('click', () => {
+  const keepLocalButton = DOM.get('sync-keep-local');
+  if (keepLocalButton) bindModalEvent(keepLocalButton, 'click', () => {
     window.dispatchEvent(new CustomEvent('sync-conflict-resolution', { 
       detail: { action: 'reject' } 
     }));
     closeModal('sync-conflict-modal');
   });
 
-  DOM.get('sync-merge-changes')?.addEventListener('click', () => {
+  const mergeChangesButton = DOM.get('sync-merge-changes');
+  if (mergeChangesButton) bindModalEvent(mergeChangesButton, 'click', () => {
     window.dispatchEvent(new CustomEvent('sync-conflict-resolution', { 
       detail: { action: 'merge' } 
     }));
@@ -185,12 +207,14 @@ export async function openSettingsModal(): Promise<void> {
  * Set up delete confirmation modal handlers
  */
 function setupDeleteModal(): void {
-  DOM.get('cancel-delete')?.addEventListener('click', () => {
+  const cancelDeleteButton = DOM.get('cancel-delete');
+  if (cancelDeleteButton) bindModalEvent(cancelDeleteButton, 'click', () => {
     closeModal('delete-modal');
     modal.clearDeleteTargetId();
   });
 
-  DOM.get('confirm-delete')?.addEventListener('click', async () => {
+  const confirmDeleteButton = DOM.get('confirm-delete');
+  if (confirmDeleteButton) bindModalEvent(confirmDeleteButton, 'click', async () => {
     const deleteTargetId = signals.deleteTargetId.value;
     if (deleteTargetId) {
       const transactions = signals.transactions.value;
@@ -248,12 +272,14 @@ function setupDeleteModal(): void {
  * Set up edit recurring modal handlers
  */
 function setupEditRecurringModal(): void {
-  DOM.get('cancel-edit-recurring')?.addEventListener('click', () => {
+  const cancelEditRecurringButton = DOM.get('cancel-edit-recurring');
+  if (cancelEditRecurringButton) bindModalEvent(cancelEditRecurringButton, 'click', () => {
     closeModal('edit-recurring-modal');
     modal.clearPendingEditTx();
   });
 
-  DOM.get('edit-single')?.addEventListener('click', () => {
+  const editSingleButton = DOM.get('edit-single');
+  if (editSingleButton) bindModalEvent(editSingleButton, 'click', () => {
     closeModal('edit-recurring-modal');
     const pendingEditTx = signals.pendingEditTx.value;
     if (pendingEditTx) {
@@ -263,7 +289,8 @@ function setupEditRecurringModal(): void {
     modal.clearPendingEditTx();
   });
 
-  DOM.get('edit-series')?.addEventListener('click', () => {
+  const editSeriesButton = DOM.get('edit-series');
+  if (editSeriesButton) bindModalEvent(editSeriesButton, 'click', () => {
     closeModal('edit-recurring-modal');
     const pendingEditTx = signals.pendingEditTx.value;
     if (pendingEditTx) {
@@ -283,7 +310,8 @@ function setupEditRecurringModal(): void {
  */
 function setupSavingsGoalModals(): void {
   // Create new savings goal
-  DOM.get('add-savings-goal-btn')?.addEventListener('click', () => {
+  const addSavingsGoalButton = DOM.get('add-savings-goal-btn');
+  if (addSavingsGoalButton) bindModalEvent(addSavingsGoalButton, 'click', () => {
     openModal('savings-goal-modal');
     const nameEl = DOM.get('savings-goal-name') as HTMLInputElement | null;
     const amtEl = DOM.get('savings-goal-amount') as HTMLInputElement | null;
@@ -293,11 +321,13 @@ function setupSavingsGoalModals(): void {
     if (deadlineEl) deadlineEl.value = '';
   });
 
-  DOM.get('cancel-savings-goal')?.addEventListener('click', () => {
+  const cancelSavingsGoalButton = DOM.get('cancel-savings-goal');
+  if (cancelSavingsGoalButton) bindModalEvent(cancelSavingsGoalButton, 'click', () => {
     closeModal('savings-goal-modal');
   });
 
-  DOM.get('save-savings-goal')?.addEventListener('click', () => {
+  const saveSavingsGoalButton = DOM.get('save-savings-goal');
+  if (saveSavingsGoalButton) bindModalEvent(saveSavingsGoalButton, 'click', () => {
     const nameEl = DOM.get('savings-goal-name') as HTMLInputElement | null;
     const amtEl = DOM.get('savings-goal-amount') as HTMLInputElement | null;
     const nameErr = DOM.get('savings-goal-name-error');
@@ -359,12 +389,14 @@ function setupSavingsGoalModals(): void {
   });
 
   // Add savings amount to goal
-  DOM.get('cancel-add-savings')?.addEventListener('click', () => {
+  const cancelAddSavingsButton = DOM.get('cancel-add-savings');
+  if (cancelAddSavingsButton) bindModalEvent(cancelAddSavingsButton, 'click', () => {
     closeModal('add-savings-modal');
     modal.clearAddSavingsGoalId();
   });
 
-  DOM.get('confirm-add-savings')?.addEventListener('click', async () => {
+  const confirmAddSavingsButton = DOM.get('confirm-add-savings');
+  if (confirmAddSavingsButton) bindModalEvent(confirmAddSavingsButton, 'click', async () => {
     const amtEl = DOM.get('add-savings-amount') as HTMLInputElement | null;
     const amtErr = DOM.get('add-savings-amount-error');
     const amt = parseAmount(amtEl?.value || '');
@@ -415,10 +447,12 @@ function setupSavingsGoalModals(): void {
  * Set up settings modal handlers
  */
 function setupSettingsModal(): void {
-  DOM.get('open-settings')?.addEventListener('click', openSettingsModal);
+  const openSettingsButton = DOM.get('open-settings');
+  if (openSettingsButton) bindModalEvent(openSettingsButton, 'click', openSettingsModal);
 
   // Toggle rollover options visibility
-  DOM.get('rollover-enabled')?.addEventListener('change', (e) => {
+  const rolloverEnabledControl = DOM.get('rollover-enabled');
+  if (rolloverEnabledControl) bindModalEvent(rolloverEnabledControl, 'change', (e: Event) => {
     const target = e.target as HTMLInputElement;
     const options = DOM.get('rollover-options');
     if (options) {
@@ -429,16 +463,18 @@ function setupSettingsModal(): void {
   // Clear PIN handler is in pin-ui-handlers.ts — no duplicate here
 
   // Cancel without saving - revert theme if changed, then close
-  DOM.get('cancel-settings')?.addEventListener('click', () => {
+  const cancelSettingsButton = DOM.get('cancel-settings');
+  if (cancelSettingsButton) bindModalEvent(cancelSettingsButton, 'click', () => {
     // Revert theme if it was changed during this settings session
     if (_themeOnOpen && signals.theme.value !== _themeOnOpen) {
-      signals.theme.value = _themeOnOpen as any;
+      settings.setTheme(_themeOnOpen as Theme);
     }
     closeModal('settings-modal');
   });
 
   // Save settings and close
-  DOM.get('close-settings')?.addEventListener('click', async () => {
+  const closeSettingsButton = DOM.get('close-settings');
+  if (closeSettingsButton) bindModalEvent(closeSettingsButton, 'click', async () => {
     const showEnvelope = DOM.get('show-envelope') as HTMLInputElement | null;
     const settingsCurrency = DOM.get('settings-currency') as HTMLSelectElement | null;
     const insightPersonality = DOM.get('insight-personality') as HTMLSelectElement | null;
@@ -450,71 +486,84 @@ function setupSettingsModal(): void {
     const maxRolloverEl = DOM.get('max-rollover') as HTMLInputElement | null;
     const currencyDisplay = DOM.get('currency-display');
 
-    const sectionsVal = { ...signals.sections.value };
-    sectionsVal.envelope = showEnvelope?.checked || false;
-    signals.sections.value = sectionsVal;
-    persist(SK.SECTIONS, signals.sections.value);
-
+    const sectionsVal = {
+      ...signals.sections.value,
+      envelope: showEnvelope?.checked || false
+    };
     const curr = settingsCurrency?.value || 'USD';
     const currencyMap = CURRENCY_MAP as Record<string, string>;
-    settings.setCurrency(curr, currencyMap[curr] || '$');
-    persist(SK.CURRENCY, signals.currency.value);
-    if (currencyDisplay) currencyDisplay.textContent = signals.currency.value.symbol;
+    const currencySymbol = currencyMap[curr] || '$';
+    const newPers = insightPersonality?.value as InsightPersonality;
+    const rolloverEnabled = rolloverEnabledEl?.checked || false;
+    const rolloverMode = (rolloverModeEl?.value || 'all') as RolloverMode;
+    const negativeHandling = (negativeHandlingEl?.value || 'zero') as NegativeHandling;
+    const maxVal = maxRolloverEl?.value;
+    const maxRollover = maxVal ? parseAmount(maxVal) : null;
 
-    let browserNotificationsEnabled = browserBudgetNotificationsEl?.checked || false;
-    if (browserNotificationsEnabled) {
-      const {
-        isBrowserNotificationSupported,
-        getBrowserNotificationPermission,
-        requestBrowserNotificationPermission
-      } = await loadBrowserNotificationsModule();
-      if (!isBrowserNotificationSupported()) {
-        browserNotificationsEnabled = false;
-        showToast('Browser notifications are not supported in this environment', 'warning');
-      } else if (getBrowserNotificationPermission() !== 'granted') {
-        const permission = await requestBrowserNotificationPermission();
-        if (permission !== 'granted') {
+    try {
+      let browserNotificationsEnabled = browserBudgetNotificationsEl?.checked || false;
+      if (browserNotificationsEnabled) {
+        const {
+          isBrowserNotificationSupported,
+          getBrowserNotificationPermission,
+          requestBrowserNotificationPermission
+        } = await loadBrowserNotificationsModule();
+        if (!isBrowserNotificationSupported()) {
           browserNotificationsEnabled = false;
-          showToast('Browser notifications were not enabled', permission === 'denied' ? 'warning' : 'info');
+          showToast('Browser notifications are not supported in this environment', 'warning');
+        } else if (getBrowserNotificationPermission() !== 'granted') {
+          const permission = await requestBrowserNotificationPermission();
+          if (permission !== 'granted') {
+            browserNotificationsEnabled = false;
+            showToast('Browser notifications were not enabled', permission === 'denied' ? 'warning' : 'info');
+          }
         }
       }
+
+      const alertsVal = normalizeAlertPrefs({
+        ...signals.alerts.value,
+        budgetThreshold: alertBudgetExceed?.checked ? 0.8 : null,
+        browserNotificationsEnabled
+      });
+      const {
+        setRolloverEnabled,
+        setRolloverMode,
+        setNegativeHandling,
+        setMaxRollover
+      } = await loadRolloverModule();
+
+      settings.setSections(sectionsVal);
+      persist(SK.SECTIONS, signals.sections.value);
+
+      settings.setCurrency(curr, currencySymbol);
+      persist(SK.CURRENCY, signals.currency.value);
+      if (currencyDisplay) currencyDisplay.textContent = signals.currency.value.symbol;
+
+      settings.setAlerts(alertsVal);
+      persist(SK.ALERTS, signals.alerts.value);
+
+      if (newPers !== signals.insightPers.value) {
+        settings.setInsightPersonality(newPers);
+        persist(SK.INSIGHT_PERS, signals.insightPers.value);
+      }
+
+      setRolloverEnabled(rolloverEnabled);
+      setRolloverMode(rolloverMode);
+      setNegativeHandling(negativeHandling);
+      setMaxRollover(maxRollover);
+
+      closeModal('settings-modal');
+      showToast('Settings saved');
+      refreshAllFn?.();
+    } catch (error) {
+      if (import.meta.env.DEV) console.error('Failed to save settings:', error);
+      showToast('Settings not saved. Please try again.', 'error');
     }
-
-    const alertsVal = normalizeAlertPrefs({
-      ...signals.alerts.value,
-      budgetThreshold: alertBudgetExceed?.checked ? 0.8 : null,
-      browserNotificationsEnabled
-    });
-    settings.setAlerts(alertsVal);
-    persist(SK.ALERTS, signals.alerts.value);
-
-    const newPers = insightPersonality?.value as InsightPersonality;
-    if (newPers !== signals.insightPers.value) {
-      settings.setInsightPersonality(newPers);
-      persist(SK.INSIGHT_PERS, signals.insightPers.value);
-    }
-
-    // Save rollover settings
-    const {
-      setRolloverEnabled,
-      setRolloverMode,
-      setNegativeHandling,
-      setMaxRollover
-    } = await loadRolloverModule();
-
-    setRolloverEnabled(rolloverEnabledEl?.checked || false);
-    setRolloverMode((rolloverModeEl?.value || 'all') as RolloverMode);
-    setNegativeHandling((negativeHandlingEl?.value || 'zero') as NegativeHandling);
-    const maxVal = maxRolloverEl?.value;
-    setMaxRollover(maxVal ? parseAmount(maxVal) : null);
-
-    closeModal('settings-modal');
-    showToast('Settings saved');
-    refreshAllFn?.();
   });
 
   // Restart Onboarding Tour
-  DOM.get('restart-onboarding')?.addEventListener('click', () => {
+  const restartOnboardingButton = DOM.get('restart-onboarding');
+  if (restartOnboardingButton) bindModalEvent(restartOnboardingButton, 'click', () => {
     lsSet(SK.ONBOARD, { completed: false, step: 0 });
     closeModal('settings-modal');
     setTimeout(() => {
@@ -547,10 +596,12 @@ function setupAnalyticsModal(): void {
     }, CONFIG.TIMING.UI_DELAY);
   }
 
-  DOM.get('open-analytics')?.addEventListener('click', () => {
+  const openAnalyticsButton = DOM.get('open-analytics');
+  if (openAnalyticsButton) bindModalEvent(openAnalyticsButton, 'click', () => {
     void openAnalyticsModalHandler();
   });
-  DOM.get('close-analytics')?.addEventListener('click', () => closeModal('analytics-modal'));
+  const closeAnalyticsButton = DOM.get('close-analytics');
+  if (closeAnalyticsButton) bindModalEvent(closeAnalyticsButton, 'click', () => closeModal('analytics-modal'));
 }
 
 // ==========================================
@@ -562,7 +613,7 @@ function setupAnalyticsModal(): void {
  */
 function setupThemeButtons(): void {
   document.querySelectorAll<HTMLButtonElement>('.theme-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
+    bindModalEvent(btn, 'click', () => {
       void loadFeatureEventInterface().then(({ setTheme }) => {
         setTheme((btn.dataset.theme || 'system') as Theme);
       });
@@ -574,7 +625,8 @@ function setupThemeButtons(): void {
  * Set up alert dismiss and celebration close handlers
  */
 function setupAlertAndCelebration(): void {
-  DOM.get('dismiss-alert')?.addEventListener('click', () => {
+  const dismissAlertButton = DOM.get('dismiss-alert');
+  if (dismissAlertButton) bindModalEvent(dismissAlertButton, 'click', () => {
     const alertText = DOM.get('alert-text');
     const txt = alertText?.textContent || '';
     void loadFeatureEventInterface().then(({ dismissAlert }) => {
@@ -586,8 +638,10 @@ function setupAlertAndCelebration(): void {
     closeModal('celebration-overlay');
   };
 
-  DOM.get('celebration-close')?.addEventListener('click', closeCelebration);
-  DOM.get('close-celebration')?.addEventListener('click', closeCelebration);
+  const celebrationCloseButton = DOM.get('celebration-close');
+  if (celebrationCloseButton) bindModalEvent(celebrationCloseButton, 'click', closeCelebration);
+  const closeCelebrationButton = DOM.get('close-celebration');
+  if (closeCelebrationButton) bindModalEvent(closeCelebrationButton, 'click', closeCelebration);
 }
 
 // ==========================================
@@ -598,7 +652,8 @@ function setupAlertAndCelebration(): void {
  * Set up sample data handlers
  */
 function setupSampleData(): void {
-  DOM.get('load-sample-data')?.addEventListener('click', async () => {
+  const loadSampleDataButton = DOM.get('load-sample-data');
+  if (loadSampleDataButton) bindModalEvent(loadSampleDataButton, 'click', async () => {
     const loaded = await Promise.resolve(loadSampleDataFn?.() ?? false);
     if (!loaded) return;
 
@@ -632,21 +687,24 @@ function setupSampleData(): void {
       closeModal('reset-app-data-modal');
       closeModal('settings-modal');
 
-      const { switchMainTab, switchTab } = await import('../core/ui-navigation.js');
-      switchMainTab('dashboard');
-      switchTab('expense');
+      const successMessage = clearBackups ? 'App data and backups cleared' : 'App data cleared. Stored backups were kept.';
 
-      await Promise.resolve(resetFormFn?.());
-      const { renderTransactionsList } = await import('../../data/transaction-renderer.js');
-      await renderTransactionsList(true);
-      refreshAllFn?.();
-      renderCustomCatsListFn?.();
-      updateSummaryFn?.();
+      try {
+        const { switchMainTab, switchTab } = await import('../core/ui-navigation.js');
+        const { refreshTransactionsSurface } = await import('../../data/transaction-surface-coordinator.js');
+        switchMainTab('dashboard');
+        switchTab('expense');
 
-      showToast(
-        clearBackups ? 'App data and backups cleared' : 'App data cleared. Stored backups were kept.',
-        'success'
-      );
+        await Promise.resolve(resetFormFn?.());
+        await refreshTransactionsSurface({ resetPage: true });
+        refreshAllFn?.();
+        renderCustomCatsListFn?.();
+        updateSummaryFn?.();
+        showToast(successMessage, 'success');
+      } catch (followUpError) {
+        if (import.meta.env.DEV) console.warn('Reset completed but follow-up UI refresh failed:', followUpError);
+        showToast(`${successMessage} Some screens may need a refresh.`, 'warning');
+      }
     } catch (error) {
       if (import.meta.env.DEV) console.warn('Failed to reset app data:', error);
       showToast('Reset failed. Please try again.', 'error');
@@ -658,19 +716,23 @@ function setupSampleData(): void {
     }
   };
 
-  DOM.get('clear-all-data')?.addEventListener('click', () => {
+  const clearAllDataButton = DOM.get('clear-all-data');
+  if (clearAllDataButton) bindModalEvent(clearAllDataButton, 'click', () => {
     openModal('reset-app-data-modal');
   });
 
-  DOM.get('cancel-reset-app-data')?.addEventListener('click', () => {
+  const cancelResetButton = DOM.get('cancel-reset-app-data');
+  if (cancelResetButton) bindModalEvent(cancelResetButton, 'click', () => {
     closeModal('reset-app-data-modal');
   });
 
-  DOM.get('confirm-reset-keep-backups')?.addEventListener('click', () => {
+  const confirmResetKeepBackupsButton = DOM.get('confirm-reset-keep-backups');
+  if (confirmResetKeepBackupsButton) bindModalEvent(confirmResetKeepBackupsButton, 'click', () => {
     void runReset(false);
   });
 
-  DOM.get('confirm-reset-clear-backups')?.addEventListener('click', () => {
+  const confirmResetClearBackupsButton = DOM.get('confirm-reset-clear-backups');
+  if (confirmResetClearBackupsButton) bindModalEvent(confirmResetClearBackupsButton, 'click', () => {
     void runReset(true);
   });
 }

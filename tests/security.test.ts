@@ -2,7 +2,22 @@
  * Security Tests
  * Tests XSS prevention (esc/sanitize) and PIN crypto functions
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+vi.mock('../js/modules/core/config.js', async () => {
+  const actual = await vi.importActual<typeof import('../js/modules/core/config.js')>('../js/modules/core/config.js');
+  return {
+    ...actual,
+    CONFIG: {
+      ...actual.CONFIG,
+      SECURITY: {
+        ...actual.CONFIG.SECURITY,
+        PBKDF2_ITERATIONS: 1000
+      }
+    }
+  };
+});
+
 import { esc, sanitize } from '../js/modules/core/utils-pure.js';
 import {
   generateRecoveryPhrase,

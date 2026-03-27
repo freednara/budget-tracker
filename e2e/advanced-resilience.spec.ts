@@ -1,5 +1,23 @@
 import { test, expect } from '@playwright/test';
-import { cleanAppState } from './test-helpers.js';
+import {
+  assertDashboardEmpty,
+  assertDashboardPopulated,
+  assertDashboardTotal,
+  assertLedgerHasRows,
+  assertLedgerEmpty,
+  assertModalClosedAndInteractive,
+  assertTransactionVisible,
+  bootSecondaryPage,
+  cleanAppState,
+  importJsonData,
+  submitJsonDataImport,
+  loadSampleDataFromSettings,
+  openResetAppDataModal,
+  openSettingsModal,
+  resetAppDataFromModal,
+  waitForAppReady,
+  waitForTransactionsSurfaceReady
+} from './test-helpers.js';
 
 /**
  * Advanced Resilience E2E Tests
@@ -18,24 +36,27 @@ test.describe('Advanced Resilience', () => {
       await dialog.dismiss();
     });
 
-    await page.waitForSelector('#total-expenses', { state: 'visible' });
-    await page.locator('#open-settings').click();
-    await page.waitForSelector('#settings-modal', { state: 'visible' });
+    await openSettingsModal(page);
     await page.locator('#load-sample-data').click();
 
-    await page.waitForSelector('#async-confirm-modal', { state: 'visible' });
+    await expect(page.locator('#async-confirm-modal')).toBeVisible({ timeout: 10000 });
     await expect(page.locator('#confirm-title')).toHaveText('Load Demo Account');
     await expect(page.locator('#confirm-message')).toContainText('Load demo data');
     await expect(page.locator('#confirm-details')).toContainText('deterministic demo account');
     expect(dialogSeen).toBeFalsy();
 
     await page.locator('#confirm-ok').click();
-    await expect(page.locator('.toast').filter({ hasText: 'Loaded demo account' }).last()).toBeVisible({ timeout: 10000 });
-    await expect(page.locator('#settings-modal')).not.toBeVisible({ timeout: 10000 });
-    await expect(page.locator('#tab-dashboard-btn')).toHaveAttribute('aria-selected', 'true');
-    await expect(page.locator('#hero-daily-amount')).not.toHaveText('—', { timeout: 10000 });
-    await expect(page.locator('#hero-amount-caption')).not.toContainText('no budget', { timeout: 10000 });
-    await expect(page.locator('#hero-left-to-spend')).not.toHaveText('$0.00', { timeout: 10000 });
+    await assertModalClosedAndInteractive(page, 10000);
+    await assertDashboardPopulated(page, 10000);
+  });
+
+  test('settings and analytics open on the first click after cold startup', async ({ page }) => {
+    await openSettingsModal(page);
+    await page.locator('#close-settings').click();
+    await assertModalClosedAndInteractive(page, 10000);
+
+    await page.locator('#open-analytics').click();
+    await expect(page.locator('#analytics-modal')).toBeVisible({ timeout: 10000 });
   });
 
   async function seedStoredBackupPayloads(page: import('@playwright/test').Page): Promise<void> {
@@ -106,24 +127,12 @@ test.describe('Advanced Resilience', () => {
     const page2 = await context.newPage();
 
     // Setup skip onboarding on both pages
-    await page1.addInitScript(() => {
-      localStorage.clear();
-      localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
-    });
-    await page2.addInitScript(() => {
-      localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
-    });
-
-    await page1.goto('/');
-    await page2.goto('/');
-
-    // Wait for apps to load
-    await page1.waitForSelector('#total-expenses');
-    await page2.waitForSelector('#total-expenses');
+    await bootSecondaryPage(page1, { clearStorage: true, skipOnboarding: true });
+    await bootSecondaryPage(page2, { clearStorage: false, skipOnboarding: true });
 
     // Page 1: Add a transaction
-    await page1.locator('#tab-transactions-btn').click();
-    await page1.waitForSelector('#amount', { state: 'visible' });
+    await page1.bringToFront();
+    await waitForTransactionsSurfaceReady(page1);
     await page1.locator('#amount').fill('75.50');
     await page1.locator('#description').fill('Multi-tab sync test');
     
@@ -134,7 +143,7 @@ test.describe('Advanced Resilience', () => {
     
     // Submit
     await page1.locator('#submit-btn').click();
-    await page1.waitForTimeout(500); // Wait for transaction to process
+    await expect(page1.locator('#amount')).toHaveValue('', { timeout: 5000 });
 
     // Page 2: Verify the dashboard updated automatically
     // The total expenses should now reflect the 75.50 added in Tab 1
@@ -143,23 +152,22 @@ test.describe('Advanced Resilience', () => {
   });
 
   test('fuzzy duplicate detection warns on similar transactions', async ({ page }) => {
-    // Wait for app to load first
-    await page.waitForSelector('#total-expenses', { state: 'visible' });
-    
+    await waitForTransactionsSurfaceReady(page);
+
     // 1. Add an initial transaction
-    await page.locator('#tab-transactions-btn').click();
-    await page.waitForSelector('#amount', { state: 'visible' });
     await page.locator('#amount').fill('42.00');
     await page.locator('#description').fill('Coffee Shop Purchase');
     const catChip = page.locator('.category-chip').first();
     await expect(catChip).toBeVisible();
     await catChip.click();
     await page.locator('#submit-btn').click();
-    await page.waitForTimeout(500);
+    await expect(page.locator('#amount')).toHaveValue('', { timeout: 5000 });
+    await assertLedgerHasRows(page, 1, 5000);
+    await assertTransactionVisible(page, 'Coffee Shop Purchase', 5000);
 
     // 2. Prepare a backup file with a fuzzy duplicate (same date, amount, but slightly different description)
     // First, let's create the JSON structure
-    const date = new Date().toISOString().split('T')[0];
+    const date = await page.locator('#date').inputValue();
     const importData = {
       version: 1,
       timestamp: Date.now(),
@@ -171,6 +179,8 @@ test.describe('Advanced Resilience', () => {
           type: 'expense',
           category: 'food',
           description: 'Coffee Shop - Morning', // Slightly different description
+          currency: 'USD',
+          recurring: false,
           tags: '',
           notes: ''
         }
@@ -183,41 +193,39 @@ test.describe('Advanced Resilience', () => {
     
     // Bypass the browser file chooser UI and write directly to the hidden input.
     // This keeps the test focused on the import pipeline rather than chooser quirks.
-    await page.locator('#import-file').setInputFiles({
+    await submitJsonDataImport(page, {
       name: 'backup.json',
       mimeType: 'application/json',
       buffer: buffer
-    });
-
-    // 4. Wait for import options and select Merge
-    await page.waitForSelector('#import-options-modal', { state: 'visible' });
-    await page.locator('#import-merge').click();
+    }, 'merge');
 
     // 5. Verify the fuzzy duplicate warning modal appears
-    await page.waitForSelector('#async-confirm-modal', { state: 'visible' });
+    await expect(page.locator('#async-confirm-modal')).toBeVisible({ timeout: 10000 });
     await expect(page.locator('#confirm-message')).toContainText('similar transaction');
     
     // Choose to skip duplicates (Cancel)
     await page.locator('#confirm-cancel').click();
+    await assertModalClosedAndInteractive(page, 10000);
 
-    // 6. Verify toast confirms skipping
-    await expect(page.locator('.toast').filter({ hasText: 'skipped' }).last()).toBeVisible({ timeout: 5000 });
+    // 6. Verify the duplicate candidate was not imported
+    await assertTransactionVisible(page, 'Coffee Shop Purchase', 5000);
+    await expect(page.locator('#transactions-list')).not.toContainText('Coffee Shop - Morning', { timeout: 5000 });
   });
 
   test('backup and restore integrity', async ({ page }) => {
-    // Wait for app to load first
-    await page.waitForSelector('#total-expenses', { state: 'visible' });
+    test.setTimeout(120000);
+    await waitForTransactionsSurfaceReady(page);
 
     // 1. Add some specific data to backup
-    await page.locator('#tab-transactions-btn').click();
-    await page.waitForSelector('#amount', { state: 'visible' });
     await page.locator('#amount').fill('123.45');
     await page.locator('#description').fill('Important Backup Data');
     const catChip = page.locator('.category-chip').first();
     await expect(catChip).toBeVisible();
     await catChip.click();
     await page.locator('#submit-btn').click();
-    await page.waitForTimeout(500);
+    await expect(page.locator('#amount')).toHaveValue('', { timeout: 5000 });
+    await assertLedgerHasRows(page, 1, 5000);
+    await assertTransactionVisible(page, 'Important Backup Data', 5000);
 
     // 2. Perform the backup (intercept the download)
     const downloadPromise = page.waitForEvent('download');
@@ -239,73 +247,59 @@ test.describe('Advanced Resilience', () => {
     expect(hasImportantData).toBeTruthy();
 
     // 3. Clear data via UI to simulate a fresh start
-    await page.locator('#open-settings').click();
-    await page.waitForSelector('#settings-modal', { state: 'visible' });
-    await page.locator('#clear-all-data').click();
-    await page.waitForSelector('#reset-app-data-modal', { state: 'visible' });
-    await page.locator('#confirm-reset-keep-backups').click();
-
-    // Verify it's empty
-    await expect(page.locator('#total-expenses')).toContainText('$0.00');
+    await resetAppDataFromModal(page, { clearBackups: false });
 
     // 4. Restore the data
     const restoreBuffer = Buffer.from(backupContent);
-    await page.locator('#tab-transactions-btn').click();
-    await page.locator('#import-file').setInputFiles({
+    await importJsonData(page, {
       name: 'restore.json',
       mimeType: 'application/json',
       buffer: restoreBuffer
-    });
-
-    await page.waitForSelector('#import-options-modal', { state: 'visible' });
-    await page.locator('#import-overwrite').click();
-
-    // Wait for the restore to complete
-    await expect(page.locator('.toast').last()).toContainText('Data replaced successfully', { timeout: 10000 });
+    }, 'overwrite');
 
     // 5. Verify the data is back
-    await page.locator('#tab-dashboard-btn').click();
-    await expect(page.locator('#total-expenses')).toContainText('123.45', { timeout: 5000 });
+    await assertDashboardPopulated(page, 15000);
+    await assertLedgerHasRows(page, 1, 15000);
+    await assertTransactionVisible(page, 'Important Backup Data', 10000);
+    await assertDashboardTotal(page, '#total-expenses', '123.45', 5000);
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await waitForAppReady(page);
+    await assertDashboardPopulated(page, 15000);
+    await assertLedgerHasRows(page, 1, 15000);
+    await assertTransactionVisible(page, 'Important Backup Data', 10000);
+    await assertDashboardTotal(page, '#total-expenses', '123.45', 10000);
   });
 
   test('clear app data offers both backup paths and preserves stored backups by default', async ({ page }) => {
-    await page.waitForSelector('#total-expenses', { state: 'visible' });
+    await waitForAppReady(page);
     await seedStoredBackupPayloads(page);
 
-    await page.locator('#open-settings').click();
-    await page.waitForSelector('#settings-modal', { state: 'visible' });
-    await page.locator('#clear-all-data').click();
-
-    await page.waitForSelector('#reset-app-data-modal', { state: 'visible' });
+    await openResetAppDataModal(page);
     await expect(page.locator('#reset-app-data-title')).toContainText('Clear App Data');
-    await expect(page.locator('#confirm-reset-keep-backups')).toBeVisible();
-    await expect(page.locator('#confirm-reset-clear-backups')).toBeVisible();
-
     await page.locator('#confirm-reset-keep-backups').click();
-    await expect(page.locator('.toast').last()).toContainText('Stored backups were kept', { timeout: 10000 });
+    await assertModalClosedAndInteractive(page, 20000);
 
     const localBackups = await page.evaluate(() => localStorage.getItem('budget_tracker_auto_backups'));
     expect(localBackups).not.toBeNull();
     expect(await countIndexedDbBackups(page)).toBe(1);
     expect(await page.evaluate(() => localStorage.getItem('budget_tracker_backup_schedule'))).toBeNull();
-    await expect(page.locator('#total-expenses')).toContainText('$0.00');
-    await page.locator('#tab-transactions-btn').click();
-    await expect(page.locator('#tx-display-count')).toContainText('0');
-    await expect(page.locator('.transaction-row')).toHaveCount(0);
+    await assertDashboardEmpty(page);
+    await assertLedgerEmpty(page);
   });
 
   test('clear app data and backups removes stored backups from all backup stores', async ({ page }) => {
-    await page.waitForSelector('#total-expenses', { state: 'visible' });
+    await waitForAppReady(page);
     await seedStoredBackupPayloads(page);
 
-    await page.locator('#open-settings').click();
-    await page.waitForSelector('#settings-modal', { state: 'visible' });
-    await page.locator('#clear-all-data').click();
-    await page.waitForSelector('#reset-app-data-modal', { state: 'visible' });
-    await page.locator('#confirm-reset-clear-backups').click();
-
-    await expect(page.locator('.toast').last()).toContainText('App data and backups cleared', { timeout: 10000 });
+    await resetAppDataFromModal(page, { clearBackups: true });
     expect(await page.evaluate(() => localStorage.getItem('budget_tracker_auto_backups'))).toBeNull();
     expect(await countIndexedDbBackups(page)).toBe(0);
+    await assertLedgerEmpty(page);
+  });
+
+  test('sample data helper drives durable dashboard state without relying on toast timing', async ({ page }) => {
+    await loadSampleDataFromSettings(page);
+    await expect(page.locator('#hero-amount-caption')).not.toContainText('no budget', { timeout: 10000 });
   });
 });

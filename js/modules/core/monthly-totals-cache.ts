@@ -7,13 +7,16 @@
  * @module monthly-totals-cache
  */
 
-import { lsGet, lsSet } from './state.js';
 import * as signals from './signals.js';
-import { getMonthKey, toCents, toDollars } from './utils.js';
+import { toCents, toDollars } from './utils.js';
 import { isTrackedExpenseTransaction } from './transaction-classification.js';
 import type { Transaction, Totals } from '../../types/index.js';
 
 const DEV = import.meta.env.DEV;
+
+function isCacheDebugEnabled(): boolean {
+  return DEV && typeof window !== 'undefined' && (window as any).__APP_DEBUG_CACHE__ === true;
+}
 
 // ==========================================
 // TYPES
@@ -70,9 +73,6 @@ const cacheStats: CacheStats = {
   newestEntry: Date.now()
 };
 
-// Cross-tab cache version tracking
-let currentCacheVersion = 0;
-
 // Periodic cleanup interval ID
 let cleanupIntervalId: number | null = null;
 
@@ -85,13 +85,6 @@ let cleanupIntervalId: number | null = null;
  */
 function getCacheKey(monthKey: string): string {
   return `${CACHE_KEY_PREFIX}_${monthKey}`;
-}
-
-/**
- * Generate global cache version key
- */
-function getGlobalVersionKey(): string {
-  return `${CACHE_KEY_PREFIX}_global_version`;
 }
 
 /**
@@ -169,40 +162,12 @@ function generateXXHashFallback(str: string): string {
  * CRITICAL FIX: Get cached monthly totals with race condition prevention
  */
 export function getCachedMonthlyTotals(monthKey: string): Totals | null {
-  // Check cross-tab cache version first
-  const globalVersion = lsGet(getGlobalVersionKey(), 0) as number;
-  if (globalVersion > currentCacheVersion) {
-    // Another tab invalidated cache - clear local cache
-    invalidateAllCache();
-    currentCacheVersion = globalVersion;
-  }
-
-  // Check memory cache first (fastest)
   const cacheKey = getCacheKey(monthKey);
   const memoryEntry = memoryCache.get(cacheKey);
   
   if (memoryEntry && memoryEntry.expiresAt > Date.now()) {
     cacheStats.hits++;
     return memoryEntry.data.totals;
-  }
-
-  // Check localStorage cache (slower but persistent)
-  const stored = lsGet<TotalsCacheEntry | null>(cacheKey, null);
-  if (stored && stored.expiresAt > Date.now() && stored.version === CACHE_VERSION) {
-    // NOTE: Checksum validation moved to async function for security
-    // Using transaction count as fast validation here
-    const currentTransactions = getTransactionsForMonth(monthKey);
-    
-    if (stored.data.transactionCount === currentTransactions.length) {
-      // Quick validation passed - restore to memory
-      memoryCache.set(cacheKey, stored);
-      cacheStats.hits++;
-      return stored.data.totals;
-    } else {
-      // Cache invalidated by transaction count change
-      if (DEV) console.log(`Cache invalidated for ${monthKey}: transaction count mismatch`);
-      invalidateMonthCache(monthKey);
-    }
   }
 
   cacheStats.misses++;
@@ -235,9 +200,6 @@ export async function setCachedMonthlyTotals(monthKey: string, totals: Totals): 
   // Store in memory cache
   memoryCache.set(getCacheKey(monthKey), cacheEntry);
   
-  // Store in localStorage for persistence
-  lsSet(getCacheKey(monthKey), cacheEntry);
-  
   // Update cache statistics
   cacheStats.size = memoryCache.size;
   cacheStats.newestEntry = timestamp;
@@ -245,16 +207,15 @@ export async function setCachedMonthlyTotals(monthKey: string, totals: Totals): 
   // Cleanup old entries
   cleanupCache();
   
-  // Cache write logged at debug level to reduce console noise
-  if (DEV) console.debug(`Cache: ${monthKey}`, totals);
+  // Cache writes are useful for targeted debugging but too noisy for normal dev use.
+  if (isCacheDebugEnabled()) console.debug(`Cache: ${monthKey}`, totals);
 }
 
 /**
  * Get transactions for a specific month (optimized)
  */
 function getTransactionsForMonth(monthKey: string): Transaction[] {
-  const allTransactions = signals.transactions.value as Transaction[];
-  return allTransactions.filter(tx => getMonthKey(tx.date) === monthKey);
+  return signals.transactionsByMonth.value.get(monthKey) || [];
 }
 
 /**
@@ -266,46 +227,20 @@ export function invalidateMonthCache(monthKey: string): void {
   // Remove from memory cache
   memoryCache.delete(cacheKey);
   
-  // Remove from localStorage
-  lsSet(cacheKey, null);
-  
-  // Increment global version to notify other tabs
-  const globalVersion = (lsGet(getGlobalVersionKey(), 0) as number) + 1;
-  lsSet(getGlobalVersionKey(), globalVersion);
-  currentCacheVersion = globalVersion;
-  
   cacheStats.invalidations++;
   cacheStats.size = memoryCache.size;
   
-  if (DEV) console.log(`Invalidated cache for ${monthKey} (global version: ${globalVersion})`);
+  if (isCacheDebugEnabled()) console.debug(`Invalidated cache for ${monthKey}`);
 }
 
 /**
  * Invalidate all cached monthly totals
  */
 export function invalidateAllCache(): void {
-  if (DEV) console.log('Invalidating all monthly totals cache');
+  if (isCacheDebugEnabled()) console.debug('Invalidating all monthly totals cache');
   
   // Clear memory cache
   memoryCache.clear();
-  
-  // Clear localStorage cache entries
-  const keysToRemove: string[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key && key.startsWith(CACHE_KEY_PREFIX)) {
-      keysToRemove.push(key);
-    }
-  }
-  
-  keysToRemove.forEach(key => {
-    localStorage.removeItem(key);
-  });
-  
-  // Increment global version
-  const globalVersion = (lsGet(getGlobalVersionKey(), 0) as number) + 1;
-  lsSet(getGlobalVersionKey(), globalVersion);
-  currentCacheVersion = globalVersion;
   
   cacheStats.invalidations++;
   cacheStats.size = 0;
@@ -328,7 +263,6 @@ function cleanupCache(): void {
   // Remove from memory
   entriesToRemove.forEach(key => {
     memoryCache.delete(key);
-    lsSet(key, null); // Also remove from localStorage
   });
   
   // If cache is still too large, remove oldest entries
@@ -339,7 +273,6 @@ function cleanupCache(): void {
     const toRemove = entries.slice(0, memoryCache.size - MAX_CACHE_ENTRIES);
     toRemove.forEach(([key]) => {
       memoryCache.delete(key);
-      lsSet(key, null);
     });
   }
   
@@ -496,8 +429,6 @@ export function debugCache(): void {
   console.group('Monthly Totals Cache Debug');
   console.log('Memory cache size:', memoryCache.size);
   console.log('Cache statistics:', getCacheStats());
-  console.log('Current cache version:', currentCacheVersion);
-  console.log('Global cache version:', lsGet(getGlobalVersionKey(), 0));
 
   // Show cache contents
   const cacheContents = Array.from(memoryCache.entries()).map(([key, entry]) => ({
@@ -530,9 +461,6 @@ export function resetCacheStats(): void {
  * Initialize cache system
  */
 export function initMonthlyTotalsCache(): void {
-  // Load current cache version
-  currentCacheVersion = lsGet(getGlobalVersionKey(), 0) as number;
-  
   // Clean up any stale cache entries
   cleanupCache();
   

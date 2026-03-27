@@ -542,7 +542,8 @@ describe('Multi-Tab Performance', () => {
       await stateRevision.recordStateChange(
         SK.TX,
         [createTestTransaction({ description: `Rev ${i}` })],
-        tabId
+        tabId,
+        { skipChecksum: true }
       );
     }
 

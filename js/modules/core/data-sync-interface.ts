@@ -8,7 +8,7 @@
  */
 
 import { emit, Events } from './event-bus.js';
-import type { Transaction } from '../../types/index.js';
+import type { Transaction, TransactionDataChange } from '../../types/index.js';
 
 // ==========================================
 // DATA SYNC EVENTS
@@ -16,10 +16,12 @@ import type { Transaction } from '../../types/index.js';
 
 export const DataSyncEvents = {
   REQUEST_RELOAD: 'data:request:reload',
+  REQUEST_APPLY_DELTA: 'data:request:apply_delta',
   REQUEST_SYNC: 'data:request:sync',
   SYNC_COMPLETE: 'data:sync:complete',
   SYNC_ERROR: 'data:sync:error',
   TRANSACTION_UPDATED: 'data:transaction:updated',
+  TRANSACTION_DELTA_APPLIED: 'data:transaction:delta_applied',
   BULK_UPDATE: 'data:bulk:update'
 } as const;
 
@@ -33,6 +35,8 @@ export interface DataSyncRequest {
   source?: string;
 }
 
+export type TransactionDataDelta = TransactionDataChange;
+
 export interface DataSyncResponse {
   success: boolean;
   data?: unknown;
@@ -43,8 +47,22 @@ export interface DataSyncResponse {
 /**
  * Request data layer to reload transactions
  */
-export function requestDataReload(source: string = 'unknown'): void {
-  emit(DataSyncEvents.REQUEST_RELOAD, { source });
+export function requestDataReload(
+  source: string = 'unknown',
+  metadata: { revision?: number; tabId?: string; timestamp?: number } = {}
+): void {
+  emit(DataSyncEvents.REQUEST_RELOAD, { source, ...metadata });
+}
+
+/**
+ * Request data layer to apply an already-persisted remote delta.
+ */
+export function requestDataApplyDelta(
+  change: TransactionDataDelta,
+  source: string = 'unknown',
+  metadata: { revision?: number; tabId?: string; timestamp?: number } = {}
+): void {
+  emit(DataSyncEvents.REQUEST_APPLY_DELTA, { change, source, ...metadata });
 }
 
 /**

@@ -6,6 +6,7 @@
 'use strict';
 
 import * as signals from '../../core/signals.js';
+import { modal } from '../../core/state-actions.js';
 import { dataSdk } from '../../data/data-manager.js';
 import { showToast, closeModal } from '../../ui/core/ui.js';
 import { parseAmount, generateId, toCents, toDollars } from '../../core/utils.js';
@@ -74,7 +75,7 @@ export function addSplitRow(): void {
     amount: newAmount
   };
 
-  signals.splitRows.value = [...nextRows, newRow];
+  modal.setSplitRows([...nextRows, newRow]);
   focusSplitRowAmount(newRow.id);
 }
 
@@ -82,16 +83,14 @@ export function addSplitRow(): void {
  * Remove a split row
  */
 export function removeSplitRow(rowId: string): void {
-  signals.splitRows.value = signals.splitRows.value.filter(r => r.id !== rowId);
+  modal.removeSplitRow(rowId);
 }
 
 /**
  * Update a split row
  */
 export function updateRow(rowId: string, updates: Partial<signals.SplitRow>): void {
-  signals.splitRows.value = signals.splitRows.value.map(r => 
-    r.id === rowId ? { ...r, ...updates } : r
-  );
+  modal.updateSplitRow(rowId, updates);
 }
 
 /**
@@ -116,8 +115,7 @@ export async function saveSplit(): Promise<void> {
 
   if (result.isOk) {
     closeModal('split-modal');
-    signals.splitTxId.value = null;
-    signals.splitRows.value = [];
+    modal.clearSplitTxId();
     showToast('Transaction split successfully');
   } else {
     showToast(`Split failed: ${result.error}`, 'error');
@@ -187,7 +185,7 @@ export function mountSplitModal(): () => void {
       <div class="modal-content max-w-2xl w-full p-6">
         <div class="flex justify-between items-center mb-6">
           <h3 class="text-xl font-black text-primary">Split Transaction</h3>
-          <button @click=${() => { signals.splitTxId.value = null; closeModal('split-modal'); }} 
+          <button @click=${() => { modal.clearSplitTxId(); closeModal('split-modal'); }} 
                   class="w-10 h-10 rounded-lg font-bold text-lg transition-all"
                   style=${subtleButtonStyle}>✕</button>
         </div>
@@ -281,7 +279,7 @@ export function mountSplitModal(): () => void {
           </div>
           
           <div class="flex gap-3 min-w-[260px]">
-            <button @click=${() => { signals.splitTxId.value = null; closeModal('split-modal'); }} 
+            <button @click=${() => { modal.clearSplitTxId(); closeModal('split-modal'); }} 
                     class="flex-1 py-3 rounded-lg font-bold text-sm transition-all"
                     style=${subtleButtonStyle}>Cancel</button>
             <button id="save-split" @click=${saveSplit}

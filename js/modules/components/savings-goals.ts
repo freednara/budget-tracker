@@ -150,11 +150,10 @@ export function mountSavingsGoals(): () => void {
 
     if (goals.length === 0) {
       render(html`
-        <div class="empty-state text-center py-6" style="color: var(--text-secondary);">
-          <div class="text-4xl mb-2">💚</div>
-          <p class="font-semibold mb-1">No savings goals yet</p>
-          <p class="text-xs mb-3" style="color: var(--text-tertiary);">Start saving toward something special</p>
-          <button @click=${() => openModal('savings-goal-modal')} class="btn-primary text-sm px-4 py-2">+ Create Goal</button>
+        <div class="app-panel-empty">
+          <div class="app-panel-empty__icon">💚</div>
+          <p class="app-panel-empty__title">No savings goals yet</p>
+          <p class="app-panel-empty__copy">Start saving toward something special and track progress here once your first goal is created.</p>
         </div>
       `, container);
       return;

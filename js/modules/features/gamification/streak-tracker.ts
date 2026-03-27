@@ -15,7 +15,7 @@ import { SK, persist, lsGet } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
 import { getTodayStr, parseLocalDate } from '../../core/utils.js';
 import DOM from '../../core/dom-cache.js';
-import { on } from '../../core/event-bus.js';
+import { on, createListenerGroup, destroyListenerGroup } from '../../core/event-bus.js';
 import { FeatureEvents } from '../../core/feature-event-interface.js';
 import type { StreakData, Transaction } from '../../../types/index.js';
 
@@ -37,6 +37,15 @@ const DEFAULT_CONFIG: StreakConfig = {
   maxBackfillDays: 7,          // Look back up to 1 week
   enableBackfill: true         // Enable backfill by default
 };
+
+let streakListenerGroupId: string | null = null;
+
+export function cleanupStreakTracker(): void {
+  if (streakListenerGroupId) {
+    destroyListenerGroup(streakListenerGroupId);
+    streakListenerGroupId = null;
+  }
+}
 
 let streakConfig = DEFAULT_CONFIG;
 
@@ -470,8 +479,11 @@ export function debugStreak(): void {
  * Initialize streak tracker module and register feature event listeners
  */
 export function initStreakTracker(): void {
+  cleanupStreakTracker();
+  streakListenerGroupId = createListenerGroup('streak-tracker');
+
   // Action: Check streak
   on(FeatureEvents.CHECK_STREAK, () => {
     checkStreak(getTodayStr());
-  });
+  }, { groupId: streakListenerGroupId });
 }

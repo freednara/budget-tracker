@@ -1,12 +1,10 @@
 import { test, expect } from '@playwright/test';
-import { cleanAppState } from './test-helpers.js';
+import { cleanAppState, waitForTransactionsSurfaceReady } from './test-helpers.js';
 
 test.describe('Data Lifecycle', () => {
   test.beforeEach(async ({ page }) => {
     await cleanAppState(page);
-    // Navigate to transactions tab
-    await page.locator('#tab-transactions-btn').click();
-    await page.waitForSelector('#amount', { state: 'visible', timeout: 5000 });
+    await waitForTransactionsSurfaceReady(page);
   });
 
   test('can fill expense form and submit', async ({ page }) => {
@@ -18,9 +16,7 @@ test.describe('Data Lifecycle', () => {
     const categoryChip = page.locator('.category-chip').first();
     await expect(categoryChip).toBeVisible({ timeout: 5000 });
     await categoryChip.click();
-
-    // Verify category is selected (should have different background)
-    await page.waitForTimeout(200);
+    await expect(categoryChip).toHaveAttribute('aria-pressed', 'true');
 
     // Enter description
     const descInput = page.locator('#description');
@@ -38,7 +34,6 @@ test.describe('Data Lifecycle', () => {
     // Switch to income tab
     const incomeTab = page.locator('#tab-income');
     await incomeTab.click();
-    await page.waitForTimeout(300);
 
     // Verify income tab is active by checking class
     await expect(incomeTab).toHaveClass(/btn-success/);
@@ -60,11 +55,11 @@ test.describe('Data Lifecycle', () => {
     // Try to submit without filling anything
     const submitBtn = page.locator('#submit-btn');
     await submitBtn.click();
-    await page.waitForTimeout(500);
 
     // Amount should still be empty (form not cleared = submission was blocked)
     const amountInput = page.locator('#amount');
     await expect(amountInput).toHaveValue('');
+    await expect(amountInput).toHaveAttribute('aria-invalid', 'true');
   });
 
   test('rejects negative amounts', async ({ page }) => {
@@ -82,10 +77,9 @@ test.describe('Data Lifecycle', () => {
 
     const submitBtn = page.locator('#submit-btn');
     await submitBtn.click();
-    await page.waitForTimeout(500);
 
     // Form should NOT be cleared (submission blocked)
-    await expect(amountInput).not.toHaveValue('');
+    await expect(amountInput).toHaveValue('-50');
   });
 
   test('can access settings modal', async ({ page }) => {

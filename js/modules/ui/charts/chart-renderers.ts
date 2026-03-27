@@ -20,6 +20,7 @@ import { getMonthBadge } from '../widgets/calendar.js';
 import { showToast } from '../core/ui.js';
 import { cleanupChartListeners } from './chart-utils.js';
 import DOM from '../../core/dom-cache.js';
+import { calculateMonthlyTotalsWithCacheSync } from '../../core/monthly-totals-cache.js';
 import type {
   Transaction,
   CurrencyFormatter,
@@ -527,13 +528,10 @@ export async function renderTrendChart(containerId: string, monthCount: number =
     months.push(getMonthKey(d));
   }
 
-  const incVals = months.map(mk => getEffectiveIncome(mk));
-  const monthTxArrays = months.map(mk => getMonthTx(mk));
-  const expVals = monthTxArrays.map(txArr => toDollars(
-    (txArr || []).reduce((sum: number, tx: Transaction) => (
-      isTrackedExpenseTransaction(tx) ? sum + toCents(tx.amount) : sum
-    ), 0)
-  ));
+  const summaries = signals.monthSummaries.value;
+  const monthTotals = months.map((monthKey) => summaries[monthKey] || signals.EMPTY_MONTH_SUMMARY);
+  const incVals = monthTotals.map((totals) => totals.income);
+  const expVals = monthTotals.map((totals) => totals.expenses);
   const activeMonths = months.filter((_, idx) => incVals[idx] > 0 || expVals[idx] > 0);
   if (activeMonths.length < 2) {
     render(html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">Need at least two months of activity to chart a trend.</p>`, el);

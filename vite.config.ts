@@ -78,33 +78,13 @@ export default defineConfig({
       },
       output: {
         manualChunks: (id) => {
-          // Split framework libraries into their own chunk
           if (id.includes('node_modules')) {
             if (id.includes('@preact/signals-core') || id.includes('lit-html')) {
               return 'framework';
             }
             return 'vendor';
           }
-          // Group core logic and data management together to resolve circular dependencies
-          if (id.includes('js/modules/core') || id.includes('js/modules/data')) {
-            return 'core-engine';
-          }
-          // Group financial and gamification features
-          if (id.includes('js/modules/features')) {
-            return 'features';
-          }
-          // Group UI chart renderers separately (heavy, not always needed)
-          if (id.includes('js/modules/ui/charts')) {
-            return 'charts';
-          }
-          // Group UI components
-          if (id.includes('js/modules/components')) {
-            return 'components';
-          }
-          // Group orchestration layer
-          if (id.includes('js/modules/orchestration')) {
-            return 'orchestration';
-          }
+          return undefined;
         }
       }
     }

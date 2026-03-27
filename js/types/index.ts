@@ -490,9 +490,19 @@ export interface SyncMessage {
   tabId: string;
 }
 
+export interface TransactionDataChange {
+  type: 'add' | 'update' | 'delete' | 'batch-add' | 'batch-delete' | 'split';
+  item?: Transaction;
+  previousItem?: Transaction;
+  items?: Transaction[];
+  id?: string;
+  ids?: string[];
+}
+
 // Data handler interface
 export interface DataHandler {
   onDataChanged(transactions: Transaction[]): void;
+  onDataPatched?(change: TransactionDataChange, transactions: Transaction[]): void;
 }
 
 // Generic operation result
@@ -1285,8 +1295,18 @@ export interface WorkerSearchPayload {
   limit?: number;
 }
 
+export interface WorkerUpdatePayload {
+  transactions?: Transaction[];
+  categories?: Record<string, unknown>;
+  change?: TransactionDataChange;
+}
+
 // Union type for all payloads
-export type WorkerPayload = WorkerFilterPayload | WorkerAggregatePayload | WorkerSearchPayload;
+export type WorkerPayload =
+  | WorkerFilterPayload
+  | WorkerAggregatePayload
+  | WorkerSearchPayload
+  | WorkerUpdatePayload;
 
 // Worker message structure
 export interface WorkerMessage {

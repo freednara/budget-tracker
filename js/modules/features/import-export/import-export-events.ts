@@ -9,6 +9,7 @@
 
 import { SK } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
+import { safeStorage } from '../../core/safe-storage.js';
 import { hydrateFromImport } from '../../core/state-hydration.js';
 import { showToast, showProgress, hideProgress, openModal, closeModal } from '../../ui/core/ui.js';
 // Confirmation function injected via DI (avoids features → UI layer violation)
@@ -34,6 +35,7 @@ import { FeatureEvents } from '../../core/feature-event-interface.js';
 import { getTodayStr, esc, downloadBlob } from '../../core/utils.js';
 import { CONFIG } from '../../core/config.js';
 import DOM from '../../core/dom-cache.js';
+import { dataSdk } from '../../data/data-manager.js';
 import type { Transaction, Theme } from '../../../types/index.js';
 
 // ==========================================
@@ -48,6 +50,11 @@ interface ImportData {
   transactions?: unknown[];
   theme?: string;
   [key: string]: unknown;
+}
+
+interface StorageSnapshotEntry {
+  key: string;
+  raw: string | null;
 }
 
 // Module-level variable for temporary import data storage
@@ -91,8 +98,8 @@ export function clearImportData(): void {
 /**
  * Update signals from imported state object
  */
-function updateSignalsFromImport(newS: Record<string, unknown>): void {
-  hydrateFromImport(newS);
+function updateSignalsFromImport(newS: Record<string, unknown>, transactions: Transaction[]): void {
+  hydrateFromImport(newS, transactions);
   updateCurrencyDisplay();
 }
 
@@ -113,6 +120,57 @@ function updateCurrencyDisplay(): void {
 // Configurable callbacks
 let fmtCurFn: (v: number) => string = (v) => '$' + v.toFixed(2);
 let importHandlersBound = false;
+let importClearDataUnsubscribe: (() => void) | null = null;
+let exportJsonButton: HTMLElement | null = null;
+let exportJsonHandler: (() => void) | null = null;
+let backupNowButton: HTMLElement | null = null;
+let backupNowHandler: (() => void) | null = null;
+let exportCsvButton: HTMLElement | null = null;
+let exportCsvHandler: (() => void) | null = null;
+let importClickHandler: ((event: Event) => void) | null = null;
+let importChangeHandler: ((event: Event) => void) | null = null;
+
+function snapshotStorageKeys(keys: string[]): StorageSnapshotEntry[] {
+  return keys.map((key) => ({
+    key,
+    raw: safeStorage.getItem(key)
+  }));
+}
+
+function restoreStorageSnapshot(snapshot: StorageSnapshotEntry[]): void {
+  snapshot.forEach(({ key, raw }) => {
+    if (raw === null) {
+      safeStorage.removeItem(key);
+    } else {
+      localStorage.setItem(key, raw);
+    }
+  });
+}
+
+async function applyImportedState(
+  newS: Record<string, unknown>,
+  writes: Array<{ key: string; value: unknown }>,
+  transactions: Transaction[],
+  theme: string | null
+): Promise<boolean> {
+  const snapshot = snapshotStorageKeys(writes.map(({ key }) => key));
+
+  if (!(await tryAtomicWrite(writes))) {
+    showToast('Import failed: storage error', 'error');
+    return false;
+  }
+
+  const replaceResult = await dataSdk.replaceAllTransactions(transactions);
+  if (!replaceResult.isOk) {
+    restoreStorageSnapshot(snapshot);
+    showToast(`Import failed: ${replaceResult.error || 'storage error'}`, 'error');
+    return false;
+  }
+
+  updateSignalsFromImport(newS, transactions);
+  if (theme) setTheme(theme as Theme);
+  return true;
+}
 
 // ==========================================
 // INITIALIZATION
@@ -124,13 +182,47 @@ let importHandlersBound = false;
 export function initImportExportEvents(callbacks: ImportExportCallbacks): void {
   if (callbacks.fmtCur) fmtCurFn = callbacks.fmtCur;
 
+  cleanupImportExportEvents();
   setupExportHandlers();
   setupImportHandlers();
 
   // Register Feature Event Listener
-  on(FeatureEvents.CLEAR_IMPORT_DATA, () => {
+  importClearDataUnsubscribe = on(FeatureEvents.CLEAR_IMPORT_DATA, () => {
     clearImportData();
   });
+}
+
+export function cleanupImportExportEvents(): void {
+  importClearDataUnsubscribe?.();
+  importClearDataUnsubscribe = null;
+
+  if (exportJsonButton && exportJsonHandler) {
+    exportJsonButton.removeEventListener('click', exportJsonHandler);
+  }
+  if (backupNowButton && backupNowHandler) {
+    backupNowButton.removeEventListener('click', backupNowHandler);
+  }
+  if (exportCsvButton && exportCsvHandler) {
+    exportCsvButton.removeEventListener('click', exportCsvHandler);
+  }
+
+  exportJsonButton = null;
+  exportJsonHandler = null;
+  backupNowButton = null;
+  backupNowHandler = null;
+  exportCsvButton = null;
+  exportCsvHandler = null;
+
+  if (importClickHandler) {
+    document.removeEventListener('click', importClickHandler);
+    importClickHandler = null;
+  }
+  if (importChangeHandler) {
+    document.removeEventListener('change', importChangeHandler);
+    importChangeHandler = null;
+  }
+
+  importHandlersBound = false;
 }
 
 // ==========================================
@@ -140,30 +232,40 @@ export function initImportExportEvents(callbacks: ImportExportCallbacks): void {
 /**
  * Set up export button handlers
  */
+export function triggerJsonExport(): void {
+  const data = buildExportData();
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  downloadBlob(blob, `budget-tracker-backup-${getTodayStr()}.json`);
+  markBackupCompleted();
+  awardAchievement('data_pro');
+}
+
 function setupExportHandlers(): void {
   // Export JSON
-  DOM.get('export-json-btn')?.addEventListener('click', () => {
-    const data = buildExportData();
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    downloadBlob(blob, `budget-tracker-backup-${getTodayStr()}.json`);
-    markBackupCompleted();
-    awardAchievement('data_pro');
-  });
+  exportJsonButton = DOM.get('export-json-btn');
+  exportJsonHandler = () => {
+    triggerJsonExport();
+  };
+  exportJsonButton?.addEventListener('click', exportJsonHandler);
 
   // Backup reminder button
-  DOM.get('backup-now-btn')?.addEventListener('click', () => {
+  backupNowButton = DOM.get('backup-now-btn');
+  backupNowHandler = () => {
     (DOM.get('export-json-btn') as HTMLButtonElement | null)?.click();
-  });
+  };
+  backupNowButton?.addEventListener('click', backupNowHandler);
 
   // Export CSV
-  DOM.get('export-csv-btn')?.addEventListener('click', () => {
+  exportCsvButton = DOM.get('export-csv-btn');
+  exportCsvHandler = () => {
     const txs = [...signals.transactions.value] as Transaction[];
     const csvContent = buildCsvContent(txs);
     const blob = new Blob([csvContent], { type: 'text/csv' });
     downloadBlob(blob, `budget-tracker-${getTodayStr()}.csv`);
     markBackupCompleted();
     awardAchievement('data_pro');
-  });
+  };
+  exportCsvButton?.addEventListener('click', exportCsvHandler);
 }
 
 // ==========================================
@@ -178,7 +280,7 @@ function setupImportHandlers(): void {
   importHandlersBound = true;
   ensureGlobalImportInput();
 
-  document.addEventListener('click', (event: Event) => {
+  importClickHandler = (event: Event) => {
     const target = event.target as HTMLElement | null;
     const button = target?.closest<HTMLElement>('#import-data-btn, #import-overwrite, #import-merge, #cancel-import');
     if (!button) return;
@@ -198,15 +300,17 @@ function setupImportHandlers(): void {
         _importData = null;
         break;
     }
-  });
+  };
+  document.addEventListener('click', importClickHandler);
 
   // Delegate file input changes at the document level so the restore flow stays
   // resilient even if the hidden input is replaced during reload or remount work.
-  document.addEventListener('change', (event: Event) => {
+  importChangeHandler = (event: Event) => {
     const target = event.target;
     if (!(target instanceof HTMLInputElement) || target.id !== 'import-file') return;
     void handleImportFile(event);
-  });
+  };
+  document.addEventListener('change', importChangeHandler);
 }
 
 function openImportFileChooser(): void {
@@ -281,14 +385,11 @@ async function handleImportOverwrite(): Promise<void> {
     const txList = sanitizeImportedTransactions(d.transactions || []);
     const { newS, writes, theme } = buildImportState(d, 'overwrite', txList);
 
-    if (!(await tryAtomicWrite(writes))) {
+    if (!(await applyImportedState(newS, writes, txList, theme))) {
       hideProgress();
-      showToast('Import failed: storage error', 'error');
       return;
     }
 
-    updateSignalsFromImport(newS);
-    if (theme) setTheme(theme as Theme);
     _importData = null;
     hideProgress();
     closeModal('import-options-modal');
@@ -342,14 +443,10 @@ async function handleImportMerge(): Promise<void> {
         const mergedTx = [...existing, ...newTx];
         const { newS, writes, theme } = buildImportState(d, 'merge', mergedTx);
         
-        if (!(await tryAtomicWrite(writes))) {
+        if (!(await applyImportedState(newS, writes, mergedTx, theme))) {
           hideProgress();
-          showToast('Import failed: storage error', 'error');
           return;
         }
-        
-        updateSignalsFromImport(newS);
-        if (theme) setTheme(theme as Theme);
         _importData = null;
         hideProgress();
         closeModal('import-options-modal');
@@ -365,13 +462,10 @@ async function handleImportMerge(): Promise<void> {
     const mergedTx = [...existing, ...newTx];
     const { newS, writes, theme } = buildImportState(d, 'merge', mergedTx);
     
-    if (!(await tryAtomicWrite(writes))) {
+    if (!(await applyImportedState(newS, writes, mergedTx, theme))) {
       hideProgress();
-      showToast('Import failed: storage error', 'error');
       return;
     }
-    updateSignalsFromImport(newS);
-    if (theme) setTheme(theme as Theme);
     _importData = null;
     hideProgress();
     closeModal('import-options-modal');

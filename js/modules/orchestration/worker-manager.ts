@@ -7,7 +7,11 @@
 'use strict';
 
 import { isTrackedExpenseTransaction } from '../core/transaction-classification.js';
-import type { Transaction, TransactionFilters } from '../../types/index.js';
+import type {
+  Transaction,
+  TransactionFilters,
+  WorkerUpdatePayload
+} from '../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
@@ -40,9 +44,17 @@ interface FilterResult {
 }
 
 interface WorkerMessage {
-  type: 'filter' | 'aggregate' | 'search';
+  type: 'filter' | 'aggregate' | 'search' | 'update';
   payload: unknown;
   requestId: number;
+}
+
+export interface WorkerDatasetDelta {
+  type: 'add' | 'update' | 'delete' | 'batch-add' | 'batch-delete' | 'split';
+  item?: Transaction;
+  items?: Transaction[];
+  id?: string;
+  ids?: string[];
 }
 
 interface WorkerResponse {
@@ -171,6 +183,7 @@ export function terminateWorker(): void {
     workerInstance.terminate();
     workerInstance = null;
   }
+  isDatasetInitialized = false;
   // Reject all pending requests and clear their timeouts before clearing the map
   pendingRequests.forEach((pending) => {
     clearTimeout(pending.timeoutId);
@@ -251,10 +264,33 @@ export async function syncWorkerDataset(
   if (!isWorkerSupported()) return;
   
   try {
-    await sendWorkerRequest('update', { transactions, categories });
+    const payload: WorkerUpdatePayload = { transactions, categories };
+    await sendWorkerRequest('update', payload);
     isDatasetInitialized = true;
   } catch (err) {
     if (import.meta.env.DEV) console.error('Failed to sync worker dataset:', err);
+    isDatasetInitialized = false;
+    throw err;
+  }
+}
+
+/**
+ * Apply an incremental change to the worker dataset after the initial sync.
+ */
+export async function syncWorkerDatasetDelta(
+  change: WorkerDatasetDelta,
+  categories?: Record<string, any>
+): Promise<void> {
+  if (!isWorkerSupported()) return;
+  if (!isDatasetInitialized) {
+    throw new Error('Worker dataset is not initialized');
+  }
+
+  try {
+    const payload: WorkerUpdatePayload = { change, categories };
+    await sendWorkerRequest('update', payload);
+  } catch (err) {
+    if (import.meta.env.DEV) console.error('Failed to apply worker dataset delta:', err);
     isDatasetInitialized = false;
     throw err;
   }

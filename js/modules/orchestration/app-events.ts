@@ -45,6 +45,14 @@ interface AppEventCallbacks {
 
 let callbacks: AppEventCallbacks | null = null;
 
+export function cleanupAppEvents(): void {
+  if (_eventUnsubscribers.length > 0) {
+    _eventUnsubscribers.forEach((unsubscribe) => unsubscribe());
+    _eventUnsubscribers = [];
+  }
+  callbacks = null;
+}
+
 // ==========================================
 // PUBLIC API
 // ==========================================
@@ -55,10 +63,7 @@ let callbacks: AppEventCallbacks | null = null;
  */
 export function initAppEvents(cb: AppEventCallbacks): void {
   // Guard: clean up previous event listeners to prevent duplicate subscriptions on re-init
-  if (_eventUnsubscribers.length > 0) {
-    _eventUnsubscribers.forEach(unsub => unsub());
-    _eventUnsubscribers = [];
-  }
+  cleanupAppEvents();
 
   callbacks = cb;
 
@@ -118,6 +123,14 @@ export function initAppEvents(cb: AppEventCallbacks): void {
       'updateReconcileCount', 'renderTransactions', 'updateInsights', 'checkAlerts',
       'renderWeeklyRollup', 'renderMonthComparison', 'renderRecurringBreakdown',
       'checkBackupReminder'
+    );
+  }));
+
+  _eventUnsubscribers.push(on(Events.TRANSACTIONS_REPLACED, () => {
+    renderScheduler.schedule(
+      'updateReconcileCount', 'updateInsights', 'checkAlerts', 'renderWeeklyRollup',
+      'renderMonthComparison', 'renderRecurringBreakdown', 'checkBackupReminder',
+      'checkAchievements'
     );
   }));
 

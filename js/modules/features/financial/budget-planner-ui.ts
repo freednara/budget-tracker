@@ -9,13 +9,12 @@
 
 import { SK, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
+import { data } from '../../core/state-actions.js';
 import { showToast, openModal, closeModal } from '../../ui/core/ui.js';
 import { parseAmount, toCents, toDollars, generateId } from '../../core/utils.js';
 import { getEffectiveIncome } from './calculations.js';
 import { isRolloverEnabled, calculateMonthRollovers } from './rollover.js';
 import { DEFAULT_CATEGORY_COLOR, getAllCats } from '../../core/categories.js';
-import { emit, Events } from '../../core/event-bus.js';
-import { checkAchievements } from '../gamification/achievements.js';
 import DOM from '../../core/dom-cache.js';
 import { html, render, type TemplateResult } from '../../core/lit-helpers.js';
 import type { CustomCategory, TransactionType } from '../../../types/index.js';
@@ -36,6 +35,7 @@ let renderQuickShortcutsFn: (() => void) | null = null;
 let populateCategoryFilterFn: (() => void) | null = null;
 let renderCustomCatsListFn: (() => void) | null = null;
 let fmtCurFn: ((v: number) => string) | null = null;
+const budgetPlannerCleanupFns: Array<() => void> = [];
 
 interface CategoryModalElements {
   nameInput: HTMLInputElement | null;
@@ -51,6 +51,22 @@ function getCategoryModalElements(): CategoryModalElements {
     colorInput: document.getElementById('custom-cat-color') as HTMLInputElement | null,
     typeSelect: document.getElementById('custom-cat-type') as HTMLSelectElement | null
   };
+}
+
+function bindBudgetPlannerEvent(
+  target: EventTarget,
+  type: string,
+  handler: EventListenerOrEventListenerObject
+): void {
+  target.addEventListener(type, handler);
+  budgetPlannerCleanupFns.push(() => {
+    target.removeEventListener(type, handler);
+  });
+}
+
+export function cleanupBudgetPlannerHandlers(): void {
+  const cleanups = budgetPlannerCleanupFns.splice(0, budgetPlannerCleanupFns.length);
+  cleanups.forEach((cleanup) => cleanup());
 }
 
 // ==========================================
@@ -212,8 +228,11 @@ function openCustomCategoryModal(): void {
  * Initialize budget planner event handlers
  */
 export function initBudgetPlannerHandlers(): void {
+  cleanupBudgetPlannerHandlers();
+
   // Plan Budget modal - open
-  DOM.get('open-plan-budget')?.addEventListener('click', () => {
+  const openPlanBudget = DOM.get('open-plan-budget');
+  if (openPlanBudget) bindBudgetPlannerEvent(openPlanBudget, 'click', () => {
     const income = getEffectiveIncome(signals.currentMonth.value);
     const incomeDisplay = DOM.get('plan-monthly-income');
     if (incomeDisplay) incomeDisplay.textContent = formatCurrency(income);
@@ -222,12 +241,14 @@ export function initBudgetPlannerHandlers(): void {
   });
 
   // Plan Budget modal - cancel
-  DOM.get('cancel-plan-budget')?.addEventListener('click', () => {
+  const cancelPlanBudget = DOM.get('cancel-plan-budget');
+  if (cancelPlanBudget) bindBudgetPlannerEvent(cancelPlanBudget, 'click', () => {
     closeModal('plan-budget-modal');
   });
 
   // Plan Budget modal - save
-  DOM.get('save-plan-budget')?.addEventListener('click', () => {
+  const savePlanBudget = DOM.get('save-plan-budget');
+  if (savePlanBudget) bindBudgetPlannerEvent(savePlanBudget, 'click', () => {
     const remCents = getPlanRemainingCents();
     // Only block saving when over-allocated (not when under-allocated — partial budgets are valid)
     if (remCents < 0) {
@@ -242,24 +263,26 @@ export function initBudgetPlannerHandlers(): void {
       if (v > 0 && inp.dataset.cat) alloc[inp.dataset.cat] = v;
     });
     const currentMonth = signals.currentMonth.value;
-    signals.monthlyAlloc.value = { ...signals.monthlyAlloc.value, [currentMonth]: alloc };
+    data.setMonthlyAllocations({ ...signals.monthlyAlloc.value, [currentMonth]: alloc });
     persist(SK.ALLOC, signals.monthlyAlloc.value);
     closeModal('plan-budget-modal');
-    emit(Events.BUDGET_UPDATED);
-    checkAchievements();
   });
 
   // Custom category modal - open from various buttons
-  DOM.get('add-custom-cat-btn')?.addEventListener('click', openCustomCategoryModal);
-  DOM.get('add-cat-from-budget')?.addEventListener('click', openCustomCategoryModal);
+  const addCustomCategory = DOM.get('add-custom-cat-btn');
+  if (addCustomCategory) bindBudgetPlannerEvent(addCustomCategory, 'click', openCustomCategoryModal);
+  const addCategoryFromBudget = DOM.get('add-cat-from-budget');
+  if (addCategoryFromBudget) bindBudgetPlannerEvent(addCategoryFromBudget, 'click', openCustomCategoryModal);
 
   // Custom category modal - cancel
-  DOM.get('cancel-custom-cat')?.addEventListener('click', () => {
+  const cancelCustomCategory = DOM.get('cancel-custom-cat');
+  if (cancelCustomCategory) bindBudgetPlannerEvent(cancelCustomCategory, 'click', () => {
     closeModal('category-modal');
   });
 
   // Custom category modal - save
-  DOM.get('save-custom-cat')?.addEventListener('click', () => {
+  const saveCustomCategory = DOM.get('save-custom-cat');
+  if (saveCustomCategory) bindBudgetPlannerEvent(saveCustomCategory, 'click', () => {
     const { nameInput, emojiInput, colorInput, typeSelect } = getCategoryModalElements();
 
     const name = nameInput?.value.trim() || '';
@@ -281,7 +304,7 @@ export function initBudgetPlannerHandlers(): void {
         color,
         type
       };
-      signals.customCats.value = [...signals.customCats.value, newCategory];
+      data.setCustomCategories([...signals.customCats.value, newCategory]);
       persist(SK.CUSTOM_CAT, signals.customCats.value);
       closeModal('category-modal');
 

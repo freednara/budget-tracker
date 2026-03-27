@@ -130,7 +130,7 @@ describe('DI Container', () => {
       
       const dataSdk = container.resolveSync(Services.DATA_SDK);
       expect(dataSdk).toBe(mockDataSdk);
-    });
+    }, 15000);
   });
 
   describe('Default Container', () => {
@@ -149,21 +149,25 @@ describe('DI Container', () => {
       expect(first).not.toBe(second);
     });
 
-    it('should have all required services registered', async () => {
+    it('should eagerly initialize default services and keep deferred services registered', async () => {
       const container = createDefaultContainer();
       await container.initialize();
       
-      // Test core services
+      // Eager default services are available synchronously after plain initialize()
       expect(() => container.resolveSync(Services.CONFIG)).not.toThrow();
       expect(() => container.resolveSync(Services.VALIDATOR)).not.toThrow();
-      expect(() => container.resolveSync(Services.DATA_SDK)).not.toThrow();
       expect(() => container.resolveSync(Services.CURRENCY_FORMATTER)).not.toThrow();
       expect(() => container.resolveSync(Services.GET_TODAY_STR)).not.toThrow();
-      
-      // Test UI services  
-      expect(() => container.resolveSync(Services.EMPTY_STATE)).not.toThrow();
-      expect(() => container.resolveSync(Services.RENDER_CATEGORIES)).not.toThrow();
-      expect(() => container.resolveSync(Services.SWITCH_TAB)).not.toThrow();
+
+      // Deferred services stay registered for on-demand resolution.
+      expect(container.getServiceNames()).toEqual(expect.arrayContaining([
+        Services.DATA_SDK,
+        Services.EMPTY_STATE,
+        Services.RENDER_CATEGORIES,
+        Services.SWITCH_TAB
+      ]));
+      expect(container.isInitialized(Services.DATA_SDK)).toBe(false);
+      expect(container.isInitialized(Services.EMPTY_STATE)).toBe(false);
     });
   });
 

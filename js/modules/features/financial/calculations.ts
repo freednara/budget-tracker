@@ -16,6 +16,8 @@ import { getCatInfo } from '../../core/categories.js';
 import { isTrackedExpenseTransaction } from '../../core/transaction-classification.js';
 import { isRolloverEnabled, getEffectiveBudget, calculateMonthRollovers } from './rollover.js';
 import monthlyTotalsCache from '../../core/monthly-totals-cache.js';
+import { on, emit, createListenerGroup, destroyListenerGroup } from '../../core/event-bus.js';
+import { FeatureEvents } from '../../core/feature-event-interface.js';
 import type {
   Transaction,
   SavingsContribution,
@@ -36,6 +38,15 @@ import type {
 // ==========================================
 // INTERNAL TYPES
 // ==========================================
+
+let calculationsListenerGroupId: string | null = null;
+
+export function cleanupCalculations(): void {
+  if (calculationsListenerGroupId) {
+    destroyListenerGroup(calculationsListenerGroupId);
+    calculationsListenerGroupId = null;
+  }
+}
 
 interface TotalsAccumulator {
   incomeCents: number;
@@ -607,13 +618,13 @@ export function compareYearsMonthly(year1: string, year2: string): MonthlyCompar
 // INITIALIZATION
 // ==========================================
 
-import { on, emit } from '../../core/event-bus.js';
-import { FeatureEvents, type FeatureResponse } from '../../core/feature-event-interface.js';
-
 /**
  * Initialize calculations module and register feature event listeners
  */
 export function initCalculations(): void {
+  cleanupCalculations();
+  calculationsListenerGroupId = createListenerGroup('calculations');
+
   // Request: Month Transactions
   on(FeatureEvents.REQUEST_MONTH_TX, (data: any) => {
     const { month } = data.payload || {};
@@ -622,7 +633,7 @@ export function initCalculations(): void {
       const result = getMonthTx(month);
       emit(responseEvent, { type: FeatureEvents.REQUEST_MONTH_TX, result });
     }
-  });
+  }, { groupId: calculationsListenerGroupId });
 
   // Request: Month Expenses
   on(FeatureEvents.REQUEST_MONTH_EXPENSES, (data: any) => {
@@ -632,7 +643,7 @@ export function initCalculations(): void {
       const result = getMonthExpenses(month);
       emit(responseEvent, { type: FeatureEvents.REQUEST_MONTH_EXPENSES, result });
     }
-  });
+  }, { groupId: calculationsListenerGroupId });
 
   // Request: Effective Income
   on(FeatureEvents.REQUEST_EFFECTIVE_INCOME, (data: any) => {
@@ -642,7 +653,7 @@ export function initCalculations(): void {
       const result = getEffectiveIncome(month);
       emit(responseEvent, { type: FeatureEvents.REQUEST_EFFECTIVE_INCOME, result });
     }
-  });
+  }, { groupId: calculationsListenerGroupId });
 
   // Request: Totals
   on(FeatureEvents.REQUEST_TOTALS, (data: any) => {
@@ -652,7 +663,7 @@ export function initCalculations(): void {
       const result = calcTotals(transactions);
       emit(responseEvent, { type: FeatureEvents.REQUEST_TOTALS, result });
     }
-  });
+  }, { groupId: calculationsListenerGroupId });
 }
 
 // ==========================================

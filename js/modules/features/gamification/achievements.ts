@@ -16,7 +16,7 @@ import { getMonthlySavings } from '../financial/calculations.js';
 import { ACHIEVEMENTS, showCelebration } from './celebration.js';
 import DOM from '../../core/dom-cache.js';
 import { html, render, repeat, classMap, styleMap, nothing } from '../../core/lit-helpers.js';
-import { on } from '../../core/event-bus.js';
+import { on, createListenerGroup, destroyListenerGroup } from '../../core/event-bus.js';
 import { effect } from '@preact/signals-core';
 import { FeatureEvents } from '../../core/feature-event-interface.js';
 import type { Transaction, EarnedAchievement, StreakData, LegacySavingsGoal } from '../../../types/index.js';
@@ -26,6 +26,14 @@ import type { Transaction, EarnedAchievement, StreakData, LegacySavingsGoal } fr
 // ==========================================
 
 // Using LegacySavingsGoal from central types
+let achievementsListenerGroupId: string | null = null;
+
+export function cleanupAchievements(): void {
+  if (achievementsListenerGroupId) {
+    destroyListenerGroup(achievementsListenerGroupId);
+    achievementsListenerGroupId = null;
+  }
+}
 
 // ==========================================
 // ACHIEVEMENT FUNCTIONS
@@ -153,13 +161,16 @@ export function checkAchievements(): void {
  * Initialize achievements module and register feature event listeners
  */
 export function initAchievements(): void {
+  cleanupAchievements();
+  achievementsListenerGroupId = createListenerGroup('achievements');
+
   // Action: Check achievements
   on(FeatureEvents.CHECK_ACHIEVEMENTS, () => {
     checkAchievements();
-  });
+  }, { groupId: achievementsListenerGroupId });
 
   // Action: Award achievement
   on(FeatureEvents.AWARD_ACHIEVEMENT, (id: string) => {
     awardAchievement(id);
-  });
+  }, { groupId: achievementsListenerGroupId });
 }

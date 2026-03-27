@@ -20,6 +20,7 @@ import { calculateMonthlyTotalsWithCacheSync } from './monthly-totals-cache.js';
 import { getCatInfo } from './categories.js';
 import type {
   Transaction,
+  TransactionDataChange,
   SavingsGoal,
   SavingsContribution,
   MonthlyAllocation,
@@ -55,6 +56,29 @@ export interface MonthTotals {
   balance: number;
 }
 
+export interface MonthSummary extends MonthTotals {
+  categoryTotals: Record<string, number>;
+  transactionCount: number;
+}
+
+export const EMPTY_MONTH_SUMMARY: MonthSummary = {
+  income: 0,
+  expenses: 0,
+  balance: 0,
+  categoryTotals: {},
+  transactionCount: 0
+};
+
+function createEmptyMonthSummary(): MonthSummary {
+  return {
+    income: 0,
+    expenses: 0,
+    balance: 0,
+    categoryTotals: {},
+    transactionCount: 0
+  };
+}
+
 // ==========================================
 // CORE DATA SIGNALS (persisted)
 // ==========================================
@@ -64,6 +88,11 @@ export interface MonthTotals {
  * Note: This signal is populated by dataSdk.init() callback
  */
 export const transactions = signal<Transaction[]>([]);
+
+const monthTransactionBucketsState = signal<Map<string, Transaction[]>>(new Map());
+const monthSummariesState = signal<Record<string, MonthSummary>>({});
+const activeMonthKeysState = signal<string[]>([]);
+const transactionIndexState = signal<Map<string, Transaction>>(new Map());
 
 /**
  * Savings goals configuration
@@ -423,22 +452,276 @@ export const activeFilterCount: ReadonlySignal<number> = computed(() => {
 
 /**
  * Transactions grouped by month key (YYYY-MM)
- * Optimized Map-based index for O(1) month lookups
+ * Maintained month buckets updated by startup hydration and transaction patches.
  */
-export const transactionsByMonth: ReadonlySignal<Map<string, Transaction[]>> = computed(() => {
-  const map = new Map<string, Transaction[]>();
-  const _rv = refreshVersion.value; // Also recompute on forced refresh
-  
-  for (const tx of transactions.value) {
-    if (!tx.date) continue;
-    const mk = getMonthKey(tx.date);
-    if (!map.has(mk)) {
-      map.set(mk, []);
+export const transactionsByMonth: ReadonlySignal<Map<string, Transaction[]>> = monthTransactionBucketsState;
+
+function summarizeMonthTransactions(monthTransactions: Transaction[]): MonthSummary {
+  let incomeCents = 0;
+  let expenseCents = 0;
+  const categoryTotalsCents: Record<string, number> = {};
+
+  for (const transaction of monthTransactions) {
+    const amountCents = toCents(transaction.amount);
+    if (transaction.type === 'income') {
+      incomeCents += amountCents;
+      continue;
     }
-    map.get(mk)!.push(tx);
+
+    if (!isTrackedExpenseTransaction(transaction)) {
+      continue;
+    }
+
+    expenseCents += amountCents;
+    categoryTotalsCents[transaction.category] = (categoryTotalsCents[transaction.category] || 0) + amountCents;
   }
-  return map;
-});
+
+  const categoryTotals: Record<string, number> = {};
+  for (const [categoryId, cents] of Object.entries(categoryTotalsCents)) {
+    categoryTotals[categoryId] = toDollars(cents);
+  }
+
+  return {
+    income: toDollars(incomeCents),
+    expenses: toDollars(expenseCents),
+    balance: toDollars(incomeCents - expenseCents),
+    categoryTotals,
+    transactionCount: monthTransactions.length
+  };
+}
+
+function cloneMonthBuckets(
+  buckets: Map<string, Transaction[]>
+): Map<string, Transaction[]> {
+  return new Map(Array.from(buckets.entries(), ([monthKey, monthTransactions]) => [
+    monthKey,
+    [...monthTransactions]
+  ]));
+}
+
+function buildDerivedTransactionState(allTransactions: Transaction[]): {
+  index: Map<string, Transaction>;
+  buckets: Map<string, Transaction[]>;
+  summaries: Record<string, MonthSummary>;
+  activeMonths: string[];
+} {
+  const index = new Map<string, Transaction>();
+  const buckets = new Map<string, Transaction[]>();
+  const summaries: Record<string, MonthSummary> = {};
+
+  for (const transaction of allTransactions) {
+    index.set(transaction.__backendId, transaction);
+    if (!transaction.date) continue;
+    const monthKey = getMonthKey(transaction.date);
+    const monthTransactions = buckets.get(monthKey);
+    if (monthTransactions) {
+      monthTransactions.push(transaction);
+    } else {
+      buckets.set(monthKey, [transaction]);
+    }
+  }
+
+  for (const [monthKey, monthTransactions] of buckets.entries()) {
+    summaries[monthKey] = summarizeMonthTransactions(monthTransactions);
+  }
+
+  const activeMonths = Object.entries(summaries)
+    .filter(([, summary]) => summary.income > 0 || summary.expenses > 0)
+    .map(([monthKey]) => monthKey)
+    .sort();
+
+  return { index, buckets, summaries, activeMonths };
+}
+
+function removeMonthIfEmpty(
+  buckets: Map<string, Transaction[]>,
+  summaries: Record<string, MonthSummary>,
+  monthKey: string
+): void {
+  const monthTransactions = buckets.get(monthKey) || [];
+  if (monthTransactions.length === 0) {
+    buckets.delete(monthKey);
+    delete summaries[monthKey];
+    return;
+  }
+
+  summaries[monthKey] = summarizeMonthTransactions(monthTransactions);
+}
+
+function computeActiveMonths(
+  summaries: Record<string, MonthSummary>
+): string[] {
+  return Object.entries(summaries)
+    .filter(([, summary]) => summary.income > 0 || summary.expenses > 0)
+    .map(([monthKey]) => monthKey)
+    .sort();
+}
+
+export function replaceTransactionLedger(nextTransactions: Transaction[]): void {
+  const nextState = buildDerivedTransactionState(nextTransactions);
+  batch(() => {
+    transactionIndexState.value = nextState.index;
+    monthTransactionBucketsState.value = nextState.buckets;
+    monthSummariesState.value = nextState.summaries;
+    activeMonthKeysState.value = nextState.activeMonths;
+    transactions.value = nextTransactions;
+  });
+}
+
+export function applyTransactionPatch(change: TransactionDataChange): Transaction[] {
+  const currentTransactions = transactions.value;
+  const currentIndex = transactionIndexState.value;
+  const nextTransactions = [...currentTransactions];
+  const nextIndex = new Map(currentIndex);
+  const nextBuckets = cloneMonthBuckets(monthTransactionBucketsState.value);
+  const nextSummaries = { ...monthSummariesState.value };
+  const touchedMonths = new Set<string>();
+
+  const getExistingTransaction = (id?: string, fallback?: Transaction): Transaction | undefined => {
+    if (fallback?.__backendId) return fallback;
+    if (!id) return undefined;
+    return nextIndex.get(id);
+  };
+
+  const upsertTransaction = (transaction: Transaction): void => {
+    const transactionMonth = getMonthKey(transaction.date);
+    const monthTransactions = nextBuckets.get(transactionMonth);
+    if (monthTransactions) {
+      monthTransactions.push(transaction);
+    } else {
+      nextBuckets.set(transactionMonth, [transaction]);
+    }
+    nextIndex.set(transaction.__backendId, transaction);
+    touchedMonths.add(transactionMonth);
+  };
+
+  const removeTransaction = (transaction: Transaction): void => {
+    const transactionMonth = getMonthKey(transaction.date);
+    const monthTransactions = nextBuckets.get(transactionMonth);
+    if (monthTransactions) {
+      const transactionIndex = monthTransactions.findIndex((entry) => entry.__backendId === transaction.__backendId);
+      if (transactionIndex > -1) {
+        monthTransactions.splice(transactionIndex, 1);
+      }
+    }
+    nextIndex.delete(transaction.__backendId);
+    touchedMonths.add(transactionMonth);
+  };
+
+  switch (change.type) {
+    case 'add':
+      if (change.item && !nextIndex.has(change.item.__backendId)) {
+        nextTransactions.push(change.item);
+        upsertTransaction(change.item);
+      }
+      break;
+    case 'batch-add':
+      (change.items || []).forEach((transaction) => {
+        if (nextIndex.has(transaction.__backendId)) return;
+        nextTransactions.push(transaction);
+        upsertTransaction(transaction);
+      });
+      break;
+    case 'update': {
+      const updatedTransaction = change.item;
+      const previousTransaction = getExistingTransaction(updatedTransaction?.__backendId, change.previousItem);
+      if (!updatedTransaction || !previousTransaction) {
+        return currentTransactions;
+      }
+
+      const ledgerIndex = nextTransactions.findIndex((entry) => entry.__backendId === updatedTransaction.__backendId);
+      if (ledgerIndex === -1) {
+        return currentTransactions;
+      }
+
+      nextTransactions[ledgerIndex] = updatedTransaction;
+
+      const previousMonth = getMonthKey(previousTransaction.date);
+      const nextMonth = getMonthKey(updatedTransaction.date);
+      if (previousMonth === nextMonth) {
+        const monthTransactions = nextBuckets.get(previousMonth) || [];
+        const monthIndex = monthTransactions.findIndex((entry) => entry.__backendId === updatedTransaction.__backendId);
+        if (monthIndex > -1) {
+          monthTransactions[monthIndex] = updatedTransaction;
+        }
+        nextIndex.set(updatedTransaction.__backendId, updatedTransaction);
+        touchedMonths.add(previousMonth);
+      } else {
+        removeTransaction(previousTransaction);
+        upsertTransaction(updatedTransaction);
+      }
+      break;
+    }
+    case 'delete': {
+      const deletedTransaction = getExistingTransaction(change.id, change.item);
+      if (!deletedTransaction) {
+        return currentTransactions;
+      }
+
+      const ledgerIndex = nextTransactions.findIndex((entry) => entry.__backendId === deletedTransaction.__backendId);
+      if (ledgerIndex === -1) {
+        return currentTransactions;
+      }
+
+      nextTransactions.splice(ledgerIndex, 1);
+      removeTransaction(deletedTransaction);
+      break;
+    }
+    case 'batch-delete': {
+      const deletedIds = new Set(change.ids || []);
+      if (deletedIds.size === 0) {
+        return currentTransactions;
+      }
+
+      for (let i = nextTransactions.length - 1; i >= 0; i--) {
+        const transaction = nextTransactions[i];
+        if (!deletedIds.has(transaction.__backendId)) continue;
+        nextTransactions.splice(i, 1);
+        removeTransaction(transaction);
+      }
+      break;
+    }
+    case 'split': {
+      const splitSource = getExistingTransaction(change.id);
+      if (!splitSource) {
+        return currentTransactions;
+      }
+
+      const ledgerIndex = nextTransactions.findIndex((entry) => entry.__backendId === splitSource.__backendId);
+      if (ledgerIndex === -1) {
+        return currentTransactions;
+      }
+
+      nextTransactions.splice(ledgerIndex, 1, ...(change.items || []));
+      removeTransaction(splitSource);
+      (change.items || []).forEach((transaction) => {
+        upsertTransaction(transaction);
+      });
+      break;
+    }
+    default:
+      return currentTransactions;
+  }
+
+  touchedMonths.forEach((monthKey) => {
+    removeMonthIfEmpty(nextBuckets, nextSummaries, monthKey);
+  });
+
+  batch(() => {
+    monthTransactionBucketsState.value = nextBuckets;
+    monthSummariesState.value = nextSummaries;
+    activeMonthKeysState.value = computeActiveMonths(nextSummaries);
+    transactionIndexState.value = nextIndex;
+    transactions.value = nextTransactions;
+  });
+  return nextTransactions;
+}
+
+/**
+ * Month-keyed financial summaries used by dashboard and chart consumers.
+ * Keeps downstream consumers off the raw transaction arrays where possible.
+ */
+export const monthSummaries: ReadonlySignal<Record<string, MonthSummary>> = monthSummariesState;
 
 /**
  * Transactions for the currently selected month
@@ -450,15 +733,24 @@ export const currentMonthTx: ReadonlySignal<Transaction[]> = computed(() => {
   return transactionsByMonth.value.get(mk) || [];
 });
 
+export const currentMonthSummary: ReadonlySignal<MonthSummary> = computed(() => {
+  return monthSummaries.value[currentMonth.value] || EMPTY_MONTH_SUMMARY;
+});
+
+/**
+ * Month keys that contain tracked income or expense activity.
+ * Keeps dashboard trend eligibility logic off the hot render path.
+ */
+export const activeTransactionMonths: ReadonlySignal<string[]> = computed(() => {
+  return activeMonthKeysState.value;
+});
+
 /**
  * Totals for the current month (income, expenses, balance)
  * Automatically updates when currentMonthTx changes
  */
 export const currentMonthTotals: ReadonlySignal<MonthTotals> = computed(() => {
-  // Keep the currently viewed month live from the signal-backed transaction list.
-  // Historical lookups can use the monthly cache, but the active dashboard needs
-  // immediate consistency after local edits, imports, and cross-tab sync updates.
-  const totals = calcTotals(currentMonthTx.value);
+  const totals = currentMonthSummary.value;
   return {
     income: totals.income,
     expenses: totals.expenses,
@@ -538,20 +830,7 @@ export const currentInsights: ReadonlySignal<Array<{ type: string; message: stri
  * Returns a map of category ID to total amount
  */
 export const expensesByCategory: ReadonlySignal<Record<string, number>> = computed(() => {
-  const expByCatCents: Record<string, number> = {};
-
-  // Single pass: filter and accumulate simultaneously
-  for (const tx of currentMonthTx.value) {
-    if (!isTrackedExpenseTransaction(tx)) continue;
-    expByCatCents[tx.category] = (expByCatCents[tx.category] || 0) + toCents(tx.amount);
-  }
-
-  // Convert to dollars
-  const result: Record<string, number> = {};
-  for (const [cat, cents] of Object.entries(expByCatCents)) {
-    result[cat] = toDollars(cents);
-  }
-  return result;
+  return currentMonthSummary.value.categoryTotals;
 });
 
 /**

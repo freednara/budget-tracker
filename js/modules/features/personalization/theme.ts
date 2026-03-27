@@ -8,6 +8,7 @@
 'use strict';
 
 import * as signals from '../../core/signals.js';
+import { settings } from '../../core/state-actions.js';
 import { on } from '../../core/event-bus.js';
 import { effect } from '@preact/signals-core';
 import { FeatureEvents } from '../../core/feature-event-interface.js';
@@ -45,7 +46,7 @@ export function applyTheme(actualTheme: ActualTheme): void {
  * Set the theme preference
  */
 export function setTheme(theme: Theme): void {
-  signals.theme.value = theme;
+  settings.setTheme(theme);
 }
 
 /**
@@ -88,14 +89,16 @@ export function initTheme(): () => void {
   });
 
   // Register Feature Event Listener for external control
-  on(FeatureEvents.SET_THEME, (data: { theme: Theme }) => {
+  const unsubscribeThemeEvent = on(FeatureEvents.SET_THEME, (data: { theme: Theme }) => {
     setTheme(data.theme);
   });
 
   return () => {
     cleanup();
+    unsubscribeThemeEvent();
     if (systemThemeListener) {
       window.matchMedia('(prefers-color-scheme: dark)').removeEventListener('change', systemThemeListener);
+      systemThemeListener = null;
     }
   };
 }

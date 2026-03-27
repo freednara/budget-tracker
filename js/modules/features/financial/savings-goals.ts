@@ -7,8 +7,7 @@
 
 import { SK, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
-import { batch } from '@preact/signals-core';
-import { modal, data } from '../../core/state-actions.js';
+import { batchUpdates, modal, savingsGoals } from '../../core/state-actions.js';
 import { parseLocalDate, addAmounts, toCents, toDollars } from '../../core/utils.js';
 import { showToast } from '../../ui/core/ui.js';
 import { emit, Events } from '../../core/event-bus.js';
@@ -96,15 +95,15 @@ export async function deleteGoal(goalId: string): Promise<void> {
   
   if (!deletedGoal) return;
 
-  // Perform atomic multi-signal update
-  batch(() => {
+  // Perform atomic multi-signal update without firing SAVINGS_UPDATED until persistence completes
+  batchUpdates(() => {
     // 1. Remove goal
     const { [goalId]: _, ...rest } = goalsRecord;
-    signals.savingsGoals.value = rest as any;
+    savingsGoals.setGoals(rest as unknown as Record<string, SavingsGoal>, { emitEvent: false });
     
     // 2. Remove contributions
     const currentContribs = signals.savingsContribs.value;
-    signals.savingsContribs.value = currentContribs.filter(c => c.goalId !== goalId);
+    savingsGoals.setContributions(currentContribs.filter(c => c.goalId !== goalId));
   });
 
   // Persist updated state
@@ -116,7 +115,7 @@ export async function deleteGoal(goalId: string): Promise<void> {
     goalId,
     goal: deletedGoal
   });
-  emit(Events.SAVINGS_UPDATED);
+  emit(Events.SAVINGS_UPDATED, signals.savingsGoals.value);
   
   showToast('Savings goal deleted');
 }
@@ -136,4 +135,3 @@ export function initiateAddSavings(goalId: string): void {
   // Emit event for UI components to handle display logic
   emit('modal:open', { modalId: 'add-savings-modal', goalId, goalName: goal.name });
 }
-

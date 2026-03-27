@@ -7,6 +7,7 @@
 'use strict';
 
 import * as signals from '../../core/signals.js';
+import { calendar as calendarActions } from '../../core/state-actions.js';
 import { parseMonthKey, parseLocalDate, getMonthKey } from '../../core/utils.js';
 import { getCatInfo } from '../../core/categories.js';
 import { isTrackedExpenseTransaction } from '../../core/transaction-classification.js';
@@ -44,14 +45,14 @@ type CurrencyFormatter = (value: number) => string;
  * Select a calendar day
  */
 export function selectDay(day: number | null): void {
-  signals.selectedCalendarDay.value = day;
+  calendarActions.setSelectedDay(day);
 }
 
 /**
  * Reset selection
  */
 export function resetCalendarSelection(): void {
-  signals.selectedCalendarDay.value = null;
+  calendarActions.clearSelectedDay();
 }
 
 // ==========================================
@@ -119,20 +120,29 @@ export function mountCalendar(): () => void {
   const summaryContainer = DOM.get('calendar-upcoming-summary');
   if (!container) return () => {};
 
-  const cleanup = effect(() => {
+  const monthData = computed(() => {
     const mk = signals.currentMonth.value;
-    const selectedDay = signals.selectedCalendarDay.value;
     const txs = getMonthTx(mk);
     const bills = getBillsForMonth(mk);
-    
-    // 1. Update Month Badge
+    return {
+      mk,
+      txs,
+      bills,
+      isEmpty: txs.length === 0 && bills.size === 0
+    };
+  });
+
+  const monthCleanup = effect(() => {
+    const { mk, txs, bills, isEmpty } = monthData.value;
+    const selectedDay = signals.selectedCalendarDay.peek();
+
     if (badgeContainer) {
       const [y, m] = mk.split('-');
       const monthName = new Date(parseInt(y), parseInt(m) - 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
       render(html`<span class="time-badge">${monthName}</span>`, badgeContainer);
     }
 
-    if (txs.length === 0 && bills.size === 0) {
+    if (isEmpty) {
       render(html`<div class="p-4 rounded-lg text-center text-xs" style="background: var(--bg-input); color: var(--text-tertiary);">No calendar activity for this month yet.</div>`, container);
       if (detailContainer) {
         render(html`
@@ -164,21 +174,42 @@ export function mountCalendar(): () => void {
       return;
     }
 
-    // 2. Render Main Grid
     renderCalendarGrid(container, mk, txs, bills, selectedDay);
+  });
 
-    // 3. Render Detail Panel
+  const selectionCleanup = effect(() => {
+    const { mk, txs, bills, isEmpty } = monthData.value;
+    const selectedDay = signals.selectedCalendarDay.value;
+
+    updateCalendarSelection(container, selectedDay);
+
+    if (isEmpty) {
+      return;
+    }
+
     if (detailContainer) {
       renderDetailPanel(detailContainer, mk, selectedDay, txs, bills);
     }
 
-    // 4. Render Summary Strip
     if (summaryContainer) {
       renderSummaryStrip(summaryContainer, mk, txs, bills, selectedDay);
     }
   });
 
-  return cleanup;
+  return () => {
+    monthCleanup();
+    selectionCleanup();
+  };
+}
+
+function updateCalendarSelection(container: HTMLElement, selectedDay: number | null): void {
+  const dayCells = container.querySelectorAll<HTMLElement>('.cal-day');
+  dayCells.forEach((cell) => {
+    const day = Number(cell.dataset.day || 0);
+    const isSelected = selectedDay !== null && day === selectedDay;
+    cell.classList.toggle('cal-selected', isSelected);
+    cell.tabIndex = isSelected ? 0 : -1;
+  });
 }
 
 function renderCalendarGrid(container: HTMLElement, mk: string, txs: Transaction[], bills: Map<number, BillInfo[]>, selectedDay: number | null): void {

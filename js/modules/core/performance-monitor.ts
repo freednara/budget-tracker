@@ -5,6 +5,10 @@
 
 const DEV = import.meta.env.DEV;
 
+function isPerfDebugEnabled(): boolean {
+  return DEV && typeof window !== 'undefined' && (window as any).__APP_DEBUG_PERF__ === true;
+}
+
 // ==========================================
 // TYPES AND INTERFACES
 // ==========================================
@@ -143,9 +147,10 @@ export class PerformanceMonitor {
       this.metrics = this.metrics.slice(-this.maxMetrics);
     }
     
-    // Log slow operations
+    // Keep metrics recorded in dev, but only emit noisy slow-operation warnings
+    // when performance debugging is explicitly enabled.
     if (unit === 'ms' && value > 1000) {
-      if (DEV) console.warn(`Slow operation detected: ${name} took ${value.toFixed(2)}ms`);
+      if (isPerfDebugEnabled()) console.warn(`Slow operation detected: ${name} took ${value.toFixed(2)}ms`);
     }
   }
   

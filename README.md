@@ -75,18 +75,25 @@ budget-tracker/
 - **Testing**: Vitest (Unit/Integration) + Playwright (E2E)
 - **Architecture**: Modular DI-driven design
 
+### Enforced Internal Contracts
+
+- State mutations default through [`js/modules/core/state-actions.ts`](/Users/freed/Desktop/Budget%20Tracker/js/modules/core/state-actions.ts), with only a small test-enforced low-level direct-writer allowlist.
+- The transactions ledger surface rerenders through [`js/modules/data/transaction-surface-coordinator.ts`](/Users/freed/Desktop/Budget%20Tracker/js/modules/data/transaction-surface-coordinator.ts), not ad hoc renderer imports across the app.
+- Core/data layer UI bridges are limited to a documented allowlist and pinned by an architecture contract test.
+
 ## 📊 Core Features
 
 ### Financial Management
 - **Envelope Budgeting** - Zero-based budgeting with monthly rollovers
 - **Transaction Tracking** - Optimized filtering via Web Workers
-- **Tiered Data Persistence** - Robust storage with automatic rollback & migration
+- **Tiered Data Persistence** - IndexedDB-first transaction durability with localStorage fallback for compatibility state
 - **Multi-Tab Sync** - Atomic data updates across tabs using BroadcastChannel & Mutex
+- **Import / Restore Safety** - Import, restore, and backup recovery route transaction replacement through the same durable data path used by the app
 
 ### Performance & Reliability
 - **Performance Monitoring** - Real-time tracking of app vitals
 - **Error Boundaries** - Standardized error handling & circuit breakers
-- **Off-Main-Thread Filtering** - Smooth UI even with 10k+ transactions
+- **Off-Main-Thread Filtering** - Web Worker support for heavier transaction filtering workloads
 - **Lazy Loading** - Services are initialized only when needed via DI
 
 ## 🧪 Testing
@@ -102,7 +109,17 @@ npm run test:e2e
 npm run test:coverage
 ```
 
-Current test coverage: **>90%** across 170 tests (8 test files).
+The repository includes both Vitest unit/integration coverage and Playwright end-to-end coverage. Run the commands above to measure the current suite in your environment.
+
+Current enforced guards focus on:
+- durable import / restore behavior
+- cold-start shell interaction readiness for modal-backed controls
+- required browser perf baselines for shell-ready, transactions surface, edit, calendar selection, and dashboard refresh
+- architecture contract checks for transaction-surface ownership, approved direct signal writers, and `.js` import consistency
+
+Advisory-only checks:
+- larger 1k/5k/10k benchmark runs
+- debug telemetry and local investigation tooling
 
 ## 🔒 Security
 
@@ -130,16 +147,17 @@ Current test coverage: **>90%** across 170 tests (8 test files).
 
 ## 📈 Performance
 
-- **Lighthouse Score**: 92/100
-- **Initial Load**: <2 seconds
-- **Time to Interactive**: <3 seconds
-- **Bundle Size**: <500KB (minified + gzipped)
-- **Offline Ready**: 100% functionality
+- Performance characteristics depend on dataset size, browser, and device class.
+- Use debug diagnostics for local investigation, not as a release gate.
+- The required browser perf regression check covers shell-ready, transactions-surface readiness, transaction edit, calendar selection, and dashboard chart refresh.
+- Larger 1k/5k/10k benchmark runs remain advisory local benchmarks for scale testing.
+- Set `PW_PERF_PROFILE=1` to run Playwright against a production-like build instead of the Vite dev server when benchmarking.
+- Offline-ready PWA behavior is supported by the service worker build.
 
 ### Scalability
-- Handles up to **10,000 transactions** smoothly
-- Optimized for **monthly budgets** up to 5 years
-- Support for **unlimited categories** and goals
+- IndexedDB-backed storage keeps larger ledgers usable, but benchmark on target devices instead of relying on a fixed transaction ceiling.
+- Optimized for long-running monthly budgeting history and local-first use.
+- Support for flexible category and goal counts within browser storage limits.
 
 ## 🤝 Contributing
 

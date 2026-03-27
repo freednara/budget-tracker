@@ -13,7 +13,6 @@ import * as signals from '../core/signals.js';
 import { html, render, repeat, styleMap } from '../core/lit-helpers.js';
 import { fmtCur, toCents, toDollars } from '../core/utils.js';
 import { getDebtProgress, DEBT_TYPE_INFO } from '../features/financial/debt-planner.js';
-import { openModal } from '../ui/core/ui.js';
 import DOM from '../core/dom-cache.js';
 import type { Debt, DebtType, DebtTypeInfo } from '../../types/index.js';
 
@@ -80,12 +79,10 @@ export function mountDebtList(): () => void {
 
     if (items.length === 0) {
       render(html`
-        <div class="budget-empty-panel budget-empty-panel--compact">
-          <div>
-            <p class="text-sm font-semibold mb-2" style="color: var(--text-primary);">No debts tracked yet</p>
-            <p class="text-xs mb-3" style="color: var(--text-tertiary);">Add a debt when you want payoff planning and monthly payment pressure in one place.</p>
-            <button class="btn btn-secondary budget-panel-btn budget-panel-btn--ghost text-xs" @click=${() => openModal('debt-modal')}>+ Add Debt</button>
-          </div>
+        <div class="app-panel-empty app-panel-empty--compact">
+          <div class="app-panel-empty__icon">💳</div>
+          <p class="app-panel-empty__title">No debts tracked yet</p>
+          <p class="app-panel-empty__copy">Add a debt when you want payoff planning and monthly payment pressure in one place.</p>
         </div>
       `, container);
 

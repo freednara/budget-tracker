@@ -1,31 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { cleanAppState } from './test-helpers.js';
-
-/**
- * Helper: navigate to the Transactions tab and wait for the form to be ready.
- */
-async function goToTransactions(page: import('@playwright/test').Page) {
-  const transactionsButton = page.locator('#tab-transactions-btn');
-  await expect(transactionsButton).toBeVisible({ timeout: 10000 });
-  await transactionsButton.scrollIntoViewIfNeeded();
-
-  try {
-    await transactionsButton.click({ timeout: 5000 });
-  } catch {
-    await transactionsButton.dispatchEvent('click');
-  }
-
-  try {
-    await expect(transactionsButton).toHaveAttribute('aria-selected', 'true', { timeout: 5000 });
-  } catch {
-    await transactionsButton.dispatchEvent('click');
-    await expect(transactionsButton).toHaveAttribute('aria-selected', 'true', { timeout: 10000 });
-  }
-
-  await expect(transactionsButton).toHaveAttribute('aria-selected', 'true', { timeout: 10000 });
-  await expect(page.locator('#tab-transactions')).toBeVisible({ timeout: 10000 });
-  await expect(page.locator('#amount')).toBeVisible({ timeout: 10000 });
-}
+import { cleanAppState, waitForTransactionsSurfaceReady } from './test-helpers.js';
 
 /**
  * Helper: add an expense transaction with the given amount, description,
@@ -138,7 +112,7 @@ test.describe('Transaction CRUD', () => {
   test.beforeEach(async ({ page }, testInfo) => {
     testInfo.setTimeout(Math.max(testInfo.timeout, 60000));
     await cleanAppState(page);
-    await goToTransactions(page);
+    await waitForTransactionsSurfaceReady(page);
   });
 
   // --------------------------------------------------
@@ -324,7 +298,7 @@ test.describe('Transaction CRUD', () => {
 test.describe('Month Navigation', () => {
   test.beforeEach(async ({ page }) => {
     await cleanAppState(page);
-    await goToTransactions(page);
+    await waitForTransactionsSurfaceReady(page);
   });
 
   test('clicking prev/next month changes the month label', async ({ page }) => {
@@ -375,7 +349,7 @@ test.describe('Month Navigation', () => {
 test.describe('Calendar Tab', () => {
   test.beforeEach(async ({ page }) => {
     await cleanAppState(page);
-    await goToTransactions(page);
+    await waitForTransactionsSurfaceReady(page);
   });
 
   test('selected day can jump into transactions with that date prefilled', async ({ page }) => {
@@ -405,7 +379,7 @@ test.describe('Calendar Tab', () => {
 test.describe('Search and Filter', () => {
   test.beforeEach(async ({ page }) => {
     await cleanAppState(page);
-    await goToTransactions(page);
+    await waitForTransactionsSurfaceReady(page);
   });
 
   test('search by description filters the transaction list', async ({ page }) => {

@@ -11,6 +11,7 @@
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
+    "test:e2e:smoke": "playwright test e2e/transaction-crud.spec.ts e2e/dashboard-layout.spec.ts e2e/data-lifecycle.spec.ts e2e/advanced-resilience.spec.ts --workers=1 --reporter=line",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:debug": "playwright test --debug",
     "typecheck": "tsc --noEmit"

@@ -11,9 +11,10 @@
 
 import { SK, lsGet, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
+import { settings } from '../../core/state-actions.js';
 import { getPrevMonthKey, toCents, toDollars, getMonthKey } from '../../core/utils.js';
 import { calculateMonthlyTotalsWithCacheSync } from '../../core/monthly-totals-cache.js';
-import { on, emit } from '../../core/event-bus.js';
+import { on, emit, createListenerGroup, destroyListenerGroup } from '../../core/event-bus.js';
 import { FeatureEvents, type FeatureResponse } from '../../core/feature-event-interface.js';
 import type {
   RolloverSettings,
@@ -69,10 +70,7 @@ export function isCategoryRolloverEnabled(categoryId: string): boolean {
  * Enable or disable rollover globally
  */
 export function setRolloverEnabled(enabled: boolean): void {
-  signals.rolloverSettings.value = {
-    ...(signals.rolloverSettings.value || DEFAULT_ROLLOVER_SETTINGS),
-    enabled: enabled === true
-  };
+  settings.setRolloverSettings({ enabled: enabled === true });
   persist(SK.ROLLOVER_SETTINGS, signals.rolloverSettings.value);
 }
 
@@ -81,11 +79,7 @@ export function setRolloverEnabled(enabled: boolean): void {
  */
 export function setRolloverMode(mode: RolloverMode): void {
   if (mode !== 'all' && mode !== 'selected') return;
-
-  signals.rolloverSettings.value = {
-    ...(signals.rolloverSettings.value || DEFAULT_ROLLOVER_SETTINGS),
-    mode
-  };
+  settings.setRolloverSettings({ mode });
   persist(SK.ROLLOVER_SETTINGS, signals.rolloverSettings.value);
 }
 
@@ -93,10 +87,9 @@ export function setRolloverMode(mode: RolloverMode): void {
  * Set which categories should rollover (when mode='selected')
  */
 export function setRolloverCategories(categoryIds: string[]): void {
-  signals.rolloverSettings.value = {
-    ...(signals.rolloverSettings.value || DEFAULT_ROLLOVER_SETTINGS),
+  settings.setRolloverSettings({
     categories: Array.isArray(categoryIds) ? categoryIds : []
-  };
+  });
   persist(SK.ROLLOVER_SETTINGS, signals.rolloverSettings.value);
 }
 
@@ -104,8 +97,8 @@ export function setRolloverCategories(categoryIds: string[]): void {
  * Enable rollover for a specific category
  */
 export function setCategoryRollover(categoryId: string, enabled: boolean): void {
-  const settings = signals.rolloverSettings.value || DEFAULT_ROLLOVER_SETTINGS;
-  const categories = new Set(settings.categories || []);
+  const currentSettings = signals.rolloverSettings.value || DEFAULT_ROLLOVER_SETTINGS;
+  const categories = new Set(currentSettings.categories || []);
 
   if (enabled) {
     categories.add(categoryId);
@@ -113,10 +106,7 @@ export function setCategoryRollover(categoryId: string, enabled: boolean): void 
     categories.delete(categoryId);
   }
 
-  signals.rolloverSettings.value = {
-    ...settings,
-    categories: Array.from(categories)
-  };
+  settings.setRolloverSettings({ categories: Array.from(categories) });
   persist(SK.ROLLOVER_SETTINGS, signals.rolloverSettings.value);
 }
 
@@ -124,10 +114,9 @@ export function setCategoryRollover(categoryId: string, enabled: boolean): void 
  * Set maximum rollover amount per category
  */
 export function setMaxRollover(max: number | null | undefined): void {
-  signals.rolloverSettings.value = {
-    ...(signals.rolloverSettings.value || DEFAULT_ROLLOVER_SETTINGS),
+  settings.setRolloverSettings({
     maxRollover: max === null || max === undefined ? null : Math.max(0, parseFloat(String(max)) || 0)
-  };
+  });
   persist(SK.ROLLOVER_SETTINGS, signals.rolloverSettings.value);
 }
 
@@ -136,11 +125,7 @@ export function setMaxRollover(max: number | null | undefined): void {
  */
 export function setNegativeHandling(handling: NegativeHandling): void {
   if (!['zero', 'carry', 'ignore'].includes(handling)) return;
-
-  signals.rolloverSettings.value = {
-    ...(signals.rolloverSettings.value || DEFAULT_ROLLOVER_SETTINGS),
-    negativeHandling: handling
-  };
+  settings.setRolloverSettings({ negativeHandling: handling });
   persist(SK.ROLLOVER_SETTINGS, signals.rolloverSettings.value);
 }
 
@@ -287,14 +272,26 @@ export function getRolloverSummary(monthKey: string): RolloverSummary {
 // INITIALIZATION
 // ==========================================
 
+let rolloverListenerGroupId: string | null = null;
+
+export function cleanupRollover(): void {
+  if (rolloverListenerGroupId) {
+    destroyListenerGroup(rolloverListenerGroupId);
+    rolloverListenerGroupId = null;
+  }
+}
+
 /**
  * Initialize rollover module
  * Loads settings from localStorage
  */
 export function initRollover(): void {
+  cleanupRollover();
+  rolloverListenerGroupId = createListenerGroup('rollover');
+
   // Load settings from localStorage
   const savedSettings = lsGet(SK.ROLLOVER_SETTINGS, null) as RolloverSettings | null;
-  signals.rolloverSettings.value = savedSettings || { ...DEFAULT_ROLLOVER_SETTINGS };
+  settings.setRolloverSettings(savedSettings || { ...DEFAULT_ROLLOVER_SETTINGS });
 
   // Register Feature Event Listeners
   on(FeatureEvents.REQUEST_ROLLOVER_SETTINGS, (data?: { responseEvent?: string }) => {
@@ -304,7 +301,7 @@ export function initRollover(): void {
       result: getRolloverSettings()
     };
     emit(responseEvent, response);
-  });
+  }, { groupId: rolloverListenerGroupId });
 
   on(FeatureEvents.UPDATE_ROLLOVER_SETTINGS, (settings: RolloverSettings) => {
     if (settings.enabled !== undefined) setRolloverEnabled(settings.enabled);
@@ -312,7 +309,7 @@ export function initRollover(): void {
     if (settings.categories) setRolloverCategories(settings.categories);
     if (settings.maxRollover !== undefined) setMaxRollover(settings.maxRollover);
     if (settings.negativeHandling) setNegativeHandling(settings.negativeHandling);
-  });
+  }, { groupId: rolloverListenerGroupId });
 }
 
 // ==========================================

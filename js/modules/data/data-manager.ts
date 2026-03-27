@@ -8,19 +8,27 @@
  */
 
 import { SK, lsGet, lsSet } from '../core/state.js';
-import { parseAmount, generateSecureId } from '../core/utils.js';
+import { parseAmount, generateSecureId, getMonthKey } from '../core/utils.js';
 import { validator } from '../core/validator.js';
 import { emit, Events, on } from '../core/event-bus.js';
 import { storageManager, STORES } from './storage-manager.js';
 import { Mutex } from '../core/mutex.js';
-import { DataSyncEvents, notifyDataSyncComplete, notifyDataSyncError } from '../core/data-sync-interface.js';
+import {
+  DataSyncEvents,
+  notifyDataSyncComplete,
+  notifyDataSyncError,
+  type TransactionDataDelta
+} from '../core/data-sync-interface.js';
 import stateRevision from '../core/state-revision.js';
 import { getTabId } from '../core/tab-id.js';
 import { broadcastManager } from '../core/multi-tab-sync-broadcast.js';
+import { invalidateAllCache, invalidateMonthCache } from '../core/monthly-totals-cache.js';
+import { applyTransactionPatch, replaceTransactionLedger } from '../core/signals.js';
 import type {
   Transaction,
   DataHandler,
-  OperationResult
+  OperationResult,
+  TransactionDataChange
 } from '../../types/index.js';
 
 // ==========================================
@@ -44,6 +52,78 @@ interface StorageStats {
   [key: string]: unknown;
 }
 
+type PersistChange = TransactionDataChange;
+
+function normalizeDeltaChange(change: TransactionDataDelta): PersistChange {
+  return change as PersistChange;
+}
+
+function getChangedIds(change?: PersistChange): string[] {
+  if (!change) return [];
+  if (change.item?.__backendId) return [change.item.__backendId];
+  if (change.items?.length) return change.items.map((item) => item.__backendId);
+  if (change.id) return [change.id];
+  if (change.ids?.length) return [...change.ids];
+  return [];
+}
+
+function invalidateAffectedMonthCaches(currentTransactions: Transaction[], change?: PersistChange): void {
+  if (!change) return;
+
+  const months = new Set<string>();
+  const transactionsById = new Map<string, Transaction>(
+    currentTransactions.map((transaction) => [transaction.__backendId, transaction])
+  );
+  let requiresFullInvalidation = false;
+
+  const maybeAddMonth = (transaction?: Transaction): void => {
+    if (transaction?.date) {
+      months.add(getMonthKey(transaction.date));
+    }
+  };
+
+  maybeAddMonth(change.item);
+  maybeAddMonth(change.previousItem);
+  change.items?.forEach((transaction) => {
+    maybeAddMonth(transaction);
+  });
+
+  if (change.id) {
+    const transaction = transactionsById.get(change.id);
+    if (transaction) {
+      maybeAddMonth(transaction);
+    } else {
+      requiresFullInvalidation = true;
+    }
+  }
+
+  change.ids?.forEach((id) => {
+    const transaction = transactionsById.get(id);
+    if (transaction) {
+      maybeAddMonth(transaction);
+    } else {
+      requiresFullInvalidation = true;
+    }
+  });
+
+  if (requiresFullInvalidation) {
+    invalidateAllCache();
+    return;
+  }
+
+  months.forEach((monthKey) => {
+    invalidateMonthCache(monthKey);
+  });
+}
+
+function getTransactionsFromCacheOrSnapshot(
+  cachedTransactions: Transaction[],
+  hasLoadedTransactions: boolean,
+  fallbackTransactions: Transaction[]
+): Transaction[] {
+  return hasLoadedTransactions ? cachedTransactions : fallbackTransactions;
+}
+
 // ==========================================
 // DATA MANAGER CLASS
 // ==========================================
@@ -60,6 +140,8 @@ export class DataManager {
   private _storageInitialized: boolean = false;
   private _idbWriteFailed: boolean = false;
   private _eventUnsubscribers: Array<() => void> = [];
+  private _transactionsCache: Transaction[] = [];
+  private _hasLoadedTransactions: boolean = false;
 
   constructor() {
     // Properties initialized inline
@@ -120,9 +202,45 @@ export class DataManager {
 
     // Set up event listeners for data sync
     this._eventUnsubscribers.push(
-      on(DataSyncEvents.REQUEST_RELOAD, async ({ source }: { source: string }) => {
-        const transactions = await this.getAll();
-        emit(DataSyncEvents.TRANSACTION_UPDATED, { transactions });
+      on(DataSyncEvents.REQUEST_RELOAD, async ({
+        source,
+        revision,
+        tabId,
+        timestamp
+      }: {
+        source: string;
+        revision?: number;
+        tabId?: string;
+        timestamp?: number;
+      }) => {
+        const transactions = await this._readTransactionsFromStorage();
+        invalidateAllCache();
+        this._transactionsCache = transactions;
+        this._hasLoadedTransactions = true;
+        if (this._handler?.onDataChanged) {
+          this._handler.onDataChanged(transactions);
+        } else {
+          replaceTransactionLedger(transactions);
+        }
+        emit(DataSyncEvents.TRANSACTION_UPDATED, { transactions, source, revision, tabId, timestamp });
+      })
+    );
+
+    this._eventUnsubscribers.push(
+      on(DataSyncEvents.REQUEST_APPLY_DELTA, ({
+        change,
+        source,
+        revision,
+        tabId,
+        timestamp
+      }: {
+        change: TransactionDataDelta;
+        source: string;
+        revision?: number;
+        tabId?: string;
+        timestamp?: number;
+      }) => {
+        this.applyRemoteDelta(normalizeDeltaChange(change), { source, revision, tabId, timestamp });
       })
     );
 
@@ -157,6 +275,8 @@ export class DataManager {
 
     // Load initial data
     const transactions = await this._getTransactions();
+    this._transactionsCache = transactions;
+    this._hasLoadedTransactions = true;
     handler.onDataChanged(transactions);
 
     return { isOk: true };
@@ -198,9 +318,71 @@ export class DataManager {
   syncFromStorage(transactions: Transaction[]): void {
     // Update internal state without triggering storage write
     // since the data is already in storage from another tab
+    invalidateAllCache();
+    this._transactionsCache = transactions;
+    this._hasLoadedTransactions = true;
     if (this._handler) {
       this._handler.onDataChanged(transactions);
+    } else {
+      replaceTransactionLedger(transactions);
     }
+  }
+
+  /**
+   * Clear ephemeral runtime state without touching durable storage.
+   * Reserved for destructive reset/recovery paths.
+   */
+  resetRuntimeState(): void {
+    this._transactionsCache = [];
+    this._hasLoadedTransactions = false;
+    this._idbWriteFailed = false;
+  }
+
+  /**
+   * Replace the full transaction ledger through the durable storage path.
+   * Used by import/restore/recovery flows, not hot CRUD paths.
+   */
+  async replaceAllTransactions(transactions: Transaction[]): Promise<OperationResult<Transaction[]>> {
+    return this._atomicOperation(async (): Promise<OperationResult<Transaction[]>> => {
+      const normalizedTransactions = transactions.map((transaction) => ({
+        ...transaction,
+        amount: parseAmount(transaction.amount)
+      }));
+
+      const ok = await this._persist(normalizedTransactions);
+      if (!ok) {
+        return { isOk: false, error: 'Storage write failed' };
+      }
+
+      return { isOk: true, data: normalizedTransactions };
+    });
+  }
+
+  private applyRemoteDelta(
+    change: PersistChange,
+    metadata: { source: string; revision?: number; tabId?: string; timestamp?: number }
+  ): void {
+    const currentTransactions = getTransactionsFromCacheOrSnapshot(this._transactionsCache, this._hasLoadedTransactions, []);
+    const nextTransactions = this._handler?.onDataPatched
+      ? applyTransactionDelta(currentTransactions, change)
+      : applyTransactionPatch(change);
+    this._transactionsCache = nextTransactions;
+    this._hasLoadedTransactions = true;
+    invalidateAffectedMonthCaches(currentTransactions, change);
+    if (this._handler?.onDataPatched) {
+      this._handler.onDataPatched(change, nextTransactions);
+    } else if (this._handler?.onDataChanged) {
+      this._handler.onDataChanged(nextTransactions);
+    } else {
+      replaceTransactionLedger(nextTransactions);
+    }
+    emit(DataSyncEvents.TRANSACTION_DELTA_APPLIED, {
+      change,
+      source: metadata.source,
+      revision: metadata.revision,
+      tabId: metadata.tabId,
+      timestamp: metadata.timestamp
+    });
   }
 
   /**
@@ -209,14 +391,13 @@ export class DataManager {
    */
   private async _persist(
     transactions: Transaction[],
-    change?: { 
-      type: 'add' | 'update' | 'delete' | 'batch-add' | 'batch-delete' | 'split',
-      item?: Transaction,
-      items?: Transaction[],
-      id?: string,
-      ids?: string[]
-    }
+    change?: PersistChange
   ): Promise<boolean> {
+    const currentTransactions = getTransactionsFromCacheOrSnapshot(
+      this._transactionsCache,
+      this._hasLoadedTransactions,
+      []
+    );
     let lsOk = false;
     let idbOk = false;
     let idbAttempted = false;
@@ -254,10 +435,7 @@ export class DataManager {
               break;
             case 'split':
               if (change.id && change.items) {
-                // Create splits first, then delete original. If creation fails,
-                // the original transaction is preserved (no data loss).
-                await storageManager.updateBatch(STORES.TRANSACTIONS, change.items);
-                await storageManager.delete(STORES.TRANSACTIONS, change.id);
+                await storageManager.replaceTransactionWithSplits(change.id, change.items);
               }
               break;
             default:
@@ -282,14 +460,39 @@ export class DataManager {
     const anyBackendOk = lsOk || (idbAttempted && idbOk);
 
     // 3. Update in-memory state if at least one backend succeeded
-    if (anyBackendOk && this._handler) {
-      this._handler.onDataChanged(transactions);
+    if (anyBackendOk) {
+      this._transactionsCache = transactions;
+      this._hasLoadedTransactions = true;
+    }
+
+    if (anyBackendOk) {
+      if (change && this._handler?.onDataPatched) {
+        this._handler.onDataPatched(change, transactions);
+      } else if (this._handler?.onDataChanged) {
+        this._handler.onDataChanged(transactions);
+      } else {
+        replaceTransactionLedger(transactions);
+      }
     }
 
     if (anyBackendOk) {
       try {
-        await stateRevision.recordStateChange(SK.TX, transactions, getTabId());
-        broadcastManager.sendStateUpdate(SK.TX, transactions);
+        const revision = await stateRevision.recordStateChange(SK.TX, null, getTabId(), {
+          skipChecksum: true
+        });
+        if (change) {
+          stateRevision.recordTransactionDelta(revision.revision, change, getTabId());
+        }
+        if (change) {
+          invalidateAffectedMonthCaches(currentTransactions, change);
+        } else {
+          invalidateAllCache();
+        }
+        broadcastManager.sendStateUpdate(SK.TX, change, {
+          revision: revision.revision,
+          changeType: change?.type || 'reload',
+          changedIds: getChangedIds(change)
+        });
       } catch (error) {
         if (import.meta.env.DEV) {
           console.warn('DataManager: failed to broadcast transaction sync update:', error);
@@ -304,17 +507,39 @@ export class DataManager {
    * Get all transactions from storage (private implementation)
    */
   private async _getTransactions(): Promise<Transaction[]> {
+    if (this._hasLoadedTransactions) {
+      return this._transactionsCache;
+    }
+
+    return this._readTransactionsFromStorage();
+  }
+
+  private async _readTransactionsFromStorage(): Promise<Transaction[]> {
     // If the last IDB write failed, read from localStorage (which has the latest data)
     // to prevent returning stale IDB data
     if (this._storageInitialized && this._useIndexedDB && !this._idbWriteFailed) {
       try {
-        return await storageManager.getAll(STORES.TRANSACTIONS) as Transaction[];
+        const transactions = await storageManager.getAll(STORES.TRANSACTIONS) as Transaction[];
+        this._transactionsCache = transactions;
+        this._hasLoadedTransactions = true;
+        return transactions;
       } catch (err) {
         if (import.meta.env.DEV) console.error('DataManager: IndexedDB read failed, falling back:', err);
       }
     }
     // Fallback to localStorage
-    return lsGet(SK.TX, []) as Transaction[];
+    const transactions = lsGet(SK.TX, []) as Transaction[];
+    this._transactionsCache = transactions;
+    this._hasLoadedTransactions = true;
+    return transactions;
+  }
+
+  private async _getCachedTransactionsForMutation(): Promise<Transaction[]> {
+    if (this._hasLoadedTransactions) {
+      return this._transactionsCache;
+    }
+
+    return this._getTransactions();
   }
 
   /**
@@ -339,7 +564,7 @@ export class DataManager {
     } as Transaction;
 
     return this._atomicOperation(async (): Promise<OperationResult<Transaction>> => {
-      const data = await this._getTransactions();
+      const data = await this._getCachedTransactionsForMutation();
       // Idempotency guard: skip if already persisted (e.g. from a partial retry)
       if (data.some(t => t.__backendId === tx.__backendId)) {
         return { isOk: true, data: tx };
@@ -381,7 +606,7 @@ export class DataManager {
         __backendId: txData.__backendId || `tx_${generateSecureId()}`
       } as Transaction));
 
-      const data = await this._getTransactions();
+      const data = await this._getCachedTransactionsForMutation();
       // Idempotency guard: filter out any items already persisted from a partial retry
       const existingIds = new Set(data.map(t => t.__backendId));
       const toAdd = newTransactions.filter(t => !existingIds.has(t.__backendId));
@@ -415,16 +640,15 @@ export class DataManager {
     const updatedTx: Transaction = { ...tx, amount: parseAmount(tx.amount) };
 
     return this._atomicOperation(async (): Promise<OperationResult<Transaction>> => {
-      // OPTIMIZATION OPPORTUNITY: _getTransactions() loads ALL transactions from storage.
-      // For single-item update, an indexed IDB put() would avoid the full read + linear scan.
-      const data = await this._getTransactions();
+      const data = await this._getCachedTransactionsForMutation();
       const idx = data.findIndex(t => t.__backendId === tx.__backendId);
 
       if (idx >= 0) {
         const newData = [...data];
+        const previousTx = data[idx];
         newData[idx] = updatedTx;
 
-        const ok = await this._persist(newData, { type: 'update', item: updatedTx });
+        const ok = await this._persist(newData, { type: 'update', item: updatedTx, previousItem: previousTx });
         if (!ok) return { isOk: false, error: 'Storage write failed' };
 
         emit(Events.TRANSACTION_UPDATED, updatedTx);
@@ -440,9 +664,7 @@ export class DataManager {
    */
   async delete(tx: Transaction): Promise<OperationResult> {
     return this._atomicOperation(async (): Promise<OperationResult> => {
-      // OPTIMIZATION OPPORTUNITY: _getTransactions() loads ALL transactions from storage.
-      // For single-item delete, an indexed IDB delete() would avoid the full read.
-      const data = await this._getTransactions();
+      const data = await this._getCachedTransactionsForMutation();
       const newData = data.filter(t => t.__backendId !== tx.__backendId);
 
       if (newData.length === data.length) {
@@ -516,7 +738,7 @@ export class DataManager {
     }));
 
     return this._atomicOperation(async (): Promise<OperationResult<SplitResult>> => {
-      const data = await this._getTransactions();
+      const data = await this._getCachedTransactionsForMutation();
       const origIdx = data.findIndex(t => t.__backendId === originalTx.__backendId);
       
       if (origIdx < 0) {
@@ -562,6 +784,33 @@ export class DataManager {
    */
   isUsingIndexedDB(): boolean {
     return this._useIndexedDB;
+  }
+}
+
+function applyTransactionDelta(transactions: Transaction[], change: PersistChange): Transaction[] {
+  switch (change.type) {
+    case 'add':
+      return change.item ? [...transactions, change.item] : transactions;
+    case 'update':
+      return change.item
+        ? transactions.map((transaction) => transaction.__backendId === change.item!.__backendId ? change.item! : transaction)
+        : transactions;
+    case 'delete':
+      return change.id ? transactions.filter((transaction) => transaction.__backendId !== change.id) : transactions;
+    case 'batch-add':
+      return change.items?.length ? [...transactions, ...change.items] : transactions;
+    case 'batch-delete':
+      return change.ids?.length
+        ? transactions.filter((transaction) => !change.ids!.includes(transaction.__backendId))
+        : transactions;
+    case 'split': {
+      const withoutOriginal = change.id
+        ? transactions.filter((transaction) => transaction.__backendId !== change.id)
+        : [...transactions];
+      return change.items?.length ? [...withoutOriginal, ...change.items] : withoutOriginal;
+    }
+    default:
+      return transactions;
   }
 }
 

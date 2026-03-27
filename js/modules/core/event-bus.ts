@@ -15,6 +15,10 @@
 
 const DEV = import.meta.env.DEV;
 
+function isEventDebugEnabled(): boolean {
+  return DEV && typeof window !== 'undefined' && (window as any).__APP_DEBUG_EVENTS__ === true;
+}
+
 // ==========================================
 // TYPE DEFINITIONS
 // ==========================================
@@ -28,6 +32,7 @@ export interface EventSubscription {
   handler: EventHandler;
   unsubscribe: UnsubscribeFn;
   id: string;
+  groupId?: string;
   componentName?: string;
   createdAt: number;
 }
@@ -100,10 +105,10 @@ export function destroyListenerGroup(groupId: string): void {
     return;
   }
   
-  // Unsubscribe all subscriptions in this group
-  group.subscriptions.forEach(subscription => {
-    off(subscription.event, subscription.handler);
-    subscriptions.delete(subscription.id);
+  // Unsubscribe all subscriptions in this group through the canonical removal path
+  const subscriptionIds = group.subscriptions.map((subscription) => subscription.id);
+  subscriptionIds.forEach((subscriptionId) => {
+    removeSubscriptionById(subscriptionId);
   });
   
   listenerGroups.delete(groupId);
@@ -273,6 +278,7 @@ export function on<T = unknown>(
     handler: handler as EventHandler,
     unsubscribe: () => off(event, handler as EventHandler),
     id: subscriptionId,
+    groupId: options?.groupId,
     componentName: options?.componentName,
     createdAt: Date.now()
   };
@@ -294,20 +300,7 @@ export function on<T = unknown>(
   }
   
   return () => {
-    off(event, handler as EventHandler);
-    subscriptions.delete(subscriptionId);
-    totalSubscriptions--;
-    
-    // Remove from group if applicable
-    if (options?.groupId) {
-      const group = listenerGroups.get(options.groupId);
-      if (group) {
-        const index = group.subscriptions.findIndex(s => s.id === subscriptionId);
-        if (index > -1) {
-          group.subscriptions.splice(index, 1);
-        }
-      }
-    }
+    removeSubscriptionById(subscriptionId);
   };
 }
 
@@ -315,17 +308,48 @@ export function on<T = unknown>(
  * Unsubscribe from an event
  */
 export function off(event: string, handler: EventHandler): void {
-  const handlers = listeners.get(event);
-  if (handlers) {
-    handlers.delete(handler); // O(1) Set deletion
+  const subscriptionIds = Array.from(subscriptions.values())
+    .filter((subscription) => subscription.event === event && subscription.handler === handler)
+    .map((subscription) => subscription.id);
 
-    // Clean up empty event sets (but preserve throttle config set at module init)
-    if (handlers.size === 0) {
-      listeners.delete(event);
-      eventMetrics.delete(event);
-      lastEmitTimes.delete(event);
-      // Don't delete throttleDelays — they may have been set at module init
-      // and should persist across subscribe/unsubscribe cycles
+  if (subscriptionIds.length === 0) {
+    detachHandler(event, handler);
+    return;
+  }
+
+  subscriptionIds.forEach((subscriptionId) => {
+    removeSubscriptionById(subscriptionId);
+  });
+}
+
+function detachHandler(event: string, handler: EventHandler): void {
+  const handlers = listeners.get(event);
+  if (!handlers) return;
+
+  handlers.delete(handler);
+
+  if (handlers.size === 0) {
+    listeners.delete(event);
+    eventMetrics.delete(event);
+    lastEmitTimes.delete(event);
+  }
+}
+
+function removeSubscriptionById(subscriptionId: string): void {
+  const subscription = subscriptions.get(subscriptionId);
+  if (!subscription) return;
+
+  detachHandler(subscription.event, subscription.handler);
+  subscriptions.delete(subscriptionId);
+  totalSubscriptions = Math.max(0, totalSubscriptions - 1);
+
+  if (subscription.groupId) {
+    const group = listenerGroups.get(subscription.groupId);
+    if (group) {
+      const index = group.subscriptions.findIndex((entry) => entry.id === subscriptionId);
+      if (index > -1) {
+        group.subscriptions.splice(index, 1);
+      }
     }
   }
 }
@@ -382,7 +406,7 @@ function checkMemoryUsage(): void {
   }
   
   if (oldSubscriptions.length > 20) {
-    if (DEV) console.warn(`Found ${oldSubscriptions.length} old event subscriptions. Potential memory leak.`, {
+    if (isEventDebugEnabled()) console.warn(`Found ${oldSubscriptions.length} old event subscriptions. Potential memory leak.`, {
       componentBreakdown: oldSubscriptions.reduce((acc, sub) => {
         const name = sub.componentName || 'unknown';
         acc[name] = (acc[name] || 0) + 1;
@@ -393,7 +417,7 @@ function checkMemoryUsage(): void {
   
   // Clean up if we have too many total subscriptions
   if (totalSubscriptions > 500) {
-    if (DEV) console.error(`Too many event subscriptions (${totalSubscriptions}). Memory leak detected.`);
+    if (isEventDebugEnabled()) console.error(`Too many event subscriptions (${totalSubscriptions}). Memory leak detected.`);
   }
   
   // Stop monitoring if no subscriptions left
@@ -464,6 +488,7 @@ export const Events = {
   TRANSACTION_ADDED: 'transaction:added',
   TRANSACTIONS_BATCH_ADDED: 'transactions:batch_added',
   TRANSACTION_UPDATED: 'transaction:updated',
+  TRANSACTIONS_REPLACED: 'transactions:replaced',
   TRANSACTION_DELETED: 'transaction:deleted',
   MONTH_CHANGED: 'month:changed',
   BUDGET_UPDATED: 'budget:updated',

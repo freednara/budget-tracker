@@ -17,6 +17,7 @@ import { getTodayStr, parseLocalDate } from '../core/utils.js';
 import DOM from '../core/dom-cache.js';
 import { html, render } from '../core/lit-helpers.js';
 import { effect } from '@preact/signals-core';
+import { renderCategories } from '../ui/core/ui-render.js';
 import type { Transaction } from '../../types/index.js';
 import { revealTransactionsForm } from '../ui/core/ui-navigation.js';
 
@@ -53,6 +54,7 @@ export function startEditing(tx: Transaction): void {
   
   // 4. Finalize
   syncFormWithSignals();
+  renderCategories();
   revealTransactionsForm('amount', true);
 }
 
@@ -80,6 +82,7 @@ export function cancelEditing(): void {
 
   // 3. Finalize
   syncFormWithSignals();
+  renderCategories();
 }
 
 /**

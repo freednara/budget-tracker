@@ -8,10 +8,11 @@
 
 import { SK, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
+import { debts, data } from '../../core/state-actions.js';
 import { toCents, toDollars, parseAmount, generateId, getTodayStr } from '../../core/utils.js';
 import { dataSdk } from '../../data/data-manager.js';
 import { withTransaction, type Operation } from '../../data/transaction-manager.js';
-import { emit, Events, on } from '../../core/event-bus.js';
+import { emit, Events, on, createListenerGroup, destroyListenerGroup } from '../../core/event-bus.js';
 import { FeatureEvents } from '../../core/feature-event-interface.js';
 import type {
   Debt,
@@ -143,7 +144,7 @@ export function addDebt(debtData: DebtData): Debt {
 
   // Use immutable update to trigger signal effects
   const currentDebts = (signals.debts.value as Debt[]) || [];
-  signals.debts.value = [...currentDebts, debt];
+  debts.addDebt(debt);
   persist(SK.DEBTS, signals.debts.value);
 
   emit(Events.DEBT_ADDED, debt);
@@ -168,7 +169,7 @@ export function updateDebt(debtId: string, updates: DebtUpdates): Debt | null {
 
   // Use immutable update to trigger signal effects
   const currentDebts = (signals.debts.value as Debt[]) || [];
-  signals.debts.value = currentDebts.map(d => d.id === debtId ? updatedDebt : d);
+  debts.replaceDebt(debtId, updatedDebt);
   persist(SK.DEBTS, signals.debts.value);
   emit(Events.DEBT_UPDATED, updatedDebt);
   return updatedDebt;
@@ -183,8 +184,7 @@ export function deleteDebt(debtId: string): boolean {
 
   // Use immutable update to trigger signal effects
   const updatedDebt = { ...debt, isActive: false };
-  const currentDebts = (signals.debts.value as Debt[]) || [];
-  signals.debts.value = currentDebts.map(d => d.id === debtId ? updatedDebt : d);
+  debts.replaceDebt(debtId, updatedDebt);
   persist(SK.DEBTS, signals.debts.value);
   emit(Events.DEBT_DELETED, updatedDebt);
   return true;
@@ -199,7 +199,7 @@ export function removeDebt(debtId: string): boolean {
   if (!debtToRemove) return false;
 
   // Use immutable update to trigger signal effects
-  signals.debts.value = currentDebts.filter(d => d.id !== debtId);
+  debts.removeDebt(debtId);
   persist(SK.DEBTS, signals.debts.value);
   emit(Events.DEBT_DELETED, debtToRemove);
   return true;
@@ -267,7 +267,7 @@ class DebtPaymentOperation implements Operation<PaymentResult> {
     };
 
     // Apply update to signals
-    signals.debts.value = currentDebts.map(d => d.id === this.debtId ? this.updatedDebt! : d);
+    debts.replaceDebt(this.debtId, this.updatedDebt!);
     persist(SK.DEBTS, signals.debts.value);
 
     return {
@@ -282,7 +282,7 @@ class DebtPaymentOperation implements Operation<PaymentResult> {
     // Restore original debt state
     if (this.originalDebt) {
       const currentDebts = (signals.debts.value as Debt[]) || [];
-      signals.debts.value = currentDebts.map(d => d.id === this.debtId ? this.originalDebt! : d);
+      debts.replaceDebt(this.debtId, this.originalDebt!);
       persist(SK.DEBTS, signals.debts.value);
     }
 
@@ -870,11 +870,23 @@ export function getMonthlyDebtPayments(): number {
 // INITIALIZATION
 // ==========================================
 
+let debtPlannerListenerGroupId: string | null = null;
+
+export function cleanupDebtPlanner(): void {
+  if (debtPlannerListenerGroupId) {
+    destroyListenerGroup(debtPlannerListenerGroupId);
+    debtPlannerListenerGroupId = null;
+  }
+}
+
 /**
  * Initialize debt planner module and register feature event listeners
  * Ensures the debt payment category exists using proper state management
  */
 export function initDebtPlanner(): void {
+  cleanupDebtPlanner();
+  debtPlannerListenerGroupId = createListenerGroup('debt-planner');
+
   // Register Feature Event Listeners
   // Request: Get all debts
   on(FeatureEvents.REQUEST_DEBTS, (data: any) => {
@@ -883,22 +895,22 @@ export function initDebtPlanner(): void {
       const result = getDebts();
       emit(responseEvent, { type: FeatureEvents.REQUEST_DEBTS, result });
     }
-  });
+  }, { groupId: debtPlannerListenerGroupId });
 
   // Action: Add debt
   on(FeatureEvents.ADD_DEBT, (debt: Debt) => {
     addDebt(debt);
-  });
+  }, { groupId: debtPlannerListenerGroupId });
 
   // Action: Update debt
   on(FeatureEvents.UPDATE_DEBT, (data: { id: string, updates: Partial<Debt> }) => {
     updateDebt(data.id, data.updates);
-  });
+  }, { groupId: debtPlannerListenerGroupId });
 
   // Action: Delete debt
   on(FeatureEvents.DELETE_DEBT, (data: { id: string }) => {
     deleteDebt(data.id);
-  });
+  }, { groupId: debtPlannerListenerGroupId });
 
   // Check if debt_payment category exists in custom categories
   const currentCustomCats = signals.customCats.value || [];
@@ -915,11 +927,10 @@ export function initDebtPlanner(): void {
     };
     
     // Create new array reference to ensure signals trigger properly
-    signals.customCats.value = [...currentCustomCats, newCategory];
+    data.setCustomCategories([...currentCustomCats, newCategory]);
     persist(SK.CUSTOM_CAT, signals.customCats.value);
-    
+
     if (import.meta.env.DEV) console.debug('Created debt payment category with proper signal reactivity');
-    emit(Events.CATEGORY_UPDATED, newCategory);
   }
 
   if (import.meta.env.DEV) console.debug('Debt planner feature events initialized');

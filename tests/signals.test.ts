@@ -21,24 +21,24 @@ function tx(
 }
 
 afterEach(() => {
-  signals.transactions.value = [];
+  signals.replaceTransactionLedger([]);
   signals.currentMonth.value = '2026-03';
 });
 
 describe('currentMonthTotals', () => {
   it('recomputes immediately from live current-month transactions', () => {
     signals.currentMonth.value = '2026-03';
-    signals.transactions.value = [
+    signals.replaceTransactionLedger([
       tx({ type: 'expense', amount: 10, date: '2026-03-05', category: 'food' })
-    ];
+    ]);
 
     expect(signals.currentMonthTotals.value.expenses).toBe(10);
 
-    signals.transactions.value = [
+    signals.replaceTransactionLedger([
       ...signals.transactions.value,
       tx({ type: 'expense', amount: 32.5, date: '2026-03-08', category: 'food' }),
       tx({ type: 'income', amount: 100, date: '2026-03-09', category: 'salary' })
-    ];
+    ]);
 
     expect(signals.currentMonthTotals.value.income).toBe(100);
     expect(signals.currentMonthTotals.value.expenses).toBe(42.5);
@@ -47,7 +47,7 @@ describe('currentMonthTotals', () => {
 
   it('excludes savings transfers from tracked expense totals', () => {
     signals.currentMonth.value = '2026-03';
-    signals.transactions.value = [
+    signals.replaceTransactionLedger([
       tx({ type: 'income', amount: 1000, date: '2026-03-01', category: 'salary' }),
       tx({ type: 'expense', amount: 120, date: '2026-03-04', category: 'food' }),
       tx({
@@ -59,11 +59,46 @@ describe('currentMonthTotals', () => {
         tags: `savings,goal,${SAVINGS_TRANSFER_TAG}`,
         notes: `${SAVINGS_TRANSFER_NOTE_MARKER} Contribution to goal: Emergency Fund [id:goal_1]`
       })
-    ];
+    ]);
 
     expect(signals.currentMonthTotals.value.income).toBe(1000);
     expect(signals.currentMonthTotals.value.expenses).toBe(120);
     expect(signals.currentMonthTotals.value.balance).toBe(880);
     expect(signals.expensesByCategory.value).toEqual({ food: 120 });
+  });
+});
+
+describe('month summary signals', () => {
+  it('tracks active months from month summaries instead of raw historical scans', () => {
+    signals.replaceTransactionLedger([
+      tx({ type: 'income', amount: 1000, date: '2026-01-02', category: 'salary' }),
+      tx({ type: 'expense', amount: 50, date: '2026-03-03', category: 'food' }),
+      tx({
+        type: 'expense',
+        amount: 200,
+        date: '2026-02-03',
+        category: SAVINGS_TRANSFER_CATEGORY_ID,
+        description: 'Savings Transfer: Vacation',
+        tags: `savings,goal,${SAVINGS_TRANSFER_TAG}`,
+        notes: `${SAVINGS_TRANSFER_NOTE_MARKER} Contribution to goal: Vacation [id:goal_2]`
+      })
+    ]);
+
+    expect(signals.activeTransactionMonths.value).toEqual(['2026-01', '2026-03']);
+    expect(signals.monthSummaries.value['2026-03']?.expenses).toBe(50);
+    expect(signals.monthSummaries.value['2026-02']?.expenses).toBe(0);
+  });
+
+  it('updates the current month summary when transactions move between months', () => {
+    signals.currentMonth.value = '2026-03';
+    const movedTx = tx({ type: 'expense', amount: 80, date: '2026-03-11', category: 'food' });
+    signals.replaceTransactionLedger([movedTx]);
+
+    expect(signals.currentMonthSummary.value.expenses).toBe(80);
+
+    signals.replaceTransactionLedger([{ ...movedTx, date: '2026-04-11' }]);
+
+    expect(signals.currentMonthSummary.value.expenses).toBe(0);
+    expect(signals.monthSummaries.value['2026-04']?.expenses).toBe(80);
   });
 });

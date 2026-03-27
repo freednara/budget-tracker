@@ -18,6 +18,11 @@ export interface ServiceMetadata {
   singleton?: boolean;
   lazy?: boolean;
   priority?: number; // For initialization ordering
+  eagerInit?: boolean;
+}
+
+export interface InitializeOptions {
+  services?: string[];
 }
 
 export interface ServiceRegistration<T = any> {
@@ -70,11 +75,13 @@ export class DIContainer {
   private services = new Map<string, ServiceRegistration>();
   private initializers: ServiceInitializer[] = [];
   private initialized = false;
+  private expectedInitializedServices = new Set<string>();
   
   // Enhanced tracking for debugging and performance
   private dependencyGraph = new Map<string, Set<string>>();
   private initializationStats = new Map<string, ServiceStats>();
   private globalResolutionDepth = 0;
+  private lastInitializationWallClockMs = 0;
   
   // Configuration
   private maxResolutionDepth = 50;
@@ -94,6 +101,7 @@ export class DIContainer {
       lazy: true,
       dependencies: [],
       priority: 0,
+      eagerInit: true,
       ...metadata
     };
 
@@ -143,14 +151,21 @@ export class DIContainer {
   /**
    * Register a lazy service factory
    */
-  registerLazy<T>(name: string, loader: () => Promise<T>, dependencies: string[] = []): this {
+  registerLazy<T>(
+    name: string,
+    loader: () => Promise<T>,
+    dependencies: string[] = [],
+    metadata?: Partial<ServiceMetadata>
+  ): this {
     return this.register(name, async (...deps) => {
       const instance = await loader();
       return instance;
     }, { 
       lazy: true, 
       singleton: true, 
-      dependencies 
+      dependencies,
+      eagerInit: true,
+      ...metadata
     });
   }
 
@@ -351,12 +366,13 @@ export class DIContainer {
   /**
    * Initialize all services with dependency-aware ordering
    */
-  async initialize(): Promise<void> {
+  async initialize(options?: InitializeOptions): Promise<void> {
     if (this.initialized) {
       return;
     }
 
     const isDev = typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV;
+    const initStartTime = Date.now();
 
     try {
       if (isDev) console.debug('🚀 Initializing DI Container with dependency resolution...');
@@ -368,9 +384,16 @@ export class DIContainer {
       const depthMap = new Map<number, string[]>();
       const resolved = new Set<string>();
 
+      const explicitlyRequestedServices = options?.services ? new Set(options.services) : null;
+      this.expectedInitializedServices = new Set();
       for (const serviceName of initializationOrder) {
         const registration = this.services.get(serviceName);
         if (!registration?.metadata.lazy || !registration.metadata.singleton) continue;
+        const shouldInitialize = explicitlyRequestedServices
+          ? explicitlyRequestedServices.has(serviceName)
+          : registration.metadata.eagerInit !== false;
+        if (!shouldInitialize) continue;
+        this.expectedInitializedServices.add(serviceName);
 
         // Calculate depth: max depth of dependencies + 1
         const deps = registration.metadata.dependencies || [];
@@ -412,6 +435,7 @@ export class DIContainer {
       }
 
       this.initialized = true;
+      this.lastInitializationWallClockMs = Date.now() - initStartTime;
       if (isDev) {
         console.debug('✨ DI Container initialization completed');
         // Log initialization summary
@@ -480,6 +504,7 @@ export class DIContainer {
     this.services.clear();
     this.initializers = [];
     this.initialized = false;
+    this.expectedInitializedServices.clear();
     this.dependencyGraph.clear();
     this.initializationStats.clear();
     this.globalResolutionDepth = 0;
@@ -581,12 +606,13 @@ export class DIContainer {
 
     const stats = this.getServiceStats();
     const initialized = stats.filter(s => s.initialized);
-    const totalTime = initialized.reduce((sum, s) => sum + (s.initializationTime || 0), 0);
+    const totalSelfTime = initialized.reduce((sum, s) => sum + (s.initializationTime || 0), 0);
 
     console.group('📊 DI Container Statistics');
     console.log(`Total Services: ${stats.length}`);
     console.log(`Initialized: ${initialized.length}`);
-    console.log(`Total Initialization Time: ${totalTime}ms`);
+    console.log(`Initialization Wall Clock: ${this.lastInitializationWallClockMs}ms`);
+    console.log(`Total Service Self Time: ${totalSelfTime}ms`);
 
     if (initialized.length > 0) {
       console.log('🏆 Initialization Times:');
@@ -692,7 +718,13 @@ export class DIContainer {
     // Check for initialization failures
     for (const [serviceName, stats] of this.initializationStats.entries()) {
       const registration = this.services.get(serviceName);
-      if (registration?.metadata.singleton && registration.metadata.lazy && this.initialized && !stats.initialized) {
+      if (
+        registration?.metadata.singleton &&
+        registration.metadata.lazy &&
+        this.initialized &&
+        this.expectedInitializedServices.has(serviceName) &&
+        !stats.initialized
+      ) {
         issues.push(`Service '${serviceName}' should be initialized but is not`);
       }
     }
@@ -761,13 +793,13 @@ export function createDefaultContainer(): DIContainer {
     const { dataSdk } = await import('../data/data-manager.js');
     // Data SDK can use config for initialization settings
     return dataSdk;
-  }, [Services.CONFIG]); // Data SDK depends on config
+  }, [Services.CONFIG], { eagerInit: false }); // Data SDK depends on config
 
   container.registerLazy(Services.SWIPE_MANAGER, async () => {
     const { swipeManager } = await import('../ui/interactions/swipe-manager.js');
     // Swipe manager can use config for gesture settings
     return swipeManager;
-  }, [Services.CONFIG]); // Swipe manager depends on config
+  }, [Services.CONFIG], { eagerInit: false }); // Swipe manager depends on config
 
   // Register formatters with dependencies
   container.registerLazy(Services.CURRENCY_FORMATTER, async () => {
@@ -784,33 +816,35 @@ export function createDefaultContainer(): DIContainer {
   container.registerLazy(Services.EMPTY_STATE, async () => {
     const { emptyState } = await import('../ui/core/empty-state.js');
     return emptyState;
-  }); // No dependencies
+  }, [], { eagerInit: false }); // No dependencies
 
   container.registerLazy(Services.RENDER_CATEGORIES, async () => {
     const { renderCategories } = await import('../ui/core/ui-render.js');
     return renderCategories;
-  }, [Services.CONFIG, Services.CURRENCY_FORMATTER]); // Depends on config and currency formatter
+  }, [Services.CONFIG, Services.CURRENCY_FORMATTER], { eagerInit: false }); // Depends on config and currency formatter
 
   container.registerLazy(Services.RENDER_TRANSACTIONS, async () => {
-    const { renderTransactionsList } = await import('../data/transaction-renderer.js');
-    return renderTransactionsList;
-  }, [Services.CONFIG, Services.CURRENCY_FORMATTER, Services.VALIDATOR]); // Multiple dependencies
+    const { refreshTransactionsSurface } = await import('../data/transaction-surface-coordinator.js');
+    return (resetPage?: boolean): void => {
+      void refreshTransactionsSurface({ resetPage });
+    };
+  }, [Services.CONFIG, Services.CURRENCY_FORMATTER, Services.VALIDATOR], { eagerInit: false }); // Multiple dependencies
 
   // Register navigation services with dependencies
   container.registerLazy(Services.SWITCH_TAB, async () => {
     const { switchTab } = await import('../ui/core/ui-navigation.js');
     return switchTab;
-  }, [Services.CONFIG]); // May need timing config
+  }, [Services.CONFIG], { eagerInit: false }); // May need timing config
 
   container.registerLazy(Services.SWITCH_MAIN_TAB, async () => {
     const { switchMainTab } = await import('../ui/core/ui-navigation.js');
     return switchMainTab;
-  }, [Services.CONFIG]); // May need timing config
+  }, [Services.CONFIG], { eagerInit: false }); // May need timing config
 
   container.registerLazy(Services.INSIGHTS_GENERATOR, async () => {
     const { generateInsights } = await import('../features/personalization/insights.js');
     return generateInsights;
-  }, [Services.CONFIG, Services.DATA_SDK]);
+  }, [Services.CONFIG, Services.DATA_SDK], { eagerInit: false });
 
   // Register service priority (higher numbers initialize first)
   container.register(Services.CONFIG, async () => {
@@ -830,7 +864,8 @@ export function createDefaultContainer(): DIContainer {
   }, {
     dependencies: [Services.CONFIG, Services.VALIDATOR, Services.DATA_SDK],
     singleton: true,
-    lazy: true
+    lazy: true,
+    eagerInit: false
   });
 
   return container;

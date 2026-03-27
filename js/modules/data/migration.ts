@@ -60,11 +60,17 @@ interface MigrationResult {
   error?: string;
 }
 
+interface StorageSnapshot extends Record<string, unknown> {
+  _meta?: unknown;
+  _exportErrors?: Record<string, string>;
+}
+
 // ==========================================
 // MIGRATION STATUS
 // ==========================================
 
 const MIGRATION_KEY = 'budget_tracker_idb_migration';
+const ROLLBACK_FAILURE_KEY = 'budget_tracker_storage_rollback_failed';
 
 // ==========================================
 // MIGRATION MANAGER CLASS
@@ -128,6 +134,7 @@ export class MigrationManager {
     // Create backup snapshot before migration
     const backupKey = `budget_tracker_backup_${Date.now()}`;
     const migrationBackup = this._createBackupSnapshot();
+    let indexedDbBackup: StorageSnapshot | null = null;
     
     try {
       progressCallback({ phase: 'reading', progress: 0 });
@@ -138,6 +145,22 @@ export class MigrationManager {
       } catch (e) {
         if (import.meta.env.DEV) console.error('Could not create migration backup, aborting migration');
         return { isOk: false, error: 'Failed to create backup before migration' };
+      }
+
+      // Snapshot IndexedDB before any destructive steps so we can restore it first on failure
+      try {
+        indexedDbBackup = await storageManager.exportAll() as StorageSnapshot;
+        if (indexedDbBackup._exportErrors && Object.keys(indexedDbBackup._exportErrors).length > 0) {
+          throw new Error('Failed to capture a complete IndexedDB snapshot before migration');
+        }
+      } catch (snapshotErr) {
+        if (import.meta.env.DEV) console.error('Could not snapshot IndexedDB before migration:', snapshotErr);
+        progressCallback({
+          phase: 'error',
+          progress: 0,
+          error: 'Failed to snapshot IndexedDB before migration'
+        });
+        return { isOk: false, error: 'Failed to snapshot IndexedDB before migration' };
       }
 
       // Read all localStorage data
@@ -162,9 +185,14 @@ export class MigrationManager {
       // to prevent duplicate key errors on objectStore.add()
       try {
         await storageManager.clear(STORES.TRANSACTIONS);
+        await storageManager.clear(STORES.SETTINGS);
         await storageManager.clear(STORES.SAVINGS_GOALS);
         await storageManager.clear(STORES.SAVINGS_CONTRIBUTIONS);
         await storageManager.clear(STORES.MONTHLY_ALLOCATIONS);
+        await storageManager.clear(STORES.ACHIEVEMENTS);
+        await storageManager.clear(STORES.STREAK);
+        await storageManager.clear(STORES.CUSTOM_CATEGORIES);
+        await storageManager.clear(STORES.DEBTS);
         await storageManager.clear(STORES.FILTER_PRESETS);
         await storageManager.clear(STORES.TX_TEMPLATES);
       } catch {
@@ -312,13 +340,32 @@ export class MigrationManager {
 
       // Attempt to restore from backup
       try {
-        const backupData = localStorage.getItem(backupKey);
-        if (backupData) {
-          this._restoreFromBackup(JSON.parse(backupData));
-          if (import.meta.env.DEV) console.log('Migration rollback: restored from backup');
+        if (indexedDbBackup) {
+          const importableData: Record<string, unknown> = { ...indexedDbBackup };
+          delete importableData._meta;
+          delete importableData._exportErrors;
+          const restoredIndexedDb = await storageManager.importAll(importableData, true);
+          if (restoredIndexedDb) {
+            if (import.meta.env.DEV) console.log('Migration rollback: restored IndexedDB snapshot');
+          } else {
+            throw new Error('Failed to restore IndexedDB snapshot during migration rollback');
+          }
         }
       } catch (restoreErr) {
-        if (import.meta.env.DEV) console.error('Migration rollback also failed:', restoreErr);
+        if (import.meta.env.DEV) console.error('IndexedDB rollback failed, restoring localStorage backup:', restoreErr);
+        try {
+          const backupData = localStorage.getItem(backupKey);
+          if (backupData) {
+            this._restoreFromBackup(JSON.parse(backupData));
+            localStorage.setItem(ROLLBACK_FAILURE_KEY, JSON.stringify({
+              reason: 'migration_indexeddb_restore_failed',
+              timestamp: Date.now()
+            }));
+            if (import.meta.env.DEV) console.log('Migration rollback: restored from localStorage backup');
+          }
+        } catch (localRestoreErr) {
+          if (import.meta.env.DEV) console.error('Migration rollback also failed:', localRestoreErr);
+        }
       }
 
       progressCallback({ phase: 'error', progress: 0, error: errorMsg });
@@ -392,43 +439,76 @@ export class MigrationManager {
     }
   }
 
+  private _normalizeForComparison(value: unknown): unknown {
+    if (Array.isArray(value)) {
+      return value.map((item) => this._normalizeForComparison(item)).sort((left, right) =>
+        JSON.stringify(left).localeCompare(JSON.stringify(right))
+      );
+    }
+
+    if (value && typeof value === 'object') {
+      const entries = Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, itemValue]) => [key, this._normalizeForComparison(itemValue)]);
+      return Object.fromEntries(entries);
+    }
+
+    return value;
+  }
+
+  private _valuesEqual(left: unknown, right: unknown): boolean {
+    return JSON.stringify(this._normalizeForComparison(left)) === JSON.stringify(this._normalizeForComparison(right));
+  }
+
   /**
    * Verify migration was successful
    */
   private async _verifyMigration(originalData: LocalStorageData): Promise<boolean> {
     try {
-      // Verify transaction count
-      const txCount = await storageManager.countTransactions();
-      const origTxCount = (originalData.transactions || []).length;
+      const expectedStoreValues: Array<[typeof STORES[keyof typeof STORES], unknown]> = [
+        [STORES.TRANSACTIONS, originalData.transactions || []],
+        [STORES.SAVINGS_GOALS, Object.entries(originalData.savingsGoals || {}).map(([id, goal]) => ({ ...goal, id }))],
+        [STORES.SAVINGS_CONTRIBUTIONS, originalData.savingsContribs || []],
+        [STORES.MONTHLY_ALLOCATIONS, Object.entries(originalData.monthlyAlloc || {}).map(([monthKey, data]) => ({ monthKey, ...data }))],
+        [STORES.ACHIEVEMENTS, Object.entries(originalData.achievements || {}).map(([id, data]) => ({ id, ...(data as Record<string, unknown>) }))],
+        [STORES.STREAK, originalData.streak ? [{ ...(originalData.streak as unknown as Record<string, unknown>), id: 'current' }] : []],
+        [STORES.CUSTOM_CATEGORIES, originalData.customCats || []],
+        [STORES.DEBTS, originalData.debts || []],
+        [STORES.FILTER_PRESETS, originalData.filterPresets || []],
+        [STORES.TX_TEMPLATES, originalData.txTemplates || []]
+      ];
 
-      if (txCount !== origTxCount) {
-        if (import.meta.env.DEV) console.error(`Transaction count mismatch: ${txCount} vs ${origTxCount}`);
-        return false;
+      for (const [storeName, expected] of expectedStoreValues) {
+        const actual = await storageManager.getAll(storeName);
+        if (!this._valuesEqual(actual, expected)) {
+          if (import.meta.env.DEV) console.error(`Migration verification mismatch for store ${storeName}`);
+          return false;
+        }
       }
 
-      // Spot check random transactions across different indices for better corruption detection
-      const origTx = originalData.transactions;
-      if (origTx && origTx.length > 0) {
-        const sampleCount = Math.min(5, origTx.length);
-        // Pick evenly-spaced indices to cover different parts of the dataset
-        const indices = new Set<number>();
-        for (let i = 0; i < sampleCount; i++) {
-          const idx = Math.floor((i / sampleCount) * origTx.length + Math.random() * (origTx.length / sampleCount));
-          indices.add(Math.min(idx, origTx.length - 1));
-        }
-        // If we got fewer unique indices than desired, add random ones
-        while (indices.size < sampleCount) {
-          indices.add(Math.floor(Math.random() * origTx.length));
-        }
+      const expectedSettings: Array<[string, unknown]> = [
+        ['rolloverSettings', originalData.rolloverSettings],
+        ['currency', originalData.currency],
+        ['theme', originalData.theme],
+        ['pin', originalData.pin],
+        ['sections', originalData.sections],
+        ['insightPersonality', originalData.insightPers],
+        ['alerts', originalData.alerts]
+      ];
 
-        for (const sampleIdx of indices) {
-          const sample = origTx[sampleIdx];
-          const retrieved = await storageManager.get(STORES.TRANSACTIONS, sample.__backendId) as Transaction | undefined;
-
-          if (!retrieved || retrieved.amount !== sample.amount) {
-            if (import.meta.env.DEV) console.error(`Transaction spot check failed at index ${sampleIdx} (id: ${sample.__backendId})`);
+      for (const [key, expected] of expectedSettings) {
+        const actual = await storageManager.get(STORES.SETTINGS, key);
+        if (expected === null || expected === undefined) {
+          if (actual !== undefined) {
+            if (import.meta.env.DEV) console.error(`Migration verification mismatch for setting ${key}`);
             return false;
           }
+          continue;
+        }
+
+        if (!this._valuesEqual(actual, expected)) {
+          if (import.meta.env.DEV) console.error(`Migration verification mismatch for setting ${key}`);
+          return false;
         }
       }
 

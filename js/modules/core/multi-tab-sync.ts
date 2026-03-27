@@ -10,10 +10,11 @@
 
 import { SK, lsGet, lsSet } from './state.js';
 import * as signals from './signals.js';
+import { syncState } from './state-actions.js';
 import { debounce } from './utils.js';
-import { DataSyncEvents, requestDataReload, requestDataSync } from './data-sync-interface.js';
+import { DataSyncEvents, requestDataApplyDelta, requestDataReload, type TransactionDataDelta } from './data-sync-interface.js';
 import { broadcastManager, type AtomicSyncBundle } from './multi-tab-sync-broadcast.js';
-import { on } from './event-bus.js';
+import { on, Events } from './event-bus.js';
 import { 
   hasActiveUserInteraction
 } from './multi-tab-sync-conflicts.js';
@@ -34,6 +35,7 @@ let syncEnabled = true;
 const debouncedSyncHandlers = new Map<string, Function>();
 const atomicBundleTimeout = 5000;
 const eventUnsubscribers: Array<() => void> = [];
+const broadcastUnsubscribers: Array<() => void> = [];
 
 const COUPLED_STATE_GROUPS = {
   FINANCIAL_CORE: [SK.TX, SK.SAVINGS, SK.ALLOC],
@@ -49,31 +51,40 @@ const COUPLED_STATE_GROUPS = {
  * Initialize all broadcast message handlers
  */
 function setupBroadcastHandlers(): void {
-  broadcastManager.on('state_update', (msg) => {
-    if (msg.key && msg.value !== undefined) {
-      handleRemoteStateUpdate(msg.key, msg.value);
-    }
-  });
+  broadcastUnsubscribers.forEach((unsubscribe) => unsubscribe());
+  broadcastUnsubscribers.length = 0;
 
-  broadcastManager.on('atomic_sync', (msg) => {
+  broadcastUnsubscribers.push(broadcastManager.on('state_update', (msg) => {
+    if (msg.key) {
+      handleRemoteStateUpdate(msg.key, msg.value, {
+        revision: msg.revision,
+        changedIds: msg.changedIds,
+        changeType: msg.changeType,
+        tabId: msg.tabId,
+        timestamp: msg.timestamp
+      });
+    }
+  }));
+
+  broadcastUnsubscribers.push(broadcastManager.on('atomic_sync', (msg) => {
     if (msg.atomicBundle) {
       handleAtomicSync(msg.atomicBundle);
     }
-  });
+  }));
 
-  broadcastManager.on('full_sync', () => {
+  broadcastUnsubscribers.push(broadcastManager.on('full_sync', () => {
     if (!isUserActive()) {
       performFullSync();
     } else {
       broadcastManager.sendConflictWarning('full_sync', getUserActivity());
     }
-  });
+  }));
 
-  broadcastManager.on('conflict_warning', (msg) => {
+  broadcastUnsubscribers.push(broadcastManager.on('conflict_warning', (msg) => {
     if (msg.userActivity?.isTyping) {
       showToast(`Another tab is editing ${msg.userActivity.activeField || 'data'}.`, 'warning');
     }
-  });
+  }));
 }
 
 /**
@@ -110,15 +121,35 @@ function handleAtomicSync(bundle: AtomicSyncBundle): void {
 // SYNC LOGIC
 // ==========================================
 
-const latestSyncValues = new Map<string, unknown>();
+interface RemoteSyncPayload {
+  value: unknown;
+  revision?: number;
+  changedIds?: string[];
+  changeType?: string;
+  tabId?: string;
+  timestamp?: number;
+}
 
-function handleRemoteStateUpdate(key: string, value: unknown): void {
-  latestSyncValues.set(key, value);
+const latestSyncValues = new Map<string, RemoteSyncPayload>();
+
+function handleRemoteStateUpdate(
+  key: string,
+  value: unknown,
+  metadata: { revision?: number; changedIds?: string[]; changeType?: string; tabId?: string; timestamp?: number } = {}
+): void {
+  latestSyncValues.set(key, {
+    value,
+    revision: metadata.revision,
+    changedIds: metadata.changedIds,
+    changeType: metadata.changeType,
+    tabId: metadata.tabId,
+    timestamp: metadata.timestamp
+  });
   if (!debouncedSyncHandlers.has(key)) {
     debouncedSyncHandlers.set(key, debounce(() => {
       const latestValue = latestSyncValues.get(key);
-      if (latestValue !== undefined) {
-        updateLocalState(key, latestValue);
+      if (latestValue) {
+        updateLocalState(key, latestValue.value, latestValue);
         latestSyncValues.delete(key);
       }
     }, 100));
@@ -126,35 +157,105 @@ function handleRemoteStateUpdate(key: string, value: unknown): void {
   debouncedSyncHandlers.get(key)!();
 }
 
-function updateLocalState(key: string, value: unknown): void {
+function updateLocalState(
+  key: string,
+  value: unknown,
+  metadata?: { revision?: number; changedIds?: string[]; changeType?: string; tabId?: string; timestamp?: number }
+): void {
   const prevSyncState = syncEnabled;
   syncEnabled = false;
 
   try {
     switch (key) {
-      case SK.TX:
-        signals.transactions.value = value as Transaction[];
-        requestDataSync(value as Transaction[], 'multi-tab-sync');
+      case SK.TX: {
+        const remoteRevision = metadata?.revision;
+        const localRevision = stateRevision.getKeyRevision(SK.TX);
+
+        if (remoteRevision && localRevision && remoteRevision <= localRevision.revision) {
+          return;
+        }
+
+        const canApplyDelta = isTransactionDelta(value)
+          && typeof remoteRevision === 'number'
+          && !!localRevision
+          && remoteRevision === localRevision.revision + 1;
+
+        if (canApplyDelta) {
+          requestDataApplyDelta(value as TransactionDataDelta, 'multi-tab-sync', {
+            revision: remoteRevision,
+            tabId: metadata?.tabId,
+            timestamp: metadata?.timestamp
+          });
+        } else if (
+          isTransactionDelta(value)
+          && typeof remoteRevision === 'number'
+          && localRevision
+          && remoteRevision > localRevision.revision + 1
+        ) {
+          const replay = stateRevision.getTransactionDeltaReplay(localRevision.revision, remoteRevision);
+          if (replay && replay.length > 0) {
+            replay.forEach((change, index) => {
+              requestDataApplyDelta(change, 'multi-tab-sync', {
+                revision: localRevision.revision + index + 1,
+                tabId: metadata?.tabId,
+                timestamp: metadata?.timestamp
+              });
+            });
+          } else {
+            requestDataReload('multi-tab-sync', {
+              revision: remoteRevision,
+              tabId: metadata?.tabId,
+              timestamp: metadata?.timestamp
+            });
+          }
+        } else {
+          requestDataReload('multi-tab-sync', {
+            revision: remoteRevision,
+            tabId: metadata?.tabId,
+            timestamp: metadata?.timestamp
+          });
+        }
         break;
+      }
       case SK.SAVINGS:
-        signals.savingsGoals.value = value as Record<string, SavingsGoal>;
+        syncState.applyKeyUpdate(SK.SAVINGS, value as Record<string, SavingsGoal>);
         break;
       case SK.ALLOC:
-        signals.monthlyAlloc.value = value as Record<string, MonthlyAllocation>;
+        syncState.applyKeyUpdate(SK.ALLOC, value as Record<string, MonthlyAllocation>);
         break;
       case SK.CUSTOM_CAT:
-        signals.customCats.value = value as CustomCategory[];
+        syncState.applyKeyUpdate(SK.CUSTOM_CAT, value as CustomCategory[]);
         break;
       case SK.DEBTS:
-        signals.debts.value = value as Debt[];
+        syncState.applyKeyUpdate(SK.DEBTS, value as Debt[]);
         break;
       case SK.ROLLOVER_SETTINGS:
-        signals.rolloverSettings.value = value as any;
+        syncState.applyKeyUpdate(SK.ROLLOVER_SETTINGS, value);
         break;
     }
   } finally {
     syncEnabled = prevSyncState;
   }
+}
+
+function isTransactionDelta(value: unknown): value is TransactionDataDelta {
+  if (!value || typeof value !== 'object') return false;
+  const type = (value as { type?: string }).type;
+  return ['add', 'update', 'delete', 'batch-add', 'batch-delete', 'split'].includes(type || '');
+}
+
+function buildRemoteRevision(
+  key: string,
+  metadata?: { revision?: number; tabId?: string; timestamp?: number }
+): { revision: number; timestamp: number; logicalClock: number; tabId: string; key: string } | null {
+  if (!metadata?.revision) return null;
+  return {
+    revision: metadata.revision,
+    timestamp: metadata.timestamp || Date.now(),
+    logicalClock: metadata.revision,
+    tabId: metadata.tabId || 'remote-tab',
+    key
+  };
 }
 
 /**
@@ -244,6 +345,7 @@ function showConflictModal(bundle: AtomicSyncBundle): void {
 // ==========================================
 
 export function initMultiTabSync(): void {
+  cleanup();
   stateRevision.init();
   broadcastManager.init();
   setupBroadcastHandlers();
@@ -251,17 +353,53 @@ export function initMultiTabSync(): void {
   eventUnsubscribers.forEach(unsub => unsub());
   eventUnsubscribers.length = 0;
   eventUnsubscribers.push(
-    on(DataSyncEvents.TRANSACTION_UPDATED, (payload: { transactions?: Transaction[] }) => {
+    on(DataSyncEvents.TRANSACTION_UPDATED, (payload: {
+      transactions?: Transaction[];
+      source?: string;
+      revision?: number;
+      tabId?: string;
+      timestamp?: number;
+    }) => {
       if (!payload.transactions) return;
 
       const prevSyncState = syncEnabled;
       syncEnabled = false;
 
       try {
-        signals.transactions.value = payload.transactions;
+        signals.replaceTransactionLedger(payload.transactions);
+        if (payload.source === 'multi-tab-sync') {
+          const remoteRevision = buildRemoteRevision(SK.TX, payload);
+          if (remoteRevision) stateRevision.markKeySynced(SK.TX, remoteRevision as any);
+        }
       } finally {
         syncEnabled = prevSyncState;
       }
+    })
+  );
+  eventUnsubscribers.push(
+    on(DataSyncEvents.TRANSACTION_DELTA_APPLIED, (payload: {
+      source?: string;
+      revision?: number;
+      tabId?: string;
+      timestamp?: number;
+    }) => {
+      if (payload.source !== 'multi-tab-sync') return;
+      const remoteRevision = buildRemoteRevision(SK.TX, payload);
+      if (remoteRevision) stateRevision.markKeySynced(SK.TX, remoteRevision as any);
+    })
+  );
+  eventUnsubscribers.push(
+    on(Events.STORAGE_SYNC, (payload: {
+      type?: string;
+      store?: string;
+    }) => {
+      if (!payload?.store) return;
+      if (payload.store !== 'transactions' && payload.store !== 'all') return;
+      if (payload.type === 'clear' && payload.store === 'all') {
+        requestDataReload('multi-tab-sync');
+        return;
+      }
+      requestDataReload('multi-tab-sync');
     })
   );
   
@@ -281,12 +419,16 @@ export function initMultiTabSync(): void {
     if (!document.hidden) performFullSync();
   };
   document.addEventListener('visibilitychange', visibilityHandler);
+
+  performFullSync();
 }
 
 let storageHandler: ((e: StorageEvent) => void) | null = null;
 let visibilityHandler: (() => void) | null = null;
 
 export function cleanup(): void {
+  broadcastUnsubscribers.forEach((unsubscribe) => unsubscribe());
+  broadcastUnsubscribers.length = 0;
   broadcastManager.dispose();
   debouncedSyncHandlers.clear();
   latestSyncValues.clear();

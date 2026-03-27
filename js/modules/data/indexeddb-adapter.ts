@@ -477,21 +477,50 @@ export class IndexedDBAdapter extends StorageAdapter {
     });
   }
 
+  async replaceTransactionWithSplits(originalId: string, splits: Transaction[]): Promise<boolean> {
+    return new Promise((resolve, reject) => {
+      try {
+        if (!this.db) {
+          resolve(false);
+          return;
+        }
+
+        const transaction = this.db.transaction([STORES.TRANSACTIONS], 'readwrite');
+        const objectStore = transaction.objectStore(STORES.TRANSACTIONS);
+
+        splits.forEach((split) => {
+          objectStore.put(split);
+        });
+        objectStore.delete(originalId);
+
+        transaction.oncomplete = () => resolve(true);
+        transaction.onerror = () => reject(transaction.error ?? new Error('IndexedDB split replacement failed'));
+        transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB split replacement aborted'));
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
   // ==========================================
   // EXPORT/IMPORT OPERATIONS
   // ==========================================
 
   async exportAll(): Promise<Record<string, unknown>> {
     const data: Record<string, unknown> = {};
+    const exportErrors: Record<string, string> = {};
 
     // Export all stores
     for (const storeName of Object.values(STORES)) {
       try {
         data[storeName] = await this.getAll(storeName as StoreName);
-      } catch (err) {
-        if (import.meta.env.DEV) console.warn(`Failed to export ${storeName}:`, err);
-        data[storeName] = [];
+      } catch (error) {
+        exportErrors[storeName] = error instanceof Error ? error.message : String(error);
       }
+    }
+
+    if (Object.keys(exportErrors).length > 0) {
+      data._exportErrors = exportErrors;
     }
 
     return data;

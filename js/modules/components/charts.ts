@@ -10,7 +10,11 @@
 
 import { effect } from '@preact/signals-core';
 import * as signals from '../core/signals.js';
-import { updateCharts as updateChartsImpl } from '../ui/core/ui-render.js';
+import {
+  updateTrendChart,
+  updateCategoryBreakdownChart,
+  updateBudgetVsActualChart
+} from '../ui/core/ui-render.js';
 import DOM from '../core/dom-cache.js';
 
 // ==========================================
@@ -25,21 +29,41 @@ import DOM from '../core/dom-cache.js';
 export function mountCharts(): () => void {
   const trendContainer = DOM.get('trend-chart-container');
   const donutContainer = DOM.get('donut-chart-container');
+  const budgetActualContainer = DOM.get('budget-actual-chart');
 
   // If no chart containers exist, no cleanup needed
-  if (!trendContainer && !donutContainer) {
+  if (!trendContainer && !donutContainer && !budgetActualContainer) {
     return () => {};
   }
 
-  const cleanup = effect(() => {
-    // Read signals to establish dependency tracking
-    const _month = signals.currentMonth.value;
-    const _txCount = signals.transactions.value.length;
-    const _alloc = signals.monthlyAlloc.value;
+  const cleanups: Array<() => void> = [];
 
-    // Re-render charts when any of these signals change
-    updateChartsImpl();
-  });
+  if (trendContainer) {
+    cleanups.push(effect(() => {
+      const _month = signals.currentMonth.value;
+      const _summaries = signals.monthSummaries.value;
+      updateTrendChart();
+    }));
+  }
 
-  return cleanup;
+  if (donutContainer) {
+    cleanups.push(effect(() => {
+      const _month = signals.currentMonth.value;
+      const _summary = signals.currentMonthSummary.value;
+      updateCategoryBreakdownChart();
+    }));
+  }
+
+  if (budgetActualContainer) {
+    cleanups.push(effect(() => {
+      const monthKey = signals.currentMonth.value;
+      const _summary = signals.currentMonthSummary.value;
+      const _alloc = signals.monthlyAlloc.value[monthKey] || {};
+      updateBudgetVsActualChart();
+    }));
+  }
+
+  return () => {
+    cleanups.forEach((cleanup) => cleanup());
+  };
 }

@@ -138,6 +138,12 @@ let renderCategoriesFn: (() => void) | null = null;
 let isSubmitting = false;
 let eventGroupId: string | null = null;
 let formBinderInstance: FormBinder | null = null;
+let boundFormElement: HTMLFormElement | null = null;
+let boundCancelEditButton: HTMLElement | null = null;
+
+const handleCancelEditClick = (): void => {
+  if (cancelEditingFn) cancelEditingFn();
+};
 
 // ==========================================
 // REACTIVE FORM BINDING
@@ -174,6 +180,20 @@ export function cleanupReactiveForm(): void {
     destroyListenerGroup(eventGroupId);
     eventGroupId = null;
   }
+}
+
+export function cleanupFormEvents(): void {
+  if (boundFormElement) {
+    boundFormElement.removeEventListener('submit', handleFormSubmit);
+    boundFormElement = null;
+  }
+
+  if (boundCancelEditButton) {
+    boundCancelEditButton.removeEventListener('click', handleCancelEditClick);
+    boundCancelEditButton = null;
+  }
+
+  cleanupReactiveForm();
 }
 
 /**
@@ -219,16 +239,16 @@ export function initFormEvents(callbacks: FormEventCallbacks): void {
   if (callbacks.cancelEditing) cancelEditingFn = callbacks.cancelEditing;
   if (callbacks.renderCategories) renderCategoriesFn = callbacks.renderCategories;
 
+  cleanupFormEvents();
   initReactiveForm();
 
-  const formEl = DOM.get('transaction-form') as HTMLFormElement | null;
-  if (formEl) {
-    formEl.addEventListener('submit', handleFormSubmit);
+  boundFormElement = DOM.get('transaction-form') as HTMLFormElement | null;
+  if (boundFormElement) {
+    boundFormElement.addEventListener('submit', handleFormSubmit);
   }
 
-  DOM.get('cancel-edit-btn')?.addEventListener('click', () => {
-    if (cancelEditingFn) cancelEditingFn();
-  });
+  boundCancelEditButton = DOM.get('cancel-edit-btn');
+  boundCancelEditButton?.addEventListener('click', handleCancelEditClick);
 }
 
 // ==========================================
@@ -447,6 +467,7 @@ export default {
   handleFormSubmit,
   resetForm,
   initReactiveForm,
+  cleanupFormEvents,
   cleanupReactiveForm,
   validateFormReactive
 };

@@ -9,6 +9,7 @@ import { SK, lsGet, normalizeAlertPrefs } from './state.js';
 import * as signals from './signals.js';
 import { safeStorage } from './safe-storage.js';
 import { batch } from '@preact/signals-core';
+import { invalidateAllCache } from './monthly-totals-cache.js';
 import type { Transaction } from '../../types/index.js';
 
 // ==========================================
@@ -72,6 +73,10 @@ const SIGNAL_MAPPINGS = {
     signal: signals.txTemplates,
     transformer: (value: unknown) => value as typeof signals.txTemplates.value
   },
+  [SK.LAST_BACKUP]: {
+    signal: signals.lastBackup,
+    transformer: (value: unknown) => Number(value) || 0
+  },
   [SK.SECTIONS]: {
     signal: signals.sections,
     transformer: (value: unknown) => value as typeof signals.sections.value
@@ -110,9 +115,13 @@ export function hydrateAllSignals(): void {
 /**
  * Hydrate signals from import state data
  * @param importData - The imported state data object
+ * @param transactions - The authoritative imported transaction ledger when available
  * FIXED: Uses batch() for atomic consistency
  */
-export function hydrateFromImport(importData: Record<string, unknown>): void {
+export function hydrateFromImport(
+  importData: Record<string, unknown>,
+  transactions?: Transaction[]
+): void {
   // Build reverse mapping: property name -> storage key
   const propertyToStorageKey: Record<string, string> = {
     savingsGoals: SK.SAVINGS,
@@ -128,6 +137,7 @@ export function hydrateFromImport(importData: Record<string, unknown>): void {
     insightPers: SK.INSIGHT_PERS,
     filterPresets: SK.FILTER_PRESETS,
     txTemplates: SK.TX_TEMPLATES,
+    lastBackup: SK.LAST_BACKUP,
     sections: SK.SECTIONS,
     theme: SK.THEME
   };
@@ -149,10 +159,10 @@ export function hydrateFromImport(importData: Record<string, unknown>): void {
         }
       }
     }
-
-    // Always reload transactions from storage after import
-    const transactions = safeStorage.getJSON<Transaction[]>(SK.TX, []);
-    signals.transactions.value = transactions;
+    invalidateAllCache();
+    if (transactions) {
+      signals.replaceTransactionLedger(transactions);
+    }
   });
 }
 

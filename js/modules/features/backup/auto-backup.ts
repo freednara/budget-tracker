@@ -11,7 +11,19 @@ import { downloadBlob } from '../../core/utils-dom.js';
 import { showToast } from '../../ui/core/ui.js';
 import { generateId, getTodayStr } from '../../core/utils-pure.js';
 import { trackError } from '../../core/error-tracker.js';
-import type { Transaction, SavingsGoal, CustomCategory } from '../../../types/index.js';
+import { safeStorage } from '../../core/safe-storage.js';
+import { hydrateFromImport } from '../../core/state-hydration.js';
+import { buildImportState, tryAtomicWrite } from '../import-export/import-export.js';
+import { setTheme } from '../personalization/theme.js';
+import { emit, Events } from '../../core/event-bus.js';
+import { dataSdk } from '../../data/data-manager.js';
+import {
+  storeBackup,
+  getAllBackups as getIndexedDbBackups,
+  getBackup as getIndexedDbBackup,
+  deleteBackup as deleteIndexedDbBackup
+} from './indexeddb-backup-store.js';
+import type { Transaction, SavingsGoal, CustomCategory, Theme } from '../../../types/index.js';
 
 // ==========================================
 // TYPES
@@ -62,10 +74,8 @@ interface BackupStatus {
 // CONSTANTS
 // ==========================================
 
-const BACKUP_STORAGE_KEY = 'budget_tracker_auto_backups';
 const BACKUP_SCHEDULE_KEY = 'budget_tracker_backup_schedule';
 const BACKUP_STATUS_KEY = 'budget_tracker_backup_status';
-const MAX_LOCAL_BACKUPS = 10;
 const BACKUP_VERSION = '2.0';
 const DEVICE_ID = getOrCreateDeviceId();
 
@@ -111,7 +121,12 @@ export async function createBackup(manual: boolean = false): Promise<BackupData 
           currency: signals.currency.value,
           rolloverSettings: signals.rolloverSettings.value,
           achievements: signals.achievements.value,
-          streak: signals.streak.value
+          streak: signals.streak.value,
+          theme: signals.theme.value,
+          sections: signals.sections.value,
+          insightPersonality: signals.insightPers.value,
+          lastBackup: signals.lastBackup.value,
+          lastBackupTxCount: signals.lastBackupTxCount.value
         },
         // Include additional data
         filterPresets: lsGet(SK.FILTER_PRESETS, []),
@@ -133,7 +148,7 @@ export async function createBackup(manual: boolean = false): Promise<BackupData 
     // data isn't persisted. The metadata.compressed flag stays false.
 
     // Store backup locally
-    await storeBackupLocally(backupData);
+    await storeBackup(backupData);
     
     // Update status
     backupStatus.inProgress = false;
@@ -173,25 +188,44 @@ export async function createBackup(manual: boolean = false): Promise<BackupData 
   }
 }
 
-/**
- * Store backup locally
- */
-async function storeBackupLocally(backup: BackupData): Promise<void> {
-  const backups = lsGet<BackupData[]>(BACKUP_STORAGE_KEY, []);
-  
-  // Add new backup
-  backups.push(backup);
-  
-  // Sort by timestamp (newest first)
-  backups.sort((a, b) => b.metadata.timestamp - a.metadata.timestamp);
-  
-  // Trim to max count
-  if (backups.length > MAX_LOCAL_BACKUPS) {
-    backups.splice(MAX_LOCAL_BACKUPS);
-  }
-  
-  // Save
-  lsSet(BACKUP_STORAGE_KEY, backups);
+function snapshotStorageKeys(keys: string[]): Array<{ key: string; raw: string | null }> {
+  return keys.map((key) => ({
+    key,
+    raw: safeStorage.getItem(key)
+  }));
+}
+
+function restoreStorageSnapshot(snapshot: Array<{ key: string; raw: string | null }>): void {
+  snapshot.forEach(({ key, raw }) => {
+    if (raw === null) {
+      safeStorage.removeItem(key);
+    } else {
+      localStorage.setItem(key, raw);
+    }
+  });
+}
+
+function normalizeBackupForImport(backup: BackupData): Record<string, unknown> {
+  const settings = backup.data.settings || {};
+  return {
+    transactions: backup.data.transactions || [],
+    savingsGoals: backup.data.savingsGoals || {},
+    savingsContributions: backup.data.savingsContributions || [],
+    monthlyAllocations: backup.data.monthlyAllocations || {},
+    customCategories: backup.data.customCategories || [],
+    debts: backup.data.debts || [],
+    currency: settings.currency,
+    rolloverSettings: settings.rolloverSettings,
+    achievements: settings.achievements,
+    streak: settings.streak,
+    sections: settings.sections,
+    theme: settings.theme,
+    insightPersonality: settings.insightPersonality,
+    filterPresets: backup.data.filterPresets || [],
+    txTemplates: backup.data.txTemplates || [],
+    alertPrefs: backup.data.alerts || {},
+    lastBackup: settings.lastBackup ?? null
+  };
 }
 
 // ==========================================
@@ -203,8 +237,7 @@ async function storeBackupLocally(backup: BackupData): Promise<void> {
  */
 export async function restoreBackup(backupId: string): Promise<boolean> {
   try {
-    const backups = lsGet<BackupData[]>(BACKUP_STORAGE_KEY, []);
-    const backup = backups.find(b => b.metadata.id === backupId);
+    const backup = await getIndexedDbBackup(backupId);
     
     if (!backup) {
       throw new Error('Backup not found');
@@ -225,35 +258,37 @@ export async function restoreBackup(backupId: string): Promise<boolean> {
     }
     
     // Create a backup of current data before restoring
-    await createBackup(true);
-    
-    // Restore data -- persist transactions to localStorage so they survive reload
-    // (IndexedDB is synced from localStorage by the storage manager)
-    signals.transactions.value = backup.data.transactions;
-    lsSet(SK.TX, backup.data.transactions);
-    signals.savingsGoals.value = backup.data.savingsGoals;
-    signals.monthlyAlloc.value = backup.data.monthlyAllocations;
-    signals.customCats.value = backup.data.customCategories;
-    signals.debts.value = backup.data.debts;
-    
-    // Restore settings
-    if (backup.data.settings) {
-      signals.currency.value = backup.data.settings.currency;
-      signals.rolloverSettings.value = backup.data.settings.rolloverSettings;
-      signals.achievements.value = backup.data.settings.achievements;
-      signals.streak.value = backup.data.settings.streak;
+    const safetyBackup = await createBackup(true);
+    if (!safetyBackup) {
+      throw new Error('Failed to create safety backup before restore');
     }
+
+    const importData = normalizeBackupForImport(backup);
+    const transactions = (importData.transactions || []) as Transaction[];
+    const { newS, writes, theme } = buildImportState(importData, 'overwrite', transactions);
+    const snapshot = snapshotStorageKeys(writes.map(({ key }) => key));
+
+    if (!(await tryAtomicWrite(writes))) {
+      throw new Error('Storage write failed');
+    }
+
+    const replaceResult = await dataSdk.replaceAllTransactions(transactions);
+    if (!replaceResult.isOk) {
+      restoreStorageSnapshot(snapshot);
+      throw new Error(replaceResult.error || 'Storage write failed');
+    }
+
+    hydrateFromImport(newS, transactions);
+    if (theme) {
+      setTheme(theme as Theme);
+    }
+
+    const restoredBackupTxCount = Number(backup.data.settings?.lastBackupTxCount ?? 0) || 0;
+    signals.lastBackupTxCount.value = restoredBackupTxCount;
+    safeStorage.setJSON('backup_reminder_last_tx_count', restoredBackupTxCount);
     
-    // Restore additional data
-    lsSet(SK.FILTER_PRESETS, backup.data.filterPresets || []);
-    lsSet(SK.TX_TEMPLATES, backup.data.txTemplates || []);
-    lsSet(SK.SAVINGS_CONTRIB, backup.data.savingsContributions || []);
-    lsSet(SK.ALERTS, backup.data.alerts || {});
-    
+    emit(Events.DATA_IMPORTED);
     showToast('Backup restored successfully', 'success');
-    
-    // Trigger UI refresh
-    window.dispatchEvent(new CustomEvent('data-restored'));
     
     return true;
     
@@ -374,8 +409,7 @@ export async function exportBackup(backupId?: string): Promise<void> {
     let backup: BackupData | null;
     
     if (backupId) {
-      const backups = lsGet<BackupData[]>(BACKUP_STORAGE_KEY, []);
-      backup = backups.find(b => b.metadata.id === backupId) || null;
+      backup = await getIndexedDbBackup(backupId);
     } else {
       // Create new backup
       backup = await createBackup(true);
@@ -416,7 +450,7 @@ export async function importBackup(file: File): Promise<boolean> {
     }
     
     // Store the backup
-    await storeBackupLocally(backup);
+    await storeBackup(backup);
     
     showToast('Backup imported successfully', 'success');
     
@@ -666,22 +700,17 @@ function saveBackupStatus(): void {
 /**
  * Get all backups
  */
-export function getAllBackups(): BackupData[] {
-  return lsGet<BackupData[]>(BACKUP_STORAGE_KEY, []);
+export async function getAllBackups(): Promise<BackupData[]> {
+  return getIndexedDbBackups();
 }
 
 /**
  * Delete a backup
  */
-export function deleteBackup(backupId: string): boolean {
+export async function deleteBackup(backupId: string): Promise<boolean> {
   try {
-    const backups = lsGet<BackupData[]>(BACKUP_STORAGE_KEY, []);
-    const index = backups.findIndex(b => b.metadata.id === backupId);
-    
-    if (index === -1) return false;
-    
-    backups.splice(index, 1);
-    lsSet(BACKUP_STORAGE_KEY, backups);
+    const deleted = await deleteIndexedDbBackup(backupId);
+    if (!deleted) return false;
     
     showToast('Backup deleted', 'info');
     return true;

@@ -8,7 +8,7 @@
 import { getDefaultContainer, Services, DIContainer } from '../core/di-container.js';
 import { unmountAll } from '../core/effect-manager.js';
 import { initDashboard } from './dashboard.js';
-import { initAppEvents } from './app-events.js';
+import { initAppEvents, cleanupAppEvents } from './app-events.js';
 import { loadSampleData } from './sample-data.js';
 import { initTheme } from '../features/personalization/theme.js';
 import { startOnboarding } from '../features/personalization/onboarding.js';
@@ -17,15 +17,14 @@ import * as signals from '../core/signals.js';
 import { dataSdk } from '../data/data-manager.js';
 import { migrationManager } from '../data/migration.js';
 import { showToast } from '../ui/core/ui.js';
-import { updateCharts } from '../ui/core/ui-render.js';
-import { renderTransactionsList } from '../data/transaction-renderer.js';
-import { renderTemplates } from '../transactions/template-manager.js';
 import { DOM } from '../core/dom-cache.js';
-import { initMultiTabSync } from '../core/multi-tab-sync.js';
-import { initShellNavigation } from '../ui/core/ui-navigation.js';
+import { initMultiTabSync, cleanup as cleanupMultiTabSync } from '../core/multi-tab-sync.js';
+import { initShellNavigation, cleanupShellNavigation } from '../ui/core/ui-navigation.js';
 import * as filterEv from '../ui/interactions/filter-events.js';
 import * as formEv from '../ui/interactions/form-events.js';
 import * as keyboardEv from '../ui/interactions/keyboard-events.js';
+import { on, Events } from '../core/event-bus.js';
+import { DataSyncEvents, type TransactionDataDelta } from '../core/data-sync-interface.js';
 // Dynamic imports will be resolved from DI container
 
 // ==========================================
@@ -34,12 +33,28 @@ import * as keyboardEv from '../ui/interactions/keyboard-events.js';
 
 // Global registry for component cleanup functions
 const componentCleanupRegistry: (() => void)[] = [];
+const deferredTaskCleanupRegistry: Array<() => void> = [];
 
 /**
  * Register a cleanup function for proper disposal
  */
 function registerCleanup(cleanup: () => void): void {
   componentCleanupRegistry.push(cleanup);
+}
+
+function registerDeferredTaskCleanup(cleanup: () => void): void {
+  deferredTaskCleanupRegistry.push(cleanup);
+}
+
+function cleanupDeferredInteractiveWork(): void {
+  const pendingCleanups = deferredTaskCleanupRegistry.splice(0, deferredTaskCleanupRegistry.length);
+  pendingCleanups.forEach((cleanup) => {
+    try {
+      cleanup();
+    } catch (error) {
+      if (import.meta.env.DEV) console.error('Error cancelling deferred startup work:', error);
+    }
+  });
 }
 
 /**
@@ -80,12 +95,51 @@ const initStatus: InitializationStatus = {
 function setStartupProgress(step: string): void {
   (window as any).__APP_STARTUP_PROGRESS__ = step;
   document.documentElement.dataset.appStartupProgress = step;
-  if (import.meta.env.DEV) console.log(`[startup] ${step}`);
+  if (import.meta.env.DEV && typeof window !== 'undefined' && (window as any).__APP_DEBUG_STARTUP__ === true) {
+    console.log(`[startup] ${step}`);
+  }
 }
 
 function setShellReadyState(isReady: boolean): void {
   (window as any).__APP_SHELL_READY__ = isReady;
   document.documentElement.dataset.appShellReady = isReady ? 'true' : 'false';
+}
+
+function setInteractiveReadyState(isReady: boolean): void {
+  (window as any).__APP_INTERACTIVE_READY__ = isReady;
+  document.documentElement.dataset.appInteractiveReady = isReady ? 'true' : 'false';
+}
+
+function setBackgroundReadyState(isReady: boolean): void {
+  (window as any).__APP_BACKGROUND_READY__ = isReady;
+  document.documentElement.dataset.appBackgroundReady = isReady ? 'true' : 'false';
+}
+
+function recordDeferredStartupFailure(errorLabel: string, error: unknown): void {
+  if (import.meta.env.DEV) console.error(errorLabel, error);
+  const normalizedError = error instanceof Error ? error : new Error(String(error));
+  initStatus.errors.push(normalizedError);
+  const deferredErrors = Array.isArray((window as any).__APP_DEFERRED_ERRORS__)
+    ? (window as any).__APP_DEFERRED_ERRORS__
+    : [];
+  deferredErrors.push({
+    label: errorLabel,
+    message: normalizedError.message,
+    timestamp: Date.now()
+  });
+  (window as any).__APP_DEFERRED_ERRORS__ = deferredErrors;
+}
+
+function createBackgroundTaskTracker(totalTasks: number): (step: string) => void {
+  let remainingTasks = totalTasks;
+  return (step: string) => {
+    setStartupProgress(step);
+    remainingTasks--;
+    if (remainingTasks <= 0) {
+      setBackgroundReadyState(true);
+      setStartupProgress('initialize:background-ready');
+    }
+  };
 }
 
 // ==========================================
@@ -97,8 +151,12 @@ function setShellReadyState(isReady: boolean): void {
  */
 export async function initializeApp(): Promise<InitializationStatus> {
   try {
+    cleanupDeferredInteractiveWork();
     setShellReadyState(false);
+    setInteractiveReadyState(false);
+    setBackgroundReadyState(false);
     setStartupProgress('initialize:start');
+    (window as any).__APP_DEFERRED_ERRORS__ = [];
 
     // Get DI container
     const container = getDefaultContainer();
@@ -106,34 +164,18 @@ export async function initializeApp(): Promise<InitializationStatus> {
 
     // Bind the static shell before DI/data startup so visible tabs are immediately interactive.
     initShellNavigation();
+    registerCleanup(cleanupShellNavigation);
     setStartupProgress('initialize:shell-navigation-bound');
 
-    // Initialize all services
-    await container.initialize();
+    // Initialize only shell-critical services on the blocking path.
+    await container.initialize({
+      services: [Services.CONFIG, Services.CURRENCY_FORMATTER, Services.GET_TODAY_STR]
+    });
     setStartupProgress('initialize:container-ready');
 
     // Initialize theme first (affects UI)
     registerCleanup(initTheme());
     setStartupProgress('initialize:theme-ready');
-
-    // Initialize onboarding
-    const { initOnboarding } = await import('../features/personalization/onboarding.js');
-    initOnboarding();
-    setStartupProgress('initialize:onboarding-ready');
-
-    // Initialize alerts
-    const { initAlerts } = await import('../features/personalization/alerts.js');
-    registerCleanup(initAlerts());
-    setStartupProgress('initialize:alerts-ready');
-
-    // Initialize budget rollover system
-    const { initRollover } = await import('../features/financial/rollover.js');
-    initRollover();
-    setStartupProgress('initialize:rollover-ready');
-
-    // Initialize multi-tab synchronization
-    initMultiTabSync();
-    setStartupProgress('initialize:multi-tab-ready');
 
     // Check PIN lock
     const pinHandlers = await import('../ui/widgets/pin-ui-handlers.js');
@@ -152,70 +194,80 @@ export async function initializeApp(): Promise<InitializationStatus> {
 
     // Initialize data layer
     const initResult = await dataSdk.init({
-      onDataChanged: async (transactions) => {
-        signals.transactions.value = transactions;
-
-        // OPTIMIZATION: Sync worker dataset in background
-        const { syncWorkerDataset, shouldUseWorker } = await import('./worker-manager.js');
-        if (shouldUseWorker(transactions.length)) {
-          syncWorkerDataset(transactions).catch((err: unknown) =>
-            { if (import.meta.env.DEV) console.warn('Worker sync failed:', err); }
-          );
-        }
+      onDataChanged: (transactions) => {
+        signals.replaceTransactionLedger(transactions);
+      },
+      onDataPatched: (change) => {
+        signals.applyTransactionPatch(change);
       }
     });
     setStartupProgress('initialize:data-ready');
-
-    // Check if migration from localStorage to IndexedDB is needed
-    if (await migrationManager.needsMigration()) {
-      setStartupProgress('initialize:migration-start');
-      showToast('Upgrading database...', 'info');
-      const migrationResult = await migrationManager.migrate((progress) => {
-        if (progress.phase === 'migrating') {
-          if (import.meta.env.DEV) console.log(`Migration progress: ${Math.round(progress.progress)}%`);
-        }
-      });
-
-      if (migrationResult.isOk) {
-        showToast('Database upgrade complete!', 'success');
-      } else {
-        if (import.meta.env.DEV) console.error('Migration failed:', migrationResult.error);
-        showToast('Database upgrade deferred', 'warning');
-      }
-    }
-    setStartupProgress('initialize:migration-ready');
 
     if (!initResult.isOk) {
       throw new Error('Failed to initialize data layer');
     }
 
-    // Process recurring transactions
-    // Note: transactions already loaded by dataSdk.init() via onDataChanged callback
-    const { processRecurringTemplates } = await import('../data/recurring-templates.js');
-    const generatedCount = await processRecurringTemplates();
-    if (generatedCount > 0) {
-      showToast(`Generated ${generatedCount} recurring transaction${generatedCount === 1 ? '' : 's'}`, 'info');
-    }
-    setStartupProgress('initialize:recurring-ready');
-
-    // Always run post-onboarding initialization to attach event listeners and mount components
-    // UI elements like tabs and buttons need their listeners regardless of onboarding status
-    await postOnboardingInit();
-    setStartupProgress('initialize:post-onboarding-ready');
-
-    // Shell-ready means the visible app is interactive, even if slower follow-up work remains.
+    const savedTab = lsGet('budget_tracker_active_tab', 'dashboard') as string;
+    await initializeShellVisibleControls();
+    await initializeShellCriticalSurface(savedTab);
     setShellReadyState(true);
     setStartupProgress('initialize:shell-ready');
 
-    // Check for onboarding
     const onboardingState = lsGet(SK.ONBOARD, { completed: false, step: 0 }) as { completed: boolean; step: number };
     const hasCompletedOnboarding = onboardingState.completed;
     const hasTransactions = signals.transactions.value.length > 0;
 
-    if (!hasCompletedOnboarding && !hasTransactions) {
-      // Start onboarding tour
-      startOnboarding();
-    }
+    await postOnboardingInit(savedTab, hasTransactions);
+    setInteractiveReadyState(true);
+    setStartupProgress('initialize:interactive-ready');
+
+    const completeBackgroundTask = createBackgroundTaskTracker(4);
+
+    scheduleDeferredInteractiveWork(async (isCancelled) => {
+      const { initOnboarding } = await import('../features/personalization/onboarding.js');
+      if (isCancelled()) return;
+      initOnboarding();
+      const { cleanupOnboarding } = await import('../features/personalization/onboarding.js');
+      registerCleanup(cleanupOnboarding);
+
+      const { initAlerts } = await import('../features/personalization/alerts.js');
+      if (isCancelled()) return;
+      registerCleanup(initAlerts());
+
+      const { initRollover, cleanupRollover } = await import('../features/financial/rollover.js');
+      if (isCancelled()) return;
+      initRollover();
+      registerCleanup(cleanupRollover);
+
+      if (!hasCompletedOnboarding && !hasTransactions) {
+        startOnboarding();
+      }
+      completeBackgroundTask('deferred:onboarding-alerts-ready');
+    }, 'Deferred onboarding/alerts init failed');
+
+    scheduleDeferredInteractiveWork(async (isCancelled) => {
+      if (await migrationManager.needsMigration()) {
+        if (isCancelled()) return;
+        setStartupProgress('initialize:migration-start');
+        showToast('Upgrading database...', 'info');
+        const migrationResult = await migrationManager.migrate((progress) => {
+          if (progress.phase === 'migrating' && import.meta.env.DEV && (window as any).__APP_DEBUG_STARTUP__ === true) {
+            console.log(`Migration progress: ${Math.round(progress.progress)}%`);
+          }
+        });
+
+        if (isCancelled()) return;
+        if (migrationResult.isOk) {
+          showToast('Database upgrade complete!', 'success');
+        } else {
+          if (import.meta.env.DEV) console.error('Migration failed:', migrationResult.error);
+          showToast('Database upgrade deferred', 'warning');
+        }
+      }
+      completeBackgroundTask('initialize:migration-ready');
+    }, 'Deferred migration init failed');
+
+    scheduleBackgroundInitialization(hasTransactions, savedTab, completeBackgroundTask);
 
     initStatus.initialized = true;
     return initStatus;
@@ -224,6 +276,8 @@ export async function initializeApp(): Promise<InitializationStatus> {
     if (import.meta.env.DEV) console.error('Application initialization failed:', error);
     initStatus.errors.push(error as Error);
     setShellReadyState(false);
+    setInteractiveReadyState(false);
+    setBackgroundReadyState(false);
     
     // Show error to user
     showToast('Failed to initialize application', 'error');
@@ -235,34 +289,78 @@ export async function initializeApp(): Promise<InitializationStatus> {
 /**
  * Post-onboarding initialization
  */
-async function postOnboardingInit(): Promise<void> {
-  setStartupProgress('post:init-start');
-  // Initialize lazy loading system first for optimal performance
-  const { initLazyLoading } = await import('../core/lazy-loader.js');
-  initLazyLoading();
-  setStartupProgress('post:lazy-loader-ready');
+async function initializeShellCriticalSurface(savedTab: string): Promise<void> {
+  const { renderMonthNav } = await import('../ui/core/ui-render.js');
+  const { switchMainTab } = await import('../ui/core/ui-navigation.js');
 
-  // Import legacy functions
-  const { renderTransactionsList } = await import('../data/transaction-renderer.js');
-  const { switchMainTab, switchTab, setRenderQuickShortcutsFn } = await import('../ui/core/ui-navigation.js');
-  const { openModal } = await import('../ui/core/ui.js');
-  const emptyStateModule = await import('../ui/core/empty-state.js');
-  const { mountEditUI } = await import('../transactions/edit-mode.js');
-  setStartupProgress('post:core-imports-ready');
-  // updateReconcileCount is now handled via signals
-  const { renderMonthNav, renderCategories, renderQuickShortcuts, populateCategoryFilter } = await import('../ui/core/ui-render.js');
+  renderMonthNav();
 
-  // Initialize empty state handlers
-  emptyStateModule.init();
-  emptyStateModule.setSwitchMainTabFn(switchMainTab as (tabName: string) => void);
-  emptyStateModule.setOpenModalFn((modalId: string) => openModal(modalId));
-  emptyStateModule.setLoadSampleDataFn(async () => {
-    await loadSampleData();
+  const validTabs = ['dashboard', 'budget', 'transactions', 'calendar'];
+  const initialTab = (validTabs.includes(savedTab) ? savedTab : 'dashboard') as any;
+  switchMainTab(initialTab);
+  setStartupProgress('initialize:shell-surface-ready');
+}
+
+async function initializeShellVisibleControls(): Promise<void> {
+  setStartupProgress('initialize:modal-surface-start');
+
+  const { mountModals } = await import('../components/mount-modals.js');
+  const modalContainer = DOM.get('modal-container');
+  if (modalContainer) {
+    registerCleanup(mountModals(modalContainer));
+  }
+
+  const modalEv = await import('../ui/interactions/modal-events.js');
+  modalEv.initModalEvents({
+    fmtCur: (v: number) => signals.currency.value.symbol + v.toFixed(2),
+    renderSavingsGoals: () => {},
+    updateSummary: () => {},
+    renderCustomCatsList: () => {
+      import('../ui/core/ui-render.js').then((m) => m.renderCustomCatsList());
+    },
+    refreshAll: () => {
+      signals.refreshVersion.value++;
+    },
+    resetForm: async () => {
+      const { resetForm } = await import('../ui/interactions/form-events.js');
+      resetForm();
+    },
+    startEditing: async (tx) => {
+      const { startEditing } = await import('../transactions/index.js');
+      startEditing(tx);
+    },
+    loadSampleData: () => loadSampleData()
   });
-  setStartupProgress('post:empty-state-ready');
+  registerCleanup(modalEv.cleanupModalEvents);
+
+  const importExportEv = await import('../features/import-export/import-export-events.js');
+  importExportEv.initImportExportEvents({
+    fmtCur: (v: number) => signals.currency.value.symbol + v.toFixed(2)
+  });
+  registerCleanup(importExportEv.cleanupImportExportEvents);
+  import('../ui/components/async-modal.js').then(({ confirmDataOperation }) => {
+    importExportEv.setImportConfirmFn(confirmDataOperation);
+  });
+
+  setStartupProgress('initialize:modal-surface-ready');
+}
+
+async function postOnboardingInit(savedTab: string, hasTransactions: boolean): Promise<void> {
+  setStartupProgress('post:init-start');
+  await getDefaultContainer().resolve(Services.SWIPE_MANAGER);
+  const { refreshTransactionsSurface, initTransactionSurfaceCoordinator } = await import('../data/transaction-surface-coordinator.js');
+  const { switchMainTab, switchTab, setRenderQuickShortcutsFn } = await import('../ui/core/ui-navigation.js');
+  const { mountEditUI } = await import('../transactions/edit-mode.js');
+  const { render, html } = await import('../core/lit-helpers.js');
+  setStartupProgress('post:core-imports-ready');
+  const { renderMonthNav, renderCategories, renderQuickShortcuts, populateCategoryFilter } = await import('../ui/core/ui-render.js');
 
   // Critical-path UI modules needed for basic navigation and transaction entry.
   setStartupProgress('post:filter-events-imported');
+
+  initMultiTabSync();
+  registerCleanup(cleanupMultiTabSync);
+  setStartupProgress('initialize:multi-tab-ready');
 
   import('../ui/components/async-modal.js').then(({ promptTextInput }) => {
     filterEv.setFilterPromptFn(promptTextInput);
@@ -280,6 +378,7 @@ async function postOnboardingInit(): Promise<void> {
       sm?.closeAll();
     }
   });
+  registerCleanup(filterEv.cleanupFilterEvents);
   setStartupProgress('post:filter-events-ready');
 
   // Initialize form events (transaction form submission)
@@ -291,6 +390,7 @@ async function postOnboardingInit(): Promise<void> {
     },
     renderCategories: () => renderCategories()
   });
+  registerCleanup(formEv.cleanupFormEvents);
   setStartupProgress('post:form-events-ready');
 
   // Initialize keyboard shortcuts
@@ -309,75 +409,7 @@ async function postOnboardingInit(): Promise<void> {
     renderCategories: () => renderCategories()
   }));
   setStartupProgress('post:keyboard-ready');
-
-  // Note: All dashboard and core UI components (charts, gauges, etc.) are now 
-  // automatically mounted via lazy-loader.ts using either high-priority loading 
-  // or intersection observers for off-screen components.
-  
-  // Initialize reactive dashboard (legacy compatibility)
-  const cleanupDashboard = initDashboard();
-  registerCleanup(cleanupDashboard);
-  setStartupProgress('post:dashboard-ready');
-
-  // Initialize app events (only for non-reactive components)
-  initAppEvents({
-    updateReconcileCount: () => {}, // Handled via signals
-    renderTransactions: () => {
-      void renderTransactionsList();
-    },
-    renderWeeklyRollup: () => {}, // Handled via signals/mountWeeklyRollup
-    updateInsights: () => {}, // Handled via signals/mountInsights
-    checkAlerts: async () => {
-      const { checkAlerts } = await import('../features/personalization/alerts.js');
-      checkAlerts();
-    },
-    renderMonthComparison: async () => {
-      const { renderMonthComparison } = await import('../ui/charts/analytics-ui.js');
-      renderMonthComparison();
-    },
-    renderRecurringBreakdown: async () => {
-      const { updateCharts } = await import('../ui/core/ui-render.js');
-      updateCharts();
-    },
-    checkBackupReminder: async () => {
-      const { checkBackupReminder } = await import('../orchestration/backup-reminder.js');
-      checkBackupReminder();
-    },
-    renderMonthNav: () => renderMonthNav(),
-    populateCategoryFilter: () => populateCategoryFilter(),
-    resetCalendarSelection: async () => {
-      const { resetCalendarSelection } = await import('../ui/widgets/calendar.js');
-      resetCalendarSelection();
-    },
-    renderCategories: () => renderCategories(),
-    refreshAll: () => {
-      // Force refresh all reactive components by touching signals
-      signals.refreshVersion.value++;
-    },
-    checkAchievements: async () => {
-      const { checkAchievements } = await import('../features/gamification/achievements.js');
-      checkAchievements();
-    }
-  });
-  setStartupProgress('post:app-events-ready');
-
-  // Update UI based on data
-  const hasTransactions = signals.transactions.value.length > 0;
-  
-  const {
-    initTemplateManager,
-    setTemplateFmtCurFn,
-    setTemplateRenderCategoriesFn,
-    setTemplateSwitchTabFn
-  } = await import('../transactions/template-manager.js');
-  initTemplateManager();
-  setTemplateFmtCurFn((value: number) => signals.currency.value.symbol + value.toFixed(2));
-  setTemplateRenderCategoriesFn(() => renderCategories());
-  setTemplateSwitchTabFn((type: 'expense' | 'income') => switchTab(type));
-
-  // Load templates
-  renderTemplates();
-  setStartupProgress('post:templates-ready');
+  registerCleanup(initTransactionSurfaceCoordinator());
 
   // Initialize form UI (always needed for new transactions)
   renderMonthNav();
@@ -385,186 +417,414 @@ async function postOnboardingInit(): Promise<void> {
   populateCategoryFilter();
   setRenderQuickShortcutsFn(() => renderQuickShortcuts());
   renderQuickShortcuts();
-  const { updateCharts } = await import('../ui/core/ui-render.js');
-  const { renderMonthComparison } = await import('../ui/charts/analytics-ui.js');
-  await updateCharts();
-  renderMonthComparison();
   registerCleanup(mountEditUI());
   void import('../ui/widgets/filters.js').then(({ renderFilterPresets }) => {
     renderFilterPresets();
   });
   setStartupProgress('post:form-ui-ready');
 
+  const validTabs = ['dashboard', 'budget', 'transactions', 'calendar'];
+  const initialTab = (validTabs.includes(savedTab) ? savedTab : 'dashboard') as any;
+  switchMainTab(initialTab);
+
   if (hasTransactions) {
-    // Restore persisted tab or default to dashboard
-    const savedTab = lsGet('budget_tracker_active_tab', 'dashboard') as string;
-    const validTabs = ['dashboard', 'budget', 'transactions', 'calendar'];
-    switchMainTab((validTabs.includes(savedTab) ? savedTab : 'dashboard') as any);
-    
-    // Render transactions
-    await renderTransactionsList();
+    await refreshTransactionsSurface();
     setStartupProgress('post:transactions-rendered');
   } else {
-    // Show empty state
-    const emptyStateTpl = emptyStateModule.emptyState('🌱', 'Welcome to Budget Tracker', 'Start by adding your first transaction');
     const emptyContainer = DOM.get('transactions-list');
     if (emptyContainer) {
-      const { render } = await import('../core/lit-helpers.js');
-      render(emptyStateTpl, emptyContainer);
+      render(html`
+        <div class="p-6 text-center">
+          <p class="text-sm font-bold" style="color: var(--text-primary);">Welcome to Budget Tracker</p>
+          <p class="text-xs mt-2" style="color: var(--text-tertiary);">Start by adding your first transaction.</p>
+        </div>
+      `, emptyContainer);
     }
     setStartupProgress('post:empty-state-rendered');
+  }
+
+  registerCleanup(await setupWorkerDeltaSync());
+  const { syncWorkerDataset, shouldUseWorker, isWorkerReady } = await import('./worker-manager.js');
+  if (shouldUseWorker(signals.transactions.value.length) && !isWorkerReady()) {
+    void syncWorkerDataset(signals.transactions.value).catch((err: unknown) => {
+      if (import.meta.env.DEV) console.warn('Worker sync failed:', err);
+    });
   }
 
   // Note: Auto-save is handled by signal effects, but calling for backwards compatibility
   setupAutoSave();
   setStartupProgress('post:auto-save-ready');
+}
 
-  // Setup performance monitoring
-  setupPerformanceMonitoring();
-  setStartupProgress('post:performance-ready');
+function scheduleBackgroundInitialization(
+  hasTransactions: boolean,
+  savedTab: string,
+  completeBackgroundTask: (step: string) => void
+): void {
+  scheduleDeferredInteractiveWork(async (isCancelled) => {
+    const { switchMainTab, switchTab } = await import('../ui/core/ui-navigation.js');
+    const { renderMonthNav, renderCategories, renderQuickShortcuts, populateCategoryFilter, updateCharts } = await import('../ui/core/ui-render.js');
+    const { refreshTransactionsSurface } = await import('../data/transaction-surface-coordinator.js');
+    const { initLazyLoading, cleanupLazyLoading } = await import('../core/lazy-loader.js');
+    if (isCancelled()) return;
+    initLazyLoading();
+    registerCleanup(cleanupLazyLoading);
+    setStartupProgress('post:lazy-loader-ready');
 
-  // The app shell is now interactive enough for user navigation and transaction entry.
-  setShellReadyState(true);
-  setStartupProgress('post:shell-ready');
+    const { openModal } = await import('../ui/core/ui.js');
+    const emptyStateModule = await import('../ui/core/empty-state.js');
+    if (isCancelled()) return;
+    emptyStateModule.init();
+    registerCleanup(emptyStateModule.destroy);
+    emptyStateModule.setSwitchMainTabFn(switchMainTab as (tabName: string) => void);
+    emptyStateModule.setOpenModalFn((modalId: string) => openModal(modalId));
+    emptyStateModule.setLoadSampleDataFn(async () => {
+      await loadSampleData();
+    });
+    setStartupProgress('post:empty-state-ready');
 
-  void (async () => {
-    setStartupProgress('deferred:modal-init-start');
-    const { mountModals } = await import('../components/mount-modals.js');
-    setStartupProgress('deferred:mount-modals-imported');
-
-    const modalContainer = DOM.get('modal-container');
-    if (modalContainer) {
-      registerCleanup(mountModals(modalContainer));
+    const cleanupDashboard = initDashboard();
+    if (isCancelled()) {
+      cleanupDashboard();
+      return;
     }
-    setStartupProgress('deferred:modals-mounted');
+    registerCleanup(cleanupDashboard);
+    setStartupProgress('post:dashboard-ready');
 
-    const modalEv = await import('../ui/interactions/modal-events.js');
-    setStartupProgress('deferred:modal-events-imported');
-
-    modalEv.initModalEvents({
-      fmtCur: (v: number) => signals.currency.value.symbol + v.toFixed(2),
-      renderSavingsGoals: () => {
-        // Savings goals are reactive via mounted signal effects — no re-mount needed.
-        // Signal changes from cross-tab sync automatically trigger re-render.
+    initAppEvents({
+      updateReconcileCount: () => {},
+      renderTransactions: () => {
+        void refreshTransactionsSurface();
       },
-      updateSummary: () => {
-        // Summary cards are reactive via mounted signal effects — no re-mount needed.
-        // Signal changes from cross-tab sync automatically trigger re-render.
+      renderWeeklyRollup: () => {},
+      updateInsights: () => {},
+      checkAlerts: async () => {
+        const { checkAlerts } = await import('../features/personalization/alerts.js');
+        checkAlerts();
       },
-      renderCustomCatsList: () => {
-        // Re-render custom categories in settings modal
-        import('../ui/core/ui-render.js').then(m => m.renderCustomCatsList());
+      renderMonthComparison: async () => {
+        const { renderMonthComparison } = await import('../ui/charts/analytics-ui.js');
+        renderMonthComparison();
       },
+      renderRecurringBreakdown: async () => {
+        await updateCharts();
+      },
+      checkBackupReminder: async () => {
+        const { checkBackupReminder } = await import('../orchestration/backup-reminder.js');
+        checkBackupReminder();
+      },
+      renderMonthNav: () => renderMonthNav(),
+      populateCategoryFilter: () => populateCategoryFilter(),
+      resetCalendarSelection: async () => {
+        const { resetCalendarSelection } = await import('../ui/widgets/calendar.js');
+        resetCalendarSelection();
+      },
+      renderCategories: () => renderCategories(),
       refreshAll: () => {
-        // Force refresh of reactive signals
         signals.refreshVersion.value++;
       },
-      resetForm: async () => {
-        const { resetForm } = await import('../ui/interactions/form-events.js');
-        resetForm();
-      },
-      startEditing: async (tx) => {
-        const { startEditing } = await import('../transactions/index.js');
-        startEditing(tx);
-      },
-      loadSampleData: () => loadSampleData()
+      checkAchievements: async () => {
+        const { checkAchievements } = await import('../features/gamification/achievements.js');
+        checkAchievements();
+      }
     });
-    setStartupProgress('deferred:modal-events-ready');
-  })().catch((error) => {
-    if (import.meta.env.DEV) console.error('Deferred modal init failed:', error);
-  });
+    registerCleanup(cleanupAppEvents);
+    setStartupProgress('post:app-events-ready');
 
-  // Defer non-critical features so the visible shell becomes usable first.
-  void Promise.all([
-    import('../ui/interactions/storage-events.js'),
-    import('../features/import-export/import-export-events.js'),
-    import('../ui/widgets/debt-ui-handlers.js'),
-    import('../features/financial/budget-planner-ui.js'),
-    import('../features/financial/debt-planner.js'),
-    import('../ui/widgets/pin-ui-handlers.js'),
-    import('../features/financial/split-transactions.js'),
-    import('../features/financial/calculations.js'),
-    import('../features/gamification/achievements.js'),
-    import('../features/gamification/streak-tracker.js')
-  ]).then(async ([
-    storageEv,
-    importExportEv,
-    debtUiHandlers,
-    budgetPlannerUi,
-    debtPlanner,
-    pinHandlers,
-    splitTransactions,
-    calculations,
-    achievements,
-    streakTracker
-  ]) => {
+    const {
+      initTemplateManager,
+      setTemplateFmtCurFn,
+      setTemplateRenderCategoriesFn,
+      setTemplateSwitchTabFn,
+      renderTemplates
+    } = await import('../transactions/template-manager.js');
+    if (isCancelled()) return;
+    initTemplateManager();
+    setTemplateFmtCurFn((value: number) => signals.currency.value.symbol + value.toFixed(2));
+    setTemplateRenderCategoriesFn(() => renderCategories());
+    setTemplateSwitchTabFn((type: 'expense' | 'income') => switchTab(type));
+    renderTemplates();
+    setStartupProgress('post:templates-ready');
+
+    const { processRecurringTemplates } = await import('../data/recurring-templates.js');
+    const generatedCount = await processRecurringTemplates();
+    if (isCancelled()) return;
+    if (generatedCount > 0) {
+      showToast(`Generated ${generatedCount} recurring transaction${generatedCount === 1 ? '' : 's'}`, 'info');
+    }
+    setStartupProgress('initialize:recurring-ready');
+
+    const { initDashboardTrendRangeSelector } = await import('../ui/core/ui-render.js');
+    const { renderMonthComparison } = await import('../ui/charts/analytics-ui.js');
+    await updateCharts();
+    initDashboardTrendRangeSelector();
+    renderMonthComparison();
+
+    setupPerformanceMonitoring();
+    completeBackgroundTask('post:performance-ready');
+  }, 'Deferred analytics/template init failed');
+
+  scheduleDeferredInteractiveWork(async (isCancelled) => {
+    const [
+      storageEv,
+      debtUiHandlers,
+      budgetPlannerUi,
+      debtPlanner,
+      pinHandlers,
+      splitTransactions,
+      calculations,
+      achievements,
+      streakTracker
+    ] = await Promise.all([
+      import('../ui/interactions/storage-events.js'),
+      import('../ui/widgets/debt-ui-handlers.js'),
+      import('../features/financial/budget-planner-ui.js'),
+      import('../features/financial/debt-planner.js'),
+      import('../ui/widgets/pin-ui-handlers.js'),
+      import('../features/financial/split-transactions.js'),
+      import('../features/financial/calculations.js'),
+      import('../features/gamification/achievements.js'),
+      import('../features/gamification/streak-tracker.js')
+    ]);
+    if (isCancelled()) return;
+
     calculations.initCalculations();
+    registerCleanup(calculations.cleanupCalculations);
     debtPlanner.initDebtPlanner();
+    registerCleanup(debtPlanner.cleanupDebtPlanner);
     achievements.initAchievements();
+    registerCleanup(achievements.cleanupAchievements);
     streakTracker.initStreakTracker();
+    registerCleanup(streakTracker.cleanupStreakTracker);
     pinHandlers.initPinHandlers();
+    registerCleanup(pinHandlers.cleanupPinHandlers);
+    registerCleanup(await setupRemoteTransactionFollowUps());
 
     splitTransactions.setSplitFmtCur((v: number) => signals.currency.value.symbol + v.toFixed(2));
     registerCleanup(splitTransactions.mountSplitModal());
 
     debtUiHandlers.initDebtHandlers();
+    registerCleanup(debtUiHandlers.cleanupDebtHandlers);
     debtUiHandlers.setDebtFmtCur((v: number) => signals.currency.value.symbol + v.toFixed(2));
     debtUiHandlers.setDebtRefreshAll(() => {
       signals.refreshVersion.value++;
     });
 
     budgetPlannerUi.initBudgetPlannerHandlers();
+    registerCleanup(budgetPlannerUi.cleanupBudgetPlannerHandlers);
     budgetPlannerUi.setBudgetPlannerFmtCur((v: number) => signals.currency.value.symbol + v.toFixed(2));
     budgetPlannerUi.setBudgetPlannerCallbacks({
-      renderCategories,
-      renderQuickShortcuts,
-      populateCategoryFilter,
+      renderCategories: () => {
+        void import('../ui/core/ui-render.js').then((m) => m.renderCategories());
+      },
+      renderQuickShortcuts: () => {
+        void import('../ui/core/ui-render.js').then((m) => m.renderQuickShortcuts());
+      },
+      populateCategoryFilter: () => {
+        void import('../ui/core/ui-render.js').then((m) => m.populateCategoryFilter());
+      },
       renderCustomCatsList: () => {
         import('../ui/core/ui-render.js').then(m => m.renderCustomCatsList());
       }
     });
 
-    importExportEv.initImportExportEvents({
-      fmtCur: (v: number) => signals.currency.value.symbol + v.toFixed(2)
-    });
-    import('../ui/components/async-modal.js').then(({ confirmDataOperation }) => {
-      importExportEv.setImportConfirmFn(confirmDataOperation);
-    });
-
-    // IMPORTANT: Do NOT call mount functions here — reactive components are already mounted
-    // and will auto-update when signal values change from storage sync.
     storageEv.initStorageEvents({
       refreshAll: () => {
         signals.refreshVersion.value++;
       },
-      updateSummary: () => {
-        // Summary cards are reactive — signal changes trigger re-render automatically
-      },
-      renderSavingsGoals: () => {
-        // Savings goals are reactive — signal changes trigger re-render automatically
-      },
+      updateSummary: () => {},
+      renderSavingsGoals: () => {},
       checkAlerts: () => {
         import('../features/personalization/alerts.js').then(m => m.checkAlerts());
       },
-      updateInsights: () => {
-        // Insights are reactive — signal changes trigger re-render automatically
-      },
+      updateInsights: () => {},
       renderBadges: () => {
         import('../features/gamification/achievements.js').then(m => m.checkAchievements());
       },
-      renderStreak: () => {
-        // Streak is reactive — signal changes trigger re-render automatically
-      },
+      renderStreak: () => {},
       renderFilterPresets: () => {
         import('../ui/widgets/filters.js').then(m => m.renderFilterPresets());
       },
-      renderTemplates: () => renderTemplates()
+      renderTemplates: () => {
+        import('../transactions/template-manager.js').then(m => m.renderTemplates());
+      }
     });
+    registerCleanup(storageEv.cleanupStorageEvents);
 
-    import('../ui/interactions/emoji-picker.js').then(m => m.init());
-    setStartupProgress('post:deferred-ready');
-  }).catch((error) => {
-    if (import.meta.env.DEV) console.error('Deferred post-init setup failed:', error);
+    const emojiPicker = await import('../ui/interactions/emoji-picker.js');
+    if (isCancelled()) return;
+    emojiPicker.init();
+    registerCleanup(emojiPicker.destroy);
+    completeBackgroundTask('post:deferred-ready');
+  }, 'Deferred post-init setup failed');
+}
+
+async function setupWorkerDeltaSync(): Promise<() => void> {
+  const {
+    syncWorkerDataset,
+    syncWorkerDatasetDelta,
+    shouldUseWorker,
+    isWorkerReady
+  } = await import('./worker-manager.js');
+
+  const shouldSyncWorker = (): boolean => {
+    return shouldUseWorker(signals.transactions.value.length) || isWorkerReady();
+  };
+
+  const syncFullDataset = (): void => {
+    if (!shouldSyncWorker()) return;
+    void syncWorkerDataset(signals.transactions.value).catch((err: unknown) => {
+      if (import.meta.env.DEV) console.warn('Worker full dataset sync failed:', err);
+    });
+  };
+
+  const syncDeltaOrReload = (change: TransactionDataDelta): void => {
+    if (!shouldSyncWorker()) return;
+    if (!isWorkerReady()) {
+      syncFullDataset();
+      return;
+    }
+    void syncWorkerDatasetDelta(change).catch((err: unknown) => {
+      if (import.meta.env.DEV) console.warn('Worker delta sync failed, retrying full sync:', err);
+      syncFullDataset();
+    });
+  };
+
+  const unsubscribers = [
+    on(Events.TRANSACTION_ADDED, (tx: unknown) => {
+      syncDeltaOrReload({ type: 'add', item: tx as any });
+    }),
+    on(Events.TRANSACTION_UPDATED, (tx: unknown) => {
+      syncDeltaOrReload({ type: 'update', item: tx as any });
+    }),
+    on(Events.TRANSACTION_DELETED, (tx: unknown) => {
+      syncDeltaOrReload({ type: 'delete', id: (tx as any).__backendId, item: tx as any });
+    }),
+    on(Events.TRANSACTIONS_BATCH_ADDED, (payload: unknown) => {
+      const transactions = (payload as { transactions?: any[] }).transactions || [];
+      if (transactions.length === 0) return;
+      syncDeltaOrReload({ type: 'batch-add', items: transactions });
+    }),
+    on(Events.TRANSACTIONS_REPLACED, () => {
+      syncFullDataset();
+    }),
+    on(Events.DATA_IMPORTED, () => {
+      syncFullDataset();
+    }),
+    on(DataSyncEvents.TRANSACTION_UPDATED, (payload: { transactions?: any[]; source?: string }) => {
+      if (
+        payload.source !== 'multi-tab-sync'
+        || !payload.transactions
+        || (!shouldUseWorker(payload.transactions.length) && !isWorkerReady())
+      ) {
+        return;
+      }
+      void syncWorkerDataset(payload.transactions);
+    }),
+    on(DataSyncEvents.TRANSACTION_DELTA_APPLIED, (payload: { source?: string; change?: TransactionDataDelta }) => {
+      if (payload.source !== 'multi-tab-sync' || !payload.change || !shouldSyncWorker()) {
+        return;
+      }
+      syncDeltaOrReload(payload.change);
+    })
+  ];
+
+  return () => {
+    unsubscribers.forEach((unsubscribe) => unsubscribe());
+  };
+}
+
+async function setupRemoteTransactionFollowUps(): Promise<() => void> {
+  const { checkAchievements } = await import('../features/gamification/achievements.js');
+  const { renderMonthComparison } = await import('../ui/charts/analytics-ui.js');
+
+  const unsubscribers = [
+    on(DataSyncEvents.TRANSACTION_UPDATED, (payload: { source?: string }) => {
+      if (payload.source !== 'multi-tab-sync') return;
+      checkAchievements();
+      renderMonthComparison();
+    }),
+    on(DataSyncEvents.TRANSACTION_DELTA_APPLIED, (payload: { source?: string }) => {
+      if (payload.source !== 'multi-tab-sync') return;
+      checkAchievements();
+      renderMonthComparison();
+    })
+  ];
+
+  return () => {
+    unsubscribers.forEach((unsubscribe) => unsubscribe());
+  };
+}
+
+function scheduleDeferredInteractiveWork(
+  task: (isCancelled: () => boolean) => Promise<void>,
+  errorLabel: string = 'Deferred interactive init failed'
+): void {
+  let cancelled = false;
+  let settled = false;
+  let idleId: number | null = null;
+  let animationFrameId: number | null = null;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  const unregisterCleanup = (): void => {
+    const index = deferredTaskCleanupRegistry.indexOf(cancelTask);
+    if (index >= 0) {
+      deferredTaskCleanupRegistry.splice(index, 1);
+    }
+  };
+
+  const runTask = () => {
+    if (cancelled) return;
+    void (async () => {
+      try {
+        await task(() => cancelled);
+      } catch (error) {
+        if (!cancelled) {
+          recordDeferredStartupFailure(errorLabel, error);
+        }
+      } finally {
+        settled = true;
+        unregisterCleanup();
+      }
+    })();
+  };
+
+  const cancelTask = (): void => {
+    cancelled = true;
+    if (idleId !== null && typeof (window as any).cancelIdleCallback === 'function') {
+      (window as any).cancelIdleCallback(idleId);
+      idleId = null;
+    }
+    if (animationFrameId !== null) {
+      cancelAnimationFrame(animationFrameId);
+      animationFrameId = null;
+    }
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+    if (settled) {
+      unregisterCleanup();
+    }
+  };
+
+  registerDeferredTaskCleanup(cancelTask);
+
+  const idleCallback = (window as any).requestIdleCallback as ((callback: () => void, options?: { timeout: number }) => number) | undefined;
+  if (idleCallback) {
+    idleId = idleCallback(() => {
+      idleId = null;
+      runTask();
+    }, { timeout: 200 });
+    return;
+  }
+
+  animationFrameId = requestAnimationFrame(() => {
+    animationFrameId = null;
+    timeoutId = setTimeout(() => {
+      timeoutId = null;
+      runTask();
+    }, 0);
   });
 }
 
@@ -614,6 +874,10 @@ export function cleanupApp(): void {
   // State is automatically saved by signal effects
   // No explicit save needed on cleanup
 
+  cleanupDeferredInteractiveWork();
+  cleanupAllComponents();
+  cleanupAppEvents();
+
   // Clear container
   if (initStatus.container) {
     initStatus.container.clear();
@@ -623,6 +887,9 @@ export function cleanupApp(): void {
   initStatus.initialized = false;
   initStatus.container = null;
   initStatus.errors = [];
+  setShellReadyState(false);
+  setInteractiveReadyState(false);
+  setBackgroundReadyState(false);
 }
 
 // ==========================================

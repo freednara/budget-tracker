@@ -36,6 +36,23 @@ type RefreshAllCallback = () => void;
 // Configurable callbacks (set by app.js)
 let fmtCur: CurrencyFormatter = fmtCurUtil;
 let refreshAllFn: RefreshAllCallback | null = null;
+const debtHandlerCleanups: Array<() => void> = [];
+
+function bindDebtHandler(
+  target: EventTarget,
+  type: string,
+  handler: EventListenerOrEventListenerObject
+): void {
+  target.addEventListener(type, handler);
+  debtHandlerCleanups.push(() => {
+    target.removeEventListener(type, handler);
+  });
+}
+
+export function cleanupDebtHandlers(): void {
+  const cleanups = debtHandlerCleanups.splice(0, debtHandlerCleanups.length);
+  cleanups.forEach((cleanup) => cleanup());
+}
 
 /**
  * Set the currency formatter function
@@ -65,8 +82,11 @@ export function setDebtRefreshAll(fn: RefreshAllCallback): void {
  * Initialize all debt planner event handlers
  */
 export function initDebtHandlers(): void {
+  cleanupDebtHandlers();
+
   // Add Debt Modal
-  DOM.get('add-debt-btn')?.addEventListener('click', () => {
+  const addDebtButton = DOM.get('add-debt-btn');
+  if (addDebtButton) bindDebtHandler(addDebtButton, 'click', () => {
     const titleEl = DOM.get('debt-modal-title');
     if (titleEl) titleEl.textContent = 'Add Debt';
     // Reset form fields individually (no form element exists)
@@ -93,7 +113,8 @@ export function initDebtHandlers(): void {
     openModal('debt-modal');
   });
 
-  DOM.get('delete-debt')?.addEventListener('click', async () => {
+  const deleteDebtButton = DOM.get('delete-debt');
+  if (deleteDebtButton) bindDebtHandler(deleteDebtButton, 'click', async () => {
     const editIdEl = DOM.get('edit-debt-id') as HTMLInputElement | null;
     const debtId = editIdEl?.value || '';
     if (!debtId) return;
@@ -113,9 +134,11 @@ export function initDebtHandlers(): void {
     }
   });
 
-  DOM.get('cancel-debt')?.addEventListener('click', () => closeModal('debt-modal'));
+  const cancelDebtButton = DOM.get('cancel-debt');
+  if (cancelDebtButton) bindDebtHandler(cancelDebtButton, 'click', () => closeModal('debt-modal'));
 
-  DOM.get('save-debt')?.addEventListener('click', () => {
+  const saveDebtButton = DOM.get('save-debt');
+  if (saveDebtButton) bindDebtHandler(saveDebtButton, 'click', () => {
     const editIdEl = DOM.get('edit-debt-id') as HTMLInputElement | null;
     const nameEl = DOM.get('debt-name') as HTMLInputElement | null;
     const typeEl = DOM.get('debt-type') as HTMLSelectElement | null;
@@ -157,7 +180,8 @@ export function initDebtHandlers(): void {
   });
 
   // Debt list click handlers (edit/payment)
-  DOM.get('debts-list')?.addEventListener('click', (e: Event) => {
+  const debtsList = DOM.get('debts-list');
+  if (debtsList) bindDebtHandler(debtsList, 'click', (e: Event) => {
     const target = e.target as HTMLElement;
     const debtItem = target.closest('.debt-item') as HTMLElement | null;
     if (!debtItem) return;
@@ -209,9 +233,11 @@ export function initDebtHandlers(): void {
   });
 
   // Payment Modal
-  DOM.get('cancel-debt-payment')?.addEventListener('click', () => closeModal('debt-payment-modal'));
+  const cancelDebtPaymentButton = DOM.get('cancel-debt-payment');
+  if (cancelDebtPaymentButton) bindDebtHandler(cancelDebtPaymentButton, 'click', () => closeModal('debt-payment-modal'));
 
-  DOM.get('confirm-debt-payment')?.addEventListener('click', async () => {
+  const confirmDebtPaymentButton = DOM.get('confirm-debt-payment');
+  if (confirmDebtPaymentButton) bindDebtHandler(confirmDebtPaymentButton, 'click', async () => {
     const btn = DOM.get('confirm-debt-payment') as HTMLButtonElement | null;
     if (btn?.disabled) return;
     if (btn) btn.disabled = true;
@@ -242,7 +268,8 @@ export function initDebtHandlers(): void {
   });
 
   // Strategy Comparison Modal
-  DOM.get('compare-strategies-btn')?.addEventListener('click', () => {
+  const compareStrategiesButton = DOM.get('compare-strategies-btn');
+  if (compareStrategiesButton) bindDebtHandler(compareStrategiesButton, 'click', () => {
     const extraPaymentEl = DOM.get('extra-payment') as HTMLInputElement | null;
     const extraMonthly = parseAmount(extraPaymentEl?.value || 0);
     const debts = getDebts().filter(d => d.isActive);
@@ -332,7 +359,8 @@ export function initDebtHandlers(): void {
     openModal('debt-strategy-modal');
   });
 
-  DOM.get('close-strategy-modal')?.addEventListener('click', () => closeModal('debt-strategy-modal'));
+  const closeStrategyModalButton = DOM.get('close-strategy-modal');
+  if (closeStrategyModalButton) bindDebtHandler(closeStrategyModalButton, 'click', () => closeModal('debt-strategy-modal'));
 
   // Note: Event bus listeners for debt updates removed
   // Both renderDebtList and updateDebtSummary are now reactive via mountDebtList and mountDebtSummary

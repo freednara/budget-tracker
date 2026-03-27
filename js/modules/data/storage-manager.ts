@@ -42,6 +42,7 @@ interface ExportMeta {
 
 interface ExportData extends Record<string, unknown> {
   _meta?: ExportMeta;
+  _exportErrors?: Record<string, string>;
 }
 
 interface StorageStats {
@@ -77,6 +78,14 @@ class StorageManager {
       return { isOk: true, type: this.type };
     }
 
+    const rollbackFailure = this._getRollbackFailureMarker();
+    if (rollbackFailure) {
+      const lsFallback = await this._initLocalStorageAdapter();
+      if (lsFallback.isOk) {
+        return lsFallback;
+      }
+    }
+
     // Try IndexedDB first
     const idbAdapter = new IndexedDBAdapter();
     if (idbAdapter.isAvailable()) {
@@ -94,6 +103,16 @@ class StorageManager {
     }
 
     // Fall back to localStorage
+    const fallbackResult = await this._initLocalStorageAdapter();
+    if (fallbackResult.isOk) {
+      return fallbackResult;
+    }
+
+    if (import.meta.env.DEV) console.error('Storage: No storage backend available');
+    return { isOk: false, type: null, error: 'No storage backend available' };
+  }
+
+  private async _initLocalStorageAdapter(): Promise<InitResult> {
     const lsAdapter = new LocalStorageAdapter();
     if (lsAdapter.isAvailable()) {
       const result = await lsAdapter.init();
@@ -103,14 +122,23 @@ class StorageManager {
         this.type = 'localstorage';
         this._initialized = true;
         this._setupLocalStorageSync();
-
-        // Storage: Using localStorage backend (IndexedDB unavailable)
         return { isOk: true, type: 'localstorage' };
       }
     }
 
-    if (import.meta.env.DEV) console.error('Storage: No storage backend available');
-    return { isOk: false, type: null, error: 'No storage backend available' };
+    return { isOk: false, type: null, error: 'No localStorage backend available' };
+  }
+
+  private _getRollbackFailureMarker():
+    | { reason?: string; timestamp?: number; exportErrors?: Record<string, string> }
+    | null {
+    try {
+      const stored = localStorage.getItem('budget_tracker_storage_rollback_failed');
+      if (!stored) return null;
+      return JSON.parse(stored) as { reason?: string; timestamp?: number; exportErrors?: Record<string, string> };
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -367,6 +395,43 @@ class StorageManager {
     }
   }
 
+  async replaceTransactionWithSplits(originalId: string, splits: Transaction[]): Promise<boolean> {
+    this._checkInitialized();
+    try {
+      let result = false;
+
+      if (this.adapter instanceof IndexedDBAdapter) {
+        result = await this.adapter.replaceTransactionWithSplits(originalId, splits);
+      } else {
+        const existingTransactions = await this.adapter!.getAll(STORES.TRANSACTIONS) as Transaction[];
+        const originalIndex = existingTransactions.findIndex((transaction) => transaction.__backendId === originalId);
+        if (originalIndex < 0) {
+          return false;
+        }
+        const nextTransactions = [
+          ...existingTransactions.slice(0, originalIndex),
+          ...splits,
+          ...existingTransactions.slice(originalIndex + 1)
+        ];
+        result = await this.adapter!.importAll({ [STORES.TRANSACTIONS]: nextTransactions }, true);
+      }
+
+      if (result) {
+        this._errorCount = 0;
+        this.broadcastChange('batch', STORES.TRANSACTIONS, {
+          type: 'split',
+          count: splits.length,
+          originalId
+        });
+      }
+
+      return result;
+    } catch (err) {
+      this._handleError(err, 'replaceTransactionWithSplits', STORES.TRANSACTIONS);
+      throw err;
+    }
+  }
+
   // ==========================================
   // EXPORT/IMPORT METHODS
   // ==========================================
@@ -429,14 +494,33 @@ class StorageManager {
 
     try {
       // Export current data
-      const data = await this.adapter!.exportAll();
+      const data = await this.adapter!.exportAll() as ExportData;
+      const exportErrors = data._exportErrors || {};
+      if (Object.keys(exportErrors).length > 0) {
+        this._recordRollbackFailure({
+          reason: 'partial_export',
+          timestamp: Date.now(),
+          exportErrors
+        });
+        return;
+      }
+
+      const importableData: Record<string, unknown> = { ...data };
+      delete importableData._meta;
+      delete importableData._exportErrors;
 
       // Switch to localStorage adapter
       const lsAdapter = new LocalStorageAdapter();
-      await lsAdapter.init();
+      const initResult = await lsAdapter.init();
+      if (!initResult.isOk) {
+        throw new Error('Failed to initialize localStorage adapter during rollback');
+      }
 
       // Import data to localStorage
-      await lsAdapter.importAll(data, true);
+      const importResult = await lsAdapter.importAll(importableData, true);
+      if (!importResult) {
+        throw new Error('Failed to import rollback snapshot into localStorage');
+      }
 
       // Switch adapter
       this.adapter = lsAdapter;
@@ -446,13 +530,26 @@ class StorageManager {
       // Mark rollback in localStorage
       localStorage.setItem('budget_tracker_storage_rollback', JSON.stringify({
         reason: 'error_threshold',
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        exportErrors
       }));
 
     } catch (err) {
       if (import.meta.env.DEV) console.error('Storage rollback failed:', err);
+      this._recordRollbackFailure({
+        reason: err instanceof Error ? err.message : String(err),
+        timestamp: Date.now()
+      });
     } finally {
       this._rollbackInProgress = false;
+    }
+  }
+
+  private _recordRollbackFailure(details: { reason: string; timestamp: number; exportErrors?: Record<string, string> }): void {
+    try {
+      localStorage.setItem('budget_tracker_storage_rollback_failed', JSON.stringify(details));
+    } catch (err) {
+      if (import.meta.env.DEV) console.warn('Failed to persist rollback failure details:', err);
     }
   }
 

@@ -2,9 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as signals from '../js/modules/core/signals.js';
 import { SK } from '../js/modules/core/state.js';
 
-const { clearAllStorageMock, clearAllBackupsMock } = vi.hoisted(() => ({
+const { clearAllStorageMock, clearAllBackupsMock, resetRuntimeStateMock } = vi.hoisted(() => ({
   clearAllStorageMock: vi.fn(async () => true),
-  clearAllBackupsMock: vi.fn(async () => true)
+  clearAllBackupsMock: vi.fn(async () => true),
+  resetRuntimeStateMock: vi.fn()
 }));
 
 vi.mock('../js/modules/data/storage-manager.js', () => ({
@@ -17,6 +18,12 @@ vi.mock('../js/modules/features/backup/indexeddb-backup-store.js', () => ({
   clearAllBackups: clearAllBackupsMock
 }));
 
+vi.mock('../js/modules/data/data-manager.js', () => ({
+  dataSdk: {
+    resetRuntimeState: resetRuntimeStateMock
+  }
+}));
+
 import { resetAppData } from '../js/modules/orchestration/app-reset.js';
 
 describe('resetAppData', () => {
@@ -24,8 +31,11 @@ describe('resetAppData', () => {
     localStorage.clear();
     clearAllStorageMock.mockClear();
     clearAllBackupsMock.mockClear();
+    resetRuntimeStateMock.mockClear();
+    clearAllBackupsMock.mockResolvedValue(true);
+    clearAllStorageMock.mockResolvedValue(true);
 
-    signals.transactions.value = [{
+    signals.replaceTransactionLedger([{
       __backendId: 'tx_1',
       type: 'expense',
       amount: 42,
@@ -34,7 +44,7 @@ describe('resetAppData', () => {
       category: 'food',
       currency: 'USD',
       recurring: false
-    }];
+    }]);
     signals.savingsGoals.value = { goal1: { id: 'goal1', name: 'Goal', target_amount: 1000, current_amount: 100 } as any };
     signals.savingsContribs.value = [{ id: 'contrib1', goalId: 'goal1', amount: 50, date: '2026-03-20' } as any];
     signals.monthlyAlloc.value = { '2026-03': { food: 300 } as any };
@@ -100,6 +110,7 @@ describe('resetAppData', () => {
     expect(result).toEqual({ ok: true, clearBackups: false });
     expect(clearAllStorageMock).toHaveBeenCalledTimes(1);
     expect(clearAllBackupsMock).not.toHaveBeenCalled();
+    expect(resetRuntimeStateMock).toHaveBeenCalledTimes(1);
 
     expect(signals.transactions.value).toEqual([]);
     expect(signals.savingsGoals.value).toEqual({});
@@ -137,9 +148,24 @@ describe('resetAppData', () => {
 
     expect(result).toEqual({ ok: true, clearBackups: true });
     expect(clearAllBackupsMock).toHaveBeenCalledTimes(1);
+    expect(clearAllStorageMock).toHaveBeenCalledTimes(1);
+    expect(resetRuntimeStateMock).toHaveBeenCalledTimes(1);
     expect(localStorage.getItem('budget_tracker_auto_backups')).toBeNull();
     expect(localStorage.getItem('budget_tracker_backup_legacy_1')).toBeNull();
     expect(localStorage.getItem('budget_tracker_backup_schedule')).toBeNull();
     expect(localStorage.getItem('budget_tracker_backup_status')).toBeNull();
+  });
+
+  it('fails before destructive clearing when backup cleanup fails', async () => {
+    clearAllBackupsMock.mockResolvedValue(false);
+
+    const result = await resetAppData({ clearBackups: true });
+
+    expect(result).toEqual({ ok: false, clearBackups: true });
+    expect(clearAllStorageMock).not.toHaveBeenCalled();
+    expect(resetRuntimeStateMock).not.toHaveBeenCalled();
+    expect(signals.transactions.value).toHaveLength(1);
+    expect(localStorage.getItem(SK.RECURRING)).not.toBeNull();
+    expect(localStorage.getItem('budget_tracker_backup_schedule')).toBeNull();
   });
 });

@@ -113,6 +113,39 @@ export function createTransactionBatch(
   return transactions;
 }
 
+export function createDeterministicLedger(
+  count: number,
+  options: { startYear?: number; startMonth?: number; monthSpan?: number } = {}
+): Transaction[] {
+  const startYear = options.startYear ?? 2025;
+  const startMonth = options.startMonth ?? 1;
+  const monthSpan = options.monthSpan ?? 12;
+  const expenseCategories = ['food', 'transport', 'shopping', 'bills', 'health'];
+  const transactions: Transaction[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const monthOffset = i % monthSpan;
+    const year = startYear + Math.floor((startMonth - 1 + monthOffset) / 12);
+    const month = ((startMonth - 1 + monthOffset) % 12) + 1;
+    const day = (i % 28) + 1;
+    const isIncome = i % 7 === 0;
+
+    transactions.push(createTransaction({
+      __backendId: `ledger-${count}-${i}`,
+      type: isIncome ? 'income' : 'expense',
+      amount: isIncome ? 2500 + (i % 4) * 125 : 8 + (i % 23) * 3.75,
+      description: isIncome ? `Income ${i}` : `Expense ${i}`,
+      category: isIncome ? 'salary' : expenseCategories[i % expenseCategories.length],
+      date: generateDate({ year, month, day }),
+      reconciled: i % 3 === 0,
+      recurring: i % 11 === 0,
+      tags: i % 5 === 0 ? 'benchmark,seed' : ''
+    }));
+  }
+
+  return transactions;
+}
+
 // ==========================================
 // SAVINGS GOAL FACTORY
 // ==========================================
