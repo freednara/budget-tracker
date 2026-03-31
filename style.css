@@ -3542,25 +3542,26 @@
       }
       #transactions-list .swipe-content.transaction-row {
         display: block;
-        gap: 0.5rem 0.6rem !important;
+        padding: 0.72rem 0.76rem !important;
+        gap: 0.56rem 0.68rem !important;
       }
       #transactions-list .swipe-content.transaction-row .tx-main {
         min-width: 0;
         overflow: visible;
-        gap: 0.32rem;
+        gap: 0.38rem;
       }
       #transactions-list .swipe-content.transaction-row .tx-top {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
         align-items: start;
-        gap: 0.45rem 0.55rem;
+        gap: 0.52rem 0.68rem;
       }
       #transactions-list .swipe-content.transaction-row .tx-info {
         min-width: 0;
       }
       #transactions-list .swipe-content.transaction-row .tx-description {
         align-items: flex-start;
-        gap: 0.22rem;
+        gap: 0.26rem;
         margin-bottom: 0 !important;
       }
       #transactions-list .swipe-content.transaction-row .tx-description-text {
@@ -3572,7 +3573,7 @@
         flex-wrap: wrap;
       }
       #transactions-list .swipe-content.transaction-row .tx-meta {
-        gap: 0.3rem 0.45rem;
+        gap: 0.38rem 0.52rem;
         flex-wrap: wrap;
         overflow: visible;
         max-width: 100%;
@@ -3583,14 +3584,15 @@
         min-width: fit-content;
         justify-self: end;
         align-self: start;
-        margin-top: 0;
+        margin-top: 0.06rem;
+        margin-right: 0.05rem;
         gap: 0;
       }
       #transactions-list .swipe-content.transaction-row .tx-amount {
         min-width: 0;
         max-width: fit-content;
         min-height: 2rem;
-        padding: 0.3rem 0.58rem;
+        padding: 0.34rem 0.62rem;
         border-radius: 999px;
         font-size: 0.96rem !important;
         line-height: 1.1;
