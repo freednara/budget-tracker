@@ -213,6 +213,20 @@ test.describe('Visual Regression - Mobile Critical Surfaces', () => {
     });
   });
 
+  test('transactions mobile list cards default state', async ({ page }) => {
+    await page.setViewportSize({ width: 430, height: 932 });
+    await setupApp(page, 'dark');
+    await loadSampleDataFromSettings(page);
+    await page.locator('#tab-transactions-btn').click();
+    const list = page.locator('#transactions-list');
+    await list.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(250);
+
+    await expect(list).toHaveScreenshot('transactions-mobile-list-cards.png', {
+      maxDiffPixelRatio: 0.05,
+    });
+  });
+
   test('transactions mobile left-swipe actions', async ({ page }) => {
     await page.setViewportSize({ width: 430, height: 932 });
     await setupApp(page, 'dark');

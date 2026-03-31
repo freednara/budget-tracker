@@ -568,6 +568,28 @@ test.describe('Latest Mobile Layout Guards', () => {
 
       const firstRow = page.locator('#transactions-list .swipe-container').first();
       await expect(firstRow.locator('.desktop-actions')).toBeHidden();
+      const rowLayout = await firstRow.evaluate((row) => {
+        const description = row.querySelector('.tx-description') as HTMLElement | null;
+        const amount = row.querySelector('.tx-amount') as HTMLElement | null;
+        const meta = row.querySelector('.tx-meta') as HTMLElement | null;
+        const rowRect = row.getBoundingClientRect();
+        const descriptionRect = description?.getBoundingClientRect();
+        const amountRect = amount?.getBoundingClientRect();
+        const metaRect = meta?.getBoundingClientRect();
+
+        return {
+          rowLeft: rowRect.left,
+          rowWidth: rowRect.width,
+          descriptionRight: descriptionRect?.right ?? 0,
+          amountLeft: amountRect?.left ?? 0,
+          amountBottom: amountRect?.bottom ?? 0,
+          metaTop: metaRect?.top ?? 0,
+          metaRight: metaRect?.right ?? 0,
+        };
+      });
+      expect(rowLayout.amountLeft).toBeGreaterThanOrEqual(rowLayout.descriptionRight - 1);
+      expect(rowLayout.metaTop).toBeGreaterThanOrEqual(rowLayout.amountBottom - 2);
+      expect(rowLayout.metaRight).toBeLessThanOrEqual(rowLayout.rowLeft + rowLayout.rowWidth + 1);
 
       await swipeTransactionRow(page, firstRow, 'left');
       await expect(firstRow).toHaveClass(/revealed-left/);

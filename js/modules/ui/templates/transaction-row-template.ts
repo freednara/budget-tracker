@@ -255,23 +255,25 @@ export function transactionRowTemplate(
       style="transition: transform 0.2s, box-shadow 0.2s; cursor: pointer; margin-bottom: 8px;"
     >
       <div class="tx-main flex-1 min-w-0">
-        <div class="tx-info min-w-0">
-          <div class="tx-description" style="margin-bottom: 4px;">
-            <span class="tx-description-text font-bold text-sm" style="color: var(--text-primary);">${rowDescription}</span>
-            <span class="tx-badges inline-flex items-center gap-1" style="margin-left: 6px;">${renderBadges(tx, options)}</span>
+        <div class="tx-top">
+          <div class="tx-info min-w-0">
+            <div class="tx-description" style="margin-bottom: 4px;">
+              <span class="tx-description-text font-bold text-sm" style="color: var(--text-primary);">${rowDescription}</span>
+              <span class="tx-badges inline-flex items-center gap-1" style="margin-left: 6px;">${renderBadges(tx, options)}</span>
+            </div>
           </div>
-          <div class="tx-meta flex items-center gap-2">
-            <span class="tx-date text-xs text-secondary">${parseLocalDate(tx.date).toLocaleDateString()}</span>
-            ${renderTypeBadge(tx)}
-            ${isSavingsTransfer && goalName
-              ? html`<span class="tx-goal-meta" title="Savings goal">${goalName}</span>`
-              : renderCategory(tx)}
+          <div class="tx-aside">
+            ${renderAmount(tx, fmtCur)}
+            ${renderActions(tx, options)}
           </div>
         </div>
-      </div>
-      <div class="tx-aside">
-        ${renderAmount(tx, fmtCur)}
-        ${renderActions(tx, options)}
+        <div class="tx-meta flex items-center gap-2">
+          <span class="tx-date text-xs text-secondary">${parseLocalDate(tx.date).toLocaleDateString()}</span>
+          ${renderTypeBadge(tx)}
+          ${isSavingsTransfer && goalName
+            ? html`<span class="tx-goal-meta" title="Savings goal">${goalName}</span>`
+            : renderCategory(tx)}
+        </div>
       </div>
     </div>
   `;
@@ -318,19 +320,23 @@ export function transactionRowSimple(
   const rowContent = `
     <div class="swipe-content transaction-row ${tx.type}-row ${isSavingsTransfer ? 'savings-transfer-row' : ''} ${options.showSwipeActions ? 'transaction-row--swipe-ready' : ''}" data-id="${escapeHtml(tx.__backendId)}">
       <div class="tx-main">
-        <div class="tx-info">
-          <div class="tx-description">
-            ${escapeHtml(rowDescription)}
-            ${tx.recurring ? '<span class="badge badge-recurring">🔄</span>' : ''}
+        <div class="tx-top">
+          <div class="tx-info">
+            <div class="tx-description">
+              ${escapeHtml(rowDescription)}
+              ${tx.recurring ? '<span class="badge badge-recurring">🔄</span>' : ''}
+            </div>
           </div>
-          <div class="tx-meta">
-            <span class="tx-date">${parseLocalDate(tx.date).toLocaleDateString()}</span>
-            ${typeBadge}
-            ${metaSuffix}
+          <div class="tx-aside">
+            <div class="tx-amount ${amountClass}">
+              ${amountSign}${fmtCur(amount)}
+            </div>
           </div>
         </div>
-        <div class="tx-amount ${amountClass}">
-          ${amountSign}${fmtCur(amount)}
+        <div class="tx-meta">
+          <span class="tx-date">${parseLocalDate(tx.date).toLocaleDateString()}</span>
+          ${typeBadge}
+          ${metaSuffix}
         </div>
       </div>
     </div>
