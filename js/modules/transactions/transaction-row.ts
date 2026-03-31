@@ -56,7 +56,6 @@ export function transactionRowTemplate(
     catInfoCache.set(cacheKey, cat);
   }
   const isExp = t.type === 'expense';
-  const noteIcon = t.notes ? '📝' : '';
   const splitIcon = t.splits ? '✂️' : '';
   const tagsList = t.tags ? t.tags.split(',').map(tg => tg.trim()).filter(Boolean) : [];
 
@@ -71,14 +70,19 @@ export function transactionRowTemplate(
           <span class="swipe-icon">${t.reconciled ? '☑' : '☐'}</span>
           <span>${t.reconciled ? 'Undo' : 'Reconcile'}</span>
         </button>
+        ${t.notes ? html`
+        <button class="swipe-action-btn notes-swipe-btn" data-id=${t.__backendId} aria-label="View notes" title=${t.notes}>
+          <span class="swipe-icon">📝</span>
+          <span>Notes</span>
+        </button>` : nothing}
       </div>
       <div class="swipe-actions-left">
-        <button class="swipe-action-btn edit-swipe-btn" data-id=${t.__backendId} style="background: var(--color-accent);" aria-label="Edit">
+        <button class="swipe-action-btn edit-swipe-btn" data-id=${t.__backendId} aria-label="Edit">
           <span class="swipe-icon">✏️</span>
           <span>Edit</span>
         </button>
-        <button class="swipe-action-btn delete-swipe-btn" data-id=${t.__backendId} style="background: var(--color-expense);" aria-label="Delete">
-          <span class="swipe-icon">🗑️</span>
+        <button class="swipe-action-btn delete-swipe-btn" data-id=${t.__backendId} aria-label="Delete">
+          <span class="swipe-icon">✕</span>
           <span>Delete</span>
         </button>
       </div>
@@ -86,7 +90,7 @@ export function transactionRowTemplate(
         <div class="w-11 h-11 rounded-xl flex items-center justify-center text-xl shrink-0" style=${styleMap({ background: `${cat.color}20` })}>${cat.emoji}</div>
         <div class="flex-1 min-w-0">
           <div class="flex items-center gap-2 mb-1">
-            <p class="font-bold text-sm truncate" style="color: var(--text-primary);">${t.description || cat.name}</p>${t.recurring ? html`<span class="insight-badge insight-up text-xs">↻ ${t.recurring_type || ''}</span>` : nothing}${noteIcon}${splitIcon}
+            <p class="font-bold text-sm truncate" style="color: var(--text-primary);">${t.description || cat.name}</p>${t.recurring ? html`<span class="insight-badge insight-up text-xs">↻ ${t.recurring_type || ''}</span>` : nothing}${splitIcon}
           </div>
           <p class="text-xs" style="color: var(--text-secondary);">${parseLocalDate(t.date).toLocaleDateString()} · ${cat.name}</p>
           <div class="flex gap-1 flex-wrap mt-1">${tagsList.map(tag => html`<span class="tag-badge">${tag}</span>`)}</div>

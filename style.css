@@ -1724,12 +1724,12 @@
     }
     .swipe-actions-left {
       right: 0;
-      background: linear-gradient(90deg, transparent, var(--color-expense) 20%);
+      background: var(--bg-primary);
       justify-content: flex-end;
     }
     .swipe-actions-right {
       left: 0;
-      background: linear-gradient(-90deg, transparent, var(--color-income) 20%);
+      background: var(--bg-primary);
       justify-content: flex-start;
     }
     .swipe-action-btn {
@@ -1749,8 +1749,12 @@
       transition: opacity 0.2s, transform 0.2s;
       cursor: pointer;
       border: none;
-      background: transparent;
     }
+    .swipe-action-btn.edit-swipe-btn { background: var(--color-accent); }
+    .swipe-action-btn.delete-swipe-btn { background: var(--color-expense); }
+    .swipe-action-btn.reconcile-swipe-btn { background: var(--color-income); }
+    .swipe-action-btn.split-swipe-btn { background: var(--color-purple); }
+    .swipe-action-btn.notes-swipe-btn { background: var(--color-warning); }
     .swipe-container.revealed-left .swipe-actions-left .swipe-action-btn,
     .swipe-container.revealed-right .swipe-actions-right .swipe-action-btn {
       opacity: 1;
@@ -3555,6 +3559,8 @@
         display: block;
         min-width: 0;
         justify-self: end;
+        align-self: start;
+        margin-top: -0.15rem;
       }
       #transactions-list .swipe-content.transaction-row .tx-amount {
         min-width: 0;

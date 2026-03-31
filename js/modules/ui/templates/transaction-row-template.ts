@@ -266,11 +266,6 @@ export function transactionRowTemplate(
             ${isSavingsTransfer && goalName
               ? html`<span class="tx-goal-meta" title="Savings goal">${goalName}</span>`
               : renderCategory(tx)}
-            ${tx.notes ? html`
-              <span class="tx-notes cursor-help" title="${tx.notes}">
-                📝
-              </span>
-            ` : ''}
           </div>
         </div>
       </div>
@@ -351,21 +346,21 @@ export function transactionRowSimple(
   return `
     <div class="swipe-container" data-tx-id="${escapeHtml(tx.__backendId)}">
       <div class="swipe-actions-right">
-        <button class="swipe-action-btn reconcile-swipe-btn" data-id="${escapeHtml(tx.__backendId)}" aria-label="${reconcileAria}" style="background: color-mix(in srgb, var(--color-accent) 82%, black 6%);">
+        <button class="swipe-action-btn reconcile-swipe-btn" data-id="${escapeHtml(tx.__backendId)}" aria-label="${reconcileAria}">
           <span class="swipe-icon">${tx.reconciled ? '☑' : '☐'}</span>
           <span>${reconcileLabel}</span>
         </button>
-        <button class="swipe-action-btn split-swipe-btn" data-id="${escapeHtml(tx.__backendId)}" aria-label="Split this transaction" style="background: color-mix(in srgb, var(--color-purple) 82%, black 6%);">
-          <span class="swipe-icon">✂️</span>
-          <span>Split</span>
-        </button>
+        ${tx.notes ? `<button class="swipe-action-btn notes-swipe-btn" data-id="${escapeHtml(tx.__backendId)}" aria-label="View notes" title="${escapeHtml(tx.notes)}">
+          <span class="swipe-icon">📝</span>
+          <span>Notes</span>
+        </button>` : ''}
       </div>
       <div class="swipe-actions-left">
-        <button class="swipe-action-btn edit-swipe-btn" data-id="${escapeHtml(tx.__backendId)}" aria-label="Edit transaction" style="background: color-mix(in srgb, var(--color-accent2) 82%, black 6%);">
+        <button class="swipe-action-btn edit-swipe-btn" data-id="${escapeHtml(tx.__backendId)}" aria-label="Edit">
           <span class="swipe-icon">✏️</span>
           <span>Edit</span>
         </button>
-        <button class="swipe-action-btn delete-swipe-btn" data-id="${escapeHtml(tx.__backendId)}" aria-label="Delete transaction" style="background: color-mix(in srgb, var(--color-expense) 88%, black 4%);">
+        <button class="swipe-action-btn delete-swipe-btn" data-id="${escapeHtml(tx.__backendId)}" aria-label="Delete">
           <span class="swipe-icon">✕</span>
           <span>Delete</span>
         </button>
