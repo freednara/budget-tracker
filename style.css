@@ -3538,6 +3538,7 @@
       }
       #transactions-list .swipe-content.transaction-row .tx-main {
         min-width: 0;
+        overflow: hidden;
       }
       #transactions-list .swipe-content.transaction-row .tx-description {
         align-items: flex-start;
@@ -3554,6 +3555,9 @@
       }
       #transactions-list .swipe-content.transaction-row .tx-meta {
         gap: 0.22rem 0.35rem;
+        flex-wrap: wrap;
+        overflow: hidden;
+        max-width: 100%;
       }
       #transactions-list .swipe-content.transaction-row .tx-aside {
         display: block;
