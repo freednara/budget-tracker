@@ -59,7 +59,7 @@ const gaugeData = computed((): GaugeData => {
       statusText: 'No Budget',
       totalExpenses: 0,
       totalBudget: 0,
-      note: 'Set category budgets to track pressure against plan.'
+      note: 'Set category budgets to start tracking pressure against plan.'
     };
   }
 
@@ -68,17 +68,17 @@ const gaugeData = computed((): GaugeData => {
 
   let gaugeColor = 'var(--color-income)'; // Green: <80%
   let statusText = 'Healthy';
-  let note = 'Spending is comfortably within the budget you assigned.';
+  let note = 'Spending is comfortably inside the plan.';
   if (usedPercent >= 100) {
     gaugeColor = 'var(--color-expense)'; // Red: Over budget
-    statusText = 'Over Budget';
-    note = 'This month has moved past planned spending. Rebalance budget or cut back.';
+    statusText = 'Over';
+    note = 'Spending is past plan. Rebalance budget or cut back.';
   } else if (usedPercent >= 80) {
     gaugeColor = 'var(--color-warning)'; // Yellow: 80-100%
     statusText = 'Caution';
-    note = 'You are close to your ceiling. Watch the categories driving the last stretch.';
+    note = 'You are close to the ceiling. Watch the categories driving the last stretch.';
   } else if (totalExpenses === 0) {
-    note = 'No spending recorded yet. The gauge will appear once this month has real expense activity.';
+    note = 'No spending recorded yet.';
   }
 
   return {
@@ -136,23 +136,24 @@ export function mountBudgetGauge(): () => void {
     const fillArc = describeArc(cx, cy, r, startAngle, fillAngle);
 
     render(html`
-      <svg viewBox="0 0 ${w} ${h}" class="w-48" role="img" aria-label="Budget health gauge showing ${data.usedPercent}% used">
-        <title>Budget Health</title>
-        <desc>Semi-circular gauge indicating ${data.statusText} status with ${data.usedPercent}% of budget used</desc>
-        ${svg`
-          <path d="${bgArc}" fill="none" stroke="var(--bg-input)" stroke-width="14" stroke-linecap="round"/>
-          <path d="${fillArc}" fill="none" stroke="${data.gaugeColor}" stroke-width="14" stroke-linecap="round"/>
-          <text x="${cx}" y="${cy - 25}" text-anchor="middle" font-size="28" font-weight="800" fill="${data.gaugeColor}">${data.usedPercent}%</text>
-          <text x="${cx}" y="${cy - 5}" text-anchor="middle" font-size="10" fill="var(--text-secondary)">${data.statusText}</text>
-        `}
-      </svg>
-      <div class="text-center mt-2">
-        <p class="text-xs" style="color: var(--text-tertiary);">
-          ${fmtCur(data.totalExpenses)} of ${fmtCur(data.totalBudget)} budget used
-        </p>
-        <p class="text-xs mt-2" style="color: var(--text-secondary); max-width: 18rem;">
-          ${data.note}
-        </p>
+      <div class="budget-health-layout">
+        <div class="budget-health-gauge-wrap">
+          <svg viewBox="0 0 ${w} ${h}" class="budget-health-gauge" role="img" aria-label="Budget health gauge showing ${data.usedPercent}% used">
+            <title>Budget Health</title>
+            <desc>Semi-circular gauge indicating ${data.statusText} status with ${data.usedPercent}% of budget used</desc>
+            ${svg`
+              <path d="${bgArc}" fill="none" stroke="var(--bg-input)" stroke-width="14" stroke-linecap="round"/>
+              <path d="${fillArc}" fill="none" stroke="${data.gaugeColor}" stroke-width="14" stroke-linecap="round"/>
+              <text x="${cx}" y="${cy - 25}" text-anchor="middle" font-size="28" font-weight="800" fill="${data.gaugeColor}">${data.usedPercent}%</text>
+              <text x="${cx}" y="${cy - 5}" text-anchor="middle" font-size="10" fill="var(--text-secondary)">${data.statusText}</text>
+            `}
+          </svg>
+        </div>
+        <div class="budget-health-summary">
+          <span class="budget-health-status" style=${`--budget-health-tone: ${data.gaugeColor};`}>${data.statusText}</span>
+          <p class="budget-health-amount">${fmtCur(data.totalExpenses)} of ${fmtCur(data.totalBudget)} used</p>
+          <p class="budget-health-note">${data.note}</p>
+        </div>
       </div>
     `, container);
   });

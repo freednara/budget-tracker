@@ -27,7 +27,7 @@ interface SwipeConfigInternal extends SwipeConfig {
 const DEFAULT_CONFIG: SwipeConfigInternal = {
   threshold: 80,           // Pixels to trigger action reveal
   VELOCITY_THRESHOLD: 0.5, // px/ms for quick swipe
-  maxSwipe: 140,           // Maximum swipe distance
+  maxSwipe: 168,           // Maximum swipe distance
   resistance: 0.4,         // Resistance factor past threshold
   ANGLE_THRESHOLD: 30,     // Max angle (degrees) for horizontal swipe
   MIN_DISTANCE: 10         // Minimum distance to start gesture detection
@@ -142,11 +142,13 @@ export const swipeManager = {
       touchend: (e: TouchEvent) => this.onTouchEnd(e, container, content)
     };
 
-    // Start with passive listeners for optimal scroll performance
+    // touchmove must already be attached when the gesture begins so the first
+    // horizontal movement can be measured and locked correctly.
     content.addEventListener('touchstart', handlers.touchstart, { passive: true });
+    content.addEventListener('touchmove', handlers.touchmove, { passive: false });
     content.addEventListener('touchend', handlers.touchend, { passive: true });
 
-    // Store handlers for cleanup (touchmove added dynamically)
+    // Store handlers for cleanup
     listenerMap.set(content, handlers);
   },
 
@@ -229,16 +231,8 @@ export const swipeManager = {
       const angle = getSwipeAngle(diffX, diffY);
       
       if (angle <= swipeConfig.ANGLE_THRESHOLD) {
-        // Horizontal swipe confirmed - now attach non-passive touchmove
         state.isHorizontal = true;
         state.isLocked = true;
-        
-        // Attach non-passive touchmove listener for preventDefault
-        const handlers = listenerMap.get(content);
-        if (handlers && !content.hasAttribute('data-touchmove-attached')) {
-          content.addEventListener('touchmove', handlers.touchmove, { passive: false });
-          content.setAttribute('data-touchmove-attached', 'true');
-        }
       } else {
         // Vertical scroll - abort swipe and don't interfere
         this.resetSwipe(content);
@@ -277,13 +271,6 @@ export const swipeManager = {
     const state = getSwipeState(content);
     
     content.classList.remove('swiping');
-
-    // Clean up dynamic touchmove listener
-    content.removeAttribute('data-touchmove-attached');
-    const handlers = listenerMap.get(content);
-    if (handlers) {
-      content.removeEventListener('touchmove', handlers.touchmove);
-    }
 
     // Only process if we had a confirmed horizontal swipe
     if (!state.isHorizontal) {
@@ -378,13 +365,6 @@ export const swipeManager = {
     content.classList.remove('swiping');
     content.style.transform = '';
     
-    // Clean up dynamic touchmove listener
-    content.removeAttribute('data-touchmove-attached');
-    const handlers = listenerMap.get(content);
-    if (handlers) {
-      content.removeEventListener('touchmove', handlers.touchmove);
-    }
-    
     // Clear pending cleanup
     clearPendingCleanup(content);
     
@@ -410,7 +390,7 @@ export const swipeManager = {
     attachedElements: number;
     statesInMemory: number;
   } {
-    const attachedElements = document.querySelectorAll<HTMLElement>('[data-touchmove-attached]').length;
+    const attachedElements = document.querySelectorAll<HTMLElement>('.swipe-content').length;
     
     return {
       activeSwipes: activeSwipeContainer ? 1 : 0,
@@ -425,11 +405,6 @@ export const swipeManager = {
   forceCleanup(): void {
     this.closeAll();
     activeSwipeContainer = null;
-    
-    // Clean up any remaining dynamic listeners
-    document.querySelectorAll<HTMLElement>('[data-touchmove-attached]').forEach(el => {
-      el.removeAttribute('data-touchmove-attached');
-    });
   }
 };
 

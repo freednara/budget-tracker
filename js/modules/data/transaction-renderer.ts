@@ -19,6 +19,7 @@ import { render, html } from '../core/lit-helpers.js';
 import { formatCurrency } from '../core/currency-service.js';
 import { modal } from '../core/state-actions.js';
 import { openModal, showToast } from '../ui/core/ui.js';
+import { swipeManager } from '../ui/interactions/swipe-manager.js';
 import { filterTransactions, isWorkerReady, syncWorkerDataset } from '../orchestration/worker-manager.js';
 import { monthLabel } from '../core/utils.js';
 import DOM from '../core/dom-cache.js';
@@ -212,6 +213,12 @@ export async function renderTransactionsList(resetPage: boolean = false): Promis
     `;
 
     render(template, container);
+
+    if (config.enableSwipeActions) {
+      container.querySelectorAll<HTMLElement>('.swipe-container').forEach((swipeContainer) => {
+        swipeManager.attach(swipeContainer);
+      });
+    }
 
     // 7. Render pagination controls
     renderPaginationControls(result.totalItems, result.currentPage, config.itemsPerPage || 50);

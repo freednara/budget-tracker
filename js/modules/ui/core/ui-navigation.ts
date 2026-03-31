@@ -10,12 +10,15 @@
  */
 'use strict';
 
+import { effect } from '@preact/signals-core';
 import { lsSet } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
+import { getAllCats } from '../../core/categories.js';
 import { navigation, form } from '../../core/state-actions.js';
 import { emit, Events } from '../../core/event-bus.js';
 import DOM from '../../core/dom-cache.js';
 import { CONFIG } from '../../core/config.js';
+import { replaceTransactionFilters } from '../../data/transaction-surface-coordinator.js';
 import type { Transaction, MainTab } from '../../../types/index.js';
 
 // ==========================================
@@ -23,23 +26,13 @@ import type { Transaction, MainTab } from '../../../types/index.js';
 // ==========================================
 
 type TransactionType = 'expense' | 'income';
+type DashboardTransactionType = TransactionType | 'all';
 
 // ==========================================
 // DEPENDENCY INJECTION
 // ==========================================
 
 import { getDefaultContainer, Services } from '../../core/di-container.js';
-
-/**
- * Get render categories function from DI container
- */
-function getRenderCategories(): () => void {
-  try {
-    return getDefaultContainer().resolveSync<() => void>(Services.RENDER_CATEGORIES);
-  } catch {
-    return () => {};
-  }
-}
 
 /**
  * Get update charts function from DI container
@@ -53,13 +46,51 @@ function getUpdateCharts(): () => void {
 }
 
 // Module state for quick shortcuts (not yet in DI)
+let renderCategoriesFn: () => void = () => {};
 let renderQuickShortcutsFn: () => void = () => {};
+let _transactionTypeUiCleanup: (() => void) | null = null;
+
+function syncTransactionEntryUi(): void {
+  const currentType = signals.currentType.value;
+  const selectedCategory = signals.selectedCategory.value;
+  const editingId = signals.editingId.value;
+
+  syncTransactionTabDOM(currentType);
+
+  if (!editingId && selectedCategory) {
+    const validCategories = getAllCats(currentType);
+    const hasSelectedCategory = validCategories.some((category) => category.id === selectedCategory);
+    if (!hasSelectedCategory) {
+      form.clearSelectedCategory();
+    }
+  }
+
+  renderCategoriesFn();
+  renderQuickShortcutsFn();
+}
+
+function bindTransactionTypeUi(): void {
+  if (_transactionTypeUiCleanup) return;
+
+  _transactionTypeUiCleanup = effect(() => {
+    signals.currentType.value;
+    signals.selectedCategory.value;
+    signals.editingId.value;
+    syncTransactionEntryUi();
+  });
+}
 
 /**
  * Set the quick shortcuts render function
  */
+export function setRenderCategoriesFn(fn: () => void): void {
+  renderCategoriesFn = fn;
+  syncTransactionEntryUi();
+}
+
 export function setRenderQuickShortcutsFn(fn: () => void): void {
   renderQuickShortcutsFn = fn;
+  syncTransactionEntryUi();
 }
 
 // Swipe thresholds from centralized config (single source of truth)
@@ -248,6 +279,29 @@ export function revealTransactionsForm(focusId?: string, selectInput = false): v
   }
 }
 
+export async function openTransactionsForMonthType(type: DashboardTransactionType): Promise<void> {
+  switchMainTab('transactions');
+
+  await replaceTransactionFilters({
+    ...signals.filters.value,
+    type,
+    dateFrom: '',
+    dateTo: '',
+    showAllMonths: false
+  }, { resetPage: true });
+
+  requestAnimationFrame(() => {
+    const ledgerCard = document.querySelector('.transactions-ledger-card');
+    if (!(ledgerCard instanceof HTMLElement)) return;
+
+    const shellHeight = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--app-shell-stack-height')) || 0;
+    const top = Math.max(0, ledgerCard.getBoundingClientRect().top + window.scrollY - shellHeight - 8);
+    ledgerCard.tabIndex = -1;
+    window.scrollTo({ top, behavior: 'instant' as ScrollBehavior });
+    ledgerCard.focus({ preventScroll: true });
+  });
+}
+
 export async function openTransactionsForDate(date: string): Promise<void> {
   switchMainTab('transactions');
 
@@ -299,10 +353,6 @@ export function switchTab(type: TransactionType): void {
   // Signal is the source of truth
   navigation.setCurrentTab(type);
   if (!signals.editingId.value) form.clearSelectedCategory();
-
-  syncTransactionTabDOM(type);
-  getRenderCategories()();
-  renderQuickShortcutsFn();
 }
 
 /**
@@ -486,18 +536,24 @@ export function initShellNavigation(): void {
 
   bindAppShellMetrics();
   bindTransactionsEntryLayout();
+  bindTransactionTypeUi();
   setupExpenseIncomeTabs();
   setupMonthNavigation();
   setupMainTabListeners();
   setupSwipeGestures();
 
   syncMainTabDOM(signals.activeMainTab.value);
-  syncTransactionTabDOM(signals.currentTab.value);
+  syncTransactionEntryUi();
 }
 
 export function cleanupShellNavigation(): void {
   cleanupNavigationListeners();
   cleanupSwipeGestures();
+
+  if (_transactionTypeUiCleanup) {
+    _transactionTypeUiCleanup();
+    _transactionTypeUiCleanup = null;
+  }
 
   if (_shellResizeObserver) {
     _shellResizeObserver.disconnect();

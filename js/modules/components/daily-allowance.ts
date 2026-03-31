@@ -20,6 +20,7 @@ import {
   fmtCur,
   parseMonthKey,
   getMonthKey,
+  getPrevMonthKey,
   getTodayStr,
   toCents,
   toDollars
@@ -33,7 +34,7 @@ import {
 import { isTrackedExpenseTransaction } from '../core/transaction-classification.js';
 import DOM from '../core/dom-cache.js';
 import { animateValue as animateValueById } from '../orchestration/dashboard-animations.js';
-import { revealTransactionsForm } from '../ui/core/ui-navigation.js';
+import { openTransactionsForMonthType, revealTransactionsForm } from '../ui/core/ui-navigation.js';
 
 // ==========================================
 // COMPUTED SIGNALS
@@ -151,7 +152,7 @@ function animateValue(el: HTMLElement, target: number): void {
 /**
  * Set badge status class. Centralizes the repeated stat-badge pattern.
  */
-type BadgeStatus = 'positive' | 'negative' | 'neutral';
+type BadgeStatus = 'positive' | 'negative' | 'neutral' | 'warning';
 function setBadge(el: HTMLElement, text: string, status: BadgeStatus): void {
   el.textContent = text;
   el.className = `stat-badge stat-${status} text-xs`;
@@ -177,6 +178,11 @@ function mountHeroCard(): () => void {
   const heroBadge = DOM.get('hero-pace-badge');
   const heroPrimaryAction = DOM.get('hero-primary-action') as HTMLButtonElement | null;
   const heroSecondaryAction = DOM.get('hero-secondary-action') as HTMLButtonElement | null;
+  const incomeCard = DOM.get('dashboard-income-card') as HTMLButtonElement | null;
+  const expenseCard = DOM.get('dashboard-expense-card') as HTMLButtonElement | null;
+  const balanceCard = DOM.get('dashboard-balance-card') as HTMLButtonElement | null;
+  const incomeBadge = DOM.get('income-badge');
+  const expenseBadge = DOM.get('expense-badge');
   const balanceEl = DOM.get('total-balance');
   const balanceBadge = DOM.get('balance-badge');
 
@@ -207,15 +213,30 @@ function mountHeroCard(): () => void {
 
   const handlePrimaryActionClick = (): void => navigateFromHero(heroPrimaryAction?.dataset.action || 'transactions');
   const handleSecondaryActionClick = (): void => navigateFromHero(heroSecondaryAction?.dataset.action || 'budget');
+  const handleIncomeCardClick = (): void => {
+    void openTransactionsForMonthType('income');
+  };
+  const handleExpenseCardClick = (): void => {
+    void openTransactionsForMonthType('expense');
+  };
+  const handleBalanceCardClick = (): void => {
+    void openTransactionsForMonthType('all');
+  };
 
   heroPrimaryAction?.addEventListener('click', handlePrimaryActionClick);
   heroSecondaryAction?.addEventListener('click', handleSecondaryActionClick);
+  incomeCard?.addEventListener('click', handleIncomeCardClick);
+  expenseCard?.addEventListener('click', handleExpenseCardClick);
+  balanceCard?.addEventListener('click', handleBalanceCardClick);
 
   const cleanup = effect(() => {
     const m = dailyMetrics.value;
     const dailyBudget = m.income / m.daysInMonth;
     const noActivity = m.income === 0 && m.expenses === 0;
     const noBudget = signals.dailyAllowanceData.value.status === 'no-budget';
+    const previousMonthKey = getPrevMonthKey(signals.currentMonth.value);
+    const previousIncome = calcTotals(getMonthTx(previousMonthKey)).income;
+    const monthLabel = parseMonthKey(signals.currentMonth.value).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 
     // Daily allowance with animation
     if (noActivity && noBudget) {
@@ -239,21 +260,21 @@ function mountHeroCard(): () => void {
 
     if (heroAmountCaption) {
       if (m.isFutureMonth) {
-        heroAmountCaption.textContent = 'Projected daily allowance for this upcoming month';
+        heroAmountCaption.textContent = 'Projected daily room for the upcoming month';
       } else if (noActivity && noBudget && m.savings > 0) {
-        heroAmountCaption.textContent = `Savings transfers are tracked separately, with ${fmtCur(m.savings)} already set aside this month`;
+        heroAmountCaption.textContent = `${fmtCur(m.savings)} is already set aside, but you still need income or a budget for a daily target`;
       } else if (m.isPastMonth) {
-        heroAmountCaption.textContent = 'What this month could support per day';
+        heroAmountCaption.textContent = 'What this month could have supported per day';
       } else if (noActivity && noBudget) {
-        heroAmountCaption.textContent = 'Set a budget or add income to unlock your daily allowance';
+        heroAmountCaption.textContent = 'Set a budget or add income to turn this into a real daily target';
       } else if (noBudget) {
         heroAmountCaption.textContent = m.savings > 0
-          ? `Estimated from income, spending, and ${fmtCur(m.savings)} moved to savings because no budget is set`
-          : 'Estimated from income and spending because no budget is set';
+          ? `Estimate based on income, spending, and ${fmtCur(m.savings)} moved to savings`
+          : 'Estimate based on income and spending because no budget is set';
       } else if (m.savings > 0) {
-        heroAmountCaption.textContent = `Available to spend per day after ${fmtCur(m.savings)} moved to savings this month`;
+        heroAmountCaption.textContent = `Daily room after ${fmtCur(m.savings)} moved to savings this month`;
       } else {
-        heroAmountCaption.textContent = 'Available to spend per day';
+        heroAmountCaption.textContent = 'Daily room for the rest of this month';
       }
     }
 
@@ -299,12 +320,12 @@ function mountHeroCard(): () => void {
 
     // Badge status
     if (heroBadge) {
-      if (m.isFutureMonth) setBadge(heroBadge, 'Upcoming', 'neutral');
-      else if (m.isPastMonth && m.income === 0 && m.expenses === 0) setBadge(heroBadge, 'No Data', 'neutral');
-      else if (m.isPastMonth) setBadge(heroBadge, 'Month Ended', 'neutral');
-      else if (m.income === 0 && m.expenses === 0) setBadge(heroBadge, 'Get Started', 'neutral');
-      else if (m.remaining < 0) setBadge(heroBadge, 'Over Budget', 'negative');
-      else if (m.dailyAllowance < dailyBudget * 0.3) setBadge(heroBadge, 'Running Low', 'neutral');
+      if (m.isFutureMonth) setBadge(heroBadge, 'New', 'neutral');
+      else if (m.isPastMonth && m.income === 0 && m.expenses === 0) setBadge(heroBadge, 'New', 'neutral');
+      else if (m.isPastMonth) setBadge(heroBadge, 'On Track', 'neutral');
+      else if (m.income === 0 && m.expenses === 0) setBadge(heroBadge, 'New', 'neutral');
+      else if (m.remaining < 0) setBadge(heroBadge, 'Over', 'negative');
+      else if (m.dailyAllowance < dailyBudget * 0.3) setBadge(heroBadge, 'Caution', 'warning');
       else setBadge(heroBadge, 'On Track', 'positive');
     }
 
@@ -312,29 +333,29 @@ function mountHeroCard(): () => void {
     if (heroMotivation) {
       let message = '';
       if (m.isFutureMonth) {
-        message = '🗓️ You are planning ahead. Use the Budget tab to shape this month before it starts.';
+        message = 'Set this month up now so the first few transactions land inside a real plan.';
       } else if (m.isPastMonth && noActivity) {
-        message = '📭 No activity was recorded for this month yet.';
+        message = 'No activity landed in this month, so there is nothing to review yet.';
       } else if (noActivity && noBudget && m.savings > 0) {
-        message = `💚 You moved ${fmtCur(m.savings)} to savings this month. Add income or a budget to turn that into a daily allowance.`;
+        message = `Add income or a budget so ${fmtCur(m.savings)} in savings progress turns into a usable plan.`;
       } else if (noActivity && noBudget) {
-        message = '👋 Start with a budget or your first transaction so this dashboard can guide you.';
+        message = 'Start with a budget or a first transaction so this dashboard can guide the month.';
       } else if (noBudget) {
         message = m.savings > 0
-          ? `💚 ${fmtCur(m.savings)} is already set aside for savings, and this estimate reflects that transfer.`
-          : '🧭 Add a budget to turn this estimate into a real daily allowance target.';
+          ? `Set a budget so this estimate and ${fmtCur(m.savings)} in savings progress work from the same plan.`
+          : 'Set a budget to replace this estimate with a real spending target.';
       } else if (m.remaining < 0) {
-        message = '⚠️ You\'ve exceeded your budget. Time to review spending!';
+        message = 'Review the categories driving the overage, then tighten the plan for the rest of the month.';
       } else if (m.savings > 0) {
-        message = `💚 ${fmtCur(m.savings)} has already been moved to savings this month, so it’s excluded from what’s left to spend.`;
+        message = `Keep logging spending so the ${fmtCur(m.savings)} already set aside stays protected.`;
       } else if (m.daysRemaining <= 3) {
-        message = '🎯 Almost to the finish line! Stay strong!';
+        message = 'Finish the month cleanly by keeping the last few spending decisions intentional.';
       } else if (m.dailyAllowance > dailyBudget * 1.5) {
-        message = '💪 Great job! You\'re ahead of your budget goals!';
+        message = 'You have room this month. Keep it intentional instead of letting the extra room disappear.';
       } else if (m.dailyAllowance < dailyBudget * 0.5) {
-        message = '🔍 Watch your spending - allowance is running low.';
+        message = 'Open Budget or Transactions now to find the pressure point while there is still time to react.';
       } else {
-        message = '✨ Stay consistent with tracking for best results!';
+        message = 'Stay consistent: keep logging spending and check the categories driving this month.';
       }
       heroMotivation.textContent = message;
     }
@@ -383,16 +404,43 @@ function mountHeroCard(): () => void {
       balanceEl.style.color = balance >= 0 ? 'var(--color-income)' : 'var(--color-expense)';
 
       if (balanceBadge) {
-        if (balance > m.income * 0.3) setBadge(balanceBadge, 'Healthy', 'positive');
-        else if (balance > 0) setBadge(balanceBadge, 'OK', 'neutral');
-        else setBadge(balanceBadge, 'Deficit', 'negative');
+        if (m.income === 0 && m.expenses === 0) setBadge(balanceBadge, 'New', 'neutral');
+        else if (balance > m.income * 0.3) setBadge(balanceBadge, 'Healthy', 'positive');
+        else if (balance > 0) setBadge(balanceBadge, 'Caution', 'warning');
+        else setBadge(balanceBadge, 'Over', 'negative');
       }
+    }
+
+    if (incomeBadge) {
+      if (m.income === 0) setBadge(incomeBadge, 'New', 'neutral');
+      else if (previousIncome > 0 && m.income < previousIncome * 0.85) setBadge(incomeBadge, 'Caution', 'warning');
+      else setBadge(incomeBadge, 'Healthy', 'positive');
+    }
+
+    if (expenseBadge) {
+      if (m.income === 0 && m.expenses === 0) setBadge(expenseBadge, 'New', 'neutral');
+      else if (m.income > 0 && m.expenses > m.income) setBadge(expenseBadge, 'Over', 'negative');
+      else if (m.income > 0 && m.expenses >= m.income * 0.8) setBadge(expenseBadge, 'Caution', 'warning');
+      else setBadge(expenseBadge, 'On Track', 'positive');
+    }
+
+    if (incomeCard) {
+      incomeCard.setAttribute('aria-label', `View income transactions for ${monthLabel}`);
+    }
+    if (expenseCard) {
+      expenseCard.setAttribute('aria-label', `View expense transactions for ${monthLabel}`);
+    }
+    if (balanceCard) {
+      balanceCard.setAttribute('aria-label', `View all transactions for ${monthLabel}`);
     }
   });
 
   return () => {
     heroPrimaryAction?.removeEventListener('click', handlePrimaryActionClick);
     heroSecondaryAction?.removeEventListener('click', handleSecondaryActionClick);
+    incomeCard?.removeEventListener('click', handleIncomeCardClick);
+    expenseCard?.removeEventListener('click', handleExpenseCardClick);
+    balanceCard?.removeEventListener('click', handleBalanceCardClick);
     cleanup();
   };
 }

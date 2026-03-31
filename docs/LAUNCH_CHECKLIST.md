@@ -1,4 +1,4 @@
-# 🚀 Budget Tracker Elite - Production Launch Checklist
+# 🚀 Harbor Ledger - Production Launch Checklist
 
 ## ✅ Modernization & Refactoring (COMPLETED)
 
@@ -50,6 +50,17 @@
 ### 🌅 Morning (6 AM - 12 PM)
 - [ ] **Final Smoke Test** (1 hour)
   - Verify PWA installability, offline mode, and multi-tab sync.
+- [ ] **Mobile Real-Device Reconciliation** (20 min)
+  - Open `/e2e-reset.html` in Safari and wait for reset completion.
+  - Confirm the loaded build in `Settings -> App Runtime` matches the intended version/build time.
+  - Check the latest mobile layout in both:
+    - Safari tab
+    - installed standalone PWA
+  - Validate the same three surfaces in both runtimes:
+    - dashboard above the fold
+    - transactions entry form top section
+    - calendar planning + selected-day layout
+  - Reject the build if either runtime shows horizontal overflow, a multi-column transaction form, or a collapsed calendar side rail.
 - [ ] **Production Deployment** (30 min)
   ```bash
   npm run build

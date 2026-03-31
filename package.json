@@ -1,7 +1,7 @@
 {
   "name": "budget-tracker",
   "version": "2.6.2",
-  "description": "Budget Tracker Elite PWA",
+  "description": "Harbor Ledger PWA",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -28,6 +28,10 @@
   },
   "sideEffects": false,
   "dependencies": {
+    "@capacitor/android": "^8.3.0",
+    "@capacitor/cli": "^8.3.0",
+    "@capacitor/core": "^8.3.0",
+    "@capacitor/ios": "^8.3.0",
     "@preact/signals-core": "^1.14.0",
     "lit-html": "^3.3.2"
   }

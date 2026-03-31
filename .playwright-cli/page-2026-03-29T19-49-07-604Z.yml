@@ -1,0 +1,144 @@
+- generic [active] [ref=e1]:
+  - alert [ref=e2]
+  - status [ref=e3]
+  - generic [ref=e16]:
+    - banner [ref=e17]:
+      - generic [ref=e18]:
+        - generic [ref=e19]:
+          - generic [ref=e20]:
+            - generic [ref=e21]: 💎
+            - heading "Budget Tracker Elite" [level=1] [ref=e23]
+          - generic [ref=e24]:
+            - button "Open analytics" [ref=e25] [cursor=pointer]: 📈 Analytics
+            - button "Open settings" [ref=e26] [cursor=pointer]: ⚙️
+        - tablist "Main navigation" [ref=e27]:
+          - tab "📊 Dashboard" [selected] [ref=e28] [cursor=pointer]
+          - tab "🎯 Budget" [ref=e29] [cursor=pointer]
+          - tab "💸 Transactions" [ref=e30] [cursor=pointer]
+          - tab "🗓️ Calendar" [ref=e31] [cursor=pointer]
+        - region "Month navigation" [ref=e32]:
+          - button "Previous month" [ref=e33] [cursor=pointer]: ◀
+          - generic [ref=e34]:
+            - heading "March 2026" [level=2] [ref=e35]
+            - paragraph [ref=e36]: Budget Period
+          - button "Next month" [ref=e37] [cursor=pointer]: ▶
+    - main [ref=e38]:
+      - tabpanel "📊 Dashboard" [ref=e39]:
+        - generic [ref=e40]:
+          - generic [ref=e41]:
+            - generic [ref=e42]:
+              - generic [ref=e43]:
+                - generic [ref=e44]: 💰
+                - generic [ref=e45]:
+                  - paragraph [ref=e46]: YOUR DAILY ALLOWANCE
+                  - paragraph [ref=e47]: 3 days left in month
+              - generic [ref=e48]: New
+            - generic [ref=e49]:
+              - paragraph [ref=e50]: —
+              - paragraph [ref=e51]: Set a budget or add income to turn this into a real daily target
+            - generic [ref=e52]:
+              - generic [ref=e53]:
+                - generic [ref=e54]: MONTH ELAPSED
+                - generic [ref=e55]: 94% complete
+              - progressbar [ref=e57]
+            - generic [ref=e58]:
+              - generic [ref=e59]:
+                - generic [ref=e60]: SPENDING PACE
+                - generic [ref=e61]: 0% of income spent
+              - paragraph [ref=e62]: Spend vs calendar progress.
+              - progressbar "Monthly spending pace" [ref=e64]
+              - generic [ref=e65]:
+                - generic [ref=e66]: Day 1
+                - generic [ref=e67]: Day 29 of 31
+                - generic [ref=e68]: Month End
+              - generic [ref=e69]:
+                - generic [ref=e70]: —
+                - generic [ref=e71]: No budget set
+            - generic [ref=e72]:
+              - generic [ref=e73]:
+                - paragraph [ref=e74]: LEFT TO SPEND
+                - paragraph [ref=e75]: $0.00
+              - generic [ref=e76]:
+                - paragraph [ref=e77]: SPENT TODAY
+                - paragraph [ref=e78]: $0.00
+            - generic [ref=e79]:
+              - paragraph [ref=e80]: Next Best Move
+              - paragraph [ref=e81]: Start with a budget or a first transaction so this dashboard can guide the month.
+              - generic [ref=e82]:
+                - button "Plan Budget" [ref=e83] [cursor=pointer]
+                - button "Add Transaction" [ref=e84] [cursor=pointer]
+          - generic [ref=e85]:
+            - button "View income transactions for March 2026" [ref=e86] [cursor=pointer]:
+              - generic [ref=e87]:
+                - generic [ref=e88]: 💵
+                - generic [ref=e89]: New
+              - paragraph [ref=e90]: INCOME
+              - paragraph [ref=e91]: $0.00
+            - button "View expense transactions for March 2026" [ref=e92] [cursor=pointer]:
+              - generic [ref=e93]:
+                - generic [ref=e94]: 💸
+                - generic [ref=e95]: New
+              - paragraph [ref=e96]: EXPENSES
+              - paragraph [ref=e97]: $0.00
+            - button "View all transactions for March 2026" [ref=e98] [cursor=pointer]:
+              - generic [ref=e99]:
+                - generic [ref=e100]: 📊
+                - generic [ref=e101]: New
+              - paragraph [ref=e102]: BALANCE
+              - paragraph [ref=e103]: $0.00
+              - paragraph [ref=e104]: Income - Expenses
+        - generic [ref=e105]:
+          - heading "📚 Why This Month Looks This Way" [level=2] [ref=e106]
+          - paragraph [ref=e107]: The key context behind your budget pressure, pace, and biggest spending drivers.
+        - generic [ref=e108]:
+          - generic [ref=e109]:
+            - generic [ref=e110]:
+              - generic [ref=e111]:
+                - paragraph [ref=e112]: 📊 Income vs Expenses
+                - paragraph [ref=e113]: How income and spending are shaping the month.
+              - generic [ref=e114]:
+                - button "3M" [ref=e115] [cursor=pointer]
+                - button "6M" [pressed] [ref=e116] [cursor=pointer]
+                - button "12M" [ref=e117] [cursor=pointer]
+            - paragraph [ref=e119]: Add transactions to unlock your income and expense trend.
+          - generic [ref=e120]:
+            - generic [ref=e122]:
+              - generic [ref=e123]:
+                - paragraph [ref=e124]:
+                  - text: 🏆 Category Breakdown
+                  - generic [ref=e126]: Mar 2026
+                - paragraph [ref=e127]: Which categories are creating the most pressure.
+              - group [ref=e128]:
+                - generic "Explain category breakdown percentages" [ref=e129] [cursor=pointer]:
+                  - generic [ref=e130]: i
+            - paragraph [ref=e132]: No expense categories yet for this month.
+        - generic [ref=e133]:
+          - generic [ref=e134]:
+            - heading "✨ What To Do Next" [level=2] [ref=e135]
+            - paragraph [ref=e136]: Three concrete moves to keep this month healthy.
+          - generic [ref=e137]:
+            - generic [ref=e138]:
+              - generic [ref=e139]:
+                - generic [ref=e140]: 📊
+                - paragraph [ref=e141]: Trend
+              - generic [ref=e143]:
+                - paragraph [ref=e144]: Add your first few transactions to reveal what is really driving this month.
+                - button "Open ledger →" [ref=e145] [cursor=pointer]
+            - generic [ref=e146]:
+              - generic [ref=e147]:
+                - generic [ref=e148]: 🔮
+                - paragraph [ref=e149]: Forecast
+              - generic [ref=e151]:
+                - paragraph [ref=e152]: Set a budget early so the dashboard can tell you what is healthy versus risky.
+                - button "Plan budget →" [ref=e153] [cursor=pointer]
+            - generic [ref=e154]:
+              - generic [ref=e155]:
+                - generic [ref=e156]: 💡
+                - paragraph [ref=e157]: Action
+              - generic [ref=e159]:
+                - paragraph [ref=e160]: Once the basics are in place, review your goals and keep the month intentional.
+                - button "Open goals →" [ref=e161] [cursor=pointer]
+  - generic:
+    - generic:
+      - generic: ✓
+      - generic: You're ready to track!

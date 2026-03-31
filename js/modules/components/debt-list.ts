@@ -113,12 +113,21 @@ export function mountDebtList(): () => void {
             <div class="debt-item__progress-fill" style=${styleMap({ width: `${item.progress.percentComplete}%` })}></div>
           </div>
           <div class="debt-item__stats">
-            <span>${item.progress.percentComplete.toFixed(1)}% paid off</span>
-            <span>Min payment: ${fmtCur(item.debt.minimumPayment)}/mo</span>
+            <span class="debt-item__stat">
+              <span class="debt-item__stat-label">Paid</span>
+              <span class="debt-item__stat-value">${item.progress.percentComplete.toFixed(1)}%</span>
+            </span>
+            <span class="debt-item__stat">
+              <span class="debt-item__stat-label">Min / mo</span>
+              <span class="debt-item__stat-value">${fmtCur(item.debt.minimumPayment)}</span>
+            </span>
           </div>
           <div class="debt-item-actions">
-            <button class="btn btn-secondary debt-edit-btn" style="font-size: 0.875rem;">Edit</button>
-            <button class="btn btn-primary debt-payment-btn" style="font-size: 0.875rem;">Make Payment</button>
+            <span class="debt-item-actions__label">Next step</span>
+            <div class="debt-item-actions__buttons">
+              <button class="btn btn-secondary debt-edit-btn" style="font-size: 0.875rem;">Edit</button>
+              <button class="btn btn-primary debt-payment-btn" style="font-size: 0.875rem;">Make Payment</button>
+            </div>
           </div>
         </div>
       `)}

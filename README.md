@@ -1,4 +1,4 @@
-# Budget Tracker Elite 💰
+# Harbor Ledger 💰
 
 > Professional-grade personal finance management with uncompromising privacy
 
@@ -7,9 +7,9 @@
 [![PWA](https://img.shields.io/badge/PWA-Ready-purple.svg)](https://web.dev/progressive-web-apps/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-100%25-blue.svg)](https://www.typescriptlang.org/)
 
-## 🌟 Why Budget Tracker Elite?
+## 🌟 Why Harbor Ledger?
 
-**Your finances should be yours alone.** Budget Tracker Elite is a privacy-first, local-first financial management tool. No cloud, no tracking, no subscriptions. Just powerful budgeting that respects your privacy.
+**Your finances should be yours alone.** Harbor Ledger is a privacy-first, local-first financial management tool. No cloud, no tracking, no subscriptions. Just powerful budgeting that respects your privacy.
 
 ### Modernization Highlights
 - 🟦 **100% TypeScript** - Robust type safety and developer experience

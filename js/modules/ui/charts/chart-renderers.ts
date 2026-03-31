@@ -108,6 +108,42 @@ interface ProcessedDonutData extends DonutChartData {
   endAngle: number;
 }
 
+interface DashboardCategoryBreakdownStatus {
+  label: 'Healthy' | 'Caution';
+  tone: 'positive' | 'warning';
+}
+
+export function getDashboardCategoryBreakdownStatus(
+  sharePercent: number,
+  trend?: CategoryTrendChange | null
+): DashboardCategoryBreakdownStatus | null {
+  if (sharePercent >= 40) {
+    return { label: 'Caution', tone: 'warning' };
+  }
+
+  if (!trend || trend.direction === 'new') {
+    return null;
+  }
+
+  if (trend.direction === 'up') {
+    if (trend.change >= 15) {
+      return { label: 'Caution', tone: 'warning' };
+    }
+
+    if (sharePercent >= 25 && trend.change > 0) {
+      return { label: 'Caution', tone: 'warning' };
+    }
+
+    return null;
+  }
+
+  if ((trend.direction === 'down' || trend.direction === 'flat') && sharePercent < 40) {
+    return { label: 'Healthy', tone: 'positive' };
+  }
+
+  return null;
+}
+
 /**
  * Process donut chart data to fix floating-point precision issues
  */
@@ -329,14 +365,24 @@ export function renderDonutChart(containerId: string, data: DonutChartData[], tr
       
       <div class="flex-1 space-y-${isDashboardSnapshot ? '1' : '2'} pt-${isDashboardSnapshot ? '0.5' : '1'}">
         ${legendItems.map(d => {
-          const pct = (d.value / total * 100).toFixed(0);
-          const trend = d.catId && trends[d.catId];
+          const sharePercent = total === 0 ? 0 : (d.value / total) * 100;
+          const pct = sharePercent.toFixed(0);
+          const trend = d.catId ? trends[d.catId] : undefined;
+          const status = getDashboardCategoryBreakdownStatus(sharePercent, trend);
           let trendArrow = '';
           let trendColor = 'var(--text-tertiary)';
+          let trendAriaLabel = 'No prior month comparison available';
           if (trend) {
             trendArrow = trend.direction === 'up' ? '↑' : trend.direction === 'down' ? '↓' : '';
             trendColor = trend.direction === 'up' ? 'var(--color-expense)' : 
                         trend.direction === 'down' ? 'var(--color-income)' : 'var(--text-tertiary)';
+            trendAriaLabel = trend.direction === 'up'
+              ? `Up ${Math.abs(trend.change)} percent vs last month`
+              : trend.direction === 'down'
+                ? `Down ${Math.abs(trend.change)} percent vs last month`
+                : trend.direction === 'new'
+                  ? 'New category this month'
+                  : 'No month-over-month change';
           }
           return html`
             <div class="flex items-center gap-${isDashboardSnapshot ? '1.5' : '2'} text-xs ${isDashboardSnapshot ? 'dashboard-category-breakdown__row' : ''}">
@@ -345,16 +391,32 @@ export function renderDonutChart(containerId: string, data: DonutChartData[], tr
               <span class="font-bold text-right" style="color:var(--text-primary); min-width: ${isDashboardSnapshot ? '52px' : '70px'};">
                 ${fmtCur(d.value)}
               </span>
-              <span class="text-right" style="color:var(--text-tertiary); min-width: ${isDashboardSnapshot ? '22px' : '32px'};">
+              <span
+                class="text-right dashboard-category-breakdown__share"
+                style="color:var(--text-tertiary); min-width: ${isDashboardSnapshot ? '22px' : '32px'};"
+                aria-label="Share of spend ${pct} percent"
+              >
                 ${pct}%
               </span>
-              <span class="text-right" style="min-width: ${isDashboardSnapshot ? '30px' : '42px'};">
+              <span
+                class="text-right dashboard-category-breakdown__mom"
+                style="min-width: ${isDashboardSnapshot ? '30px' : '42px'};"
+                aria-label=${trendAriaLabel}
+              >
                 ${trend && trendArrow ? html`
-                  <span style="color:${trendColor};" title="vs last month">
+                  <span style="color:${trendColor};">
                     ${trendArrow}${Math.abs(trend.change)}%
                   </span>
                 ` : ''}
               </span>
+              ${status ? html`
+                <span
+                  class="dashboard-category-breakdown__status dashboard-category-breakdown__status--${status.tone}"
+                  aria-label=${`Status ${status.label}`}
+                >
+                  ${status.label}
+                </span>
+              ` : ''}
             </div>
           `;
         })}

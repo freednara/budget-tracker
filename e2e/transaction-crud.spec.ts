@@ -140,6 +140,25 @@ test.describe('Transaction CRUD', () => {
     await expect(txList).toContainText('1,500.00', { timeout: 3000 });
   });
 
+  test('switches transaction categories when toggling between expense and income', async ({ page }) => {
+    await page.locator('#tab-transactions-btn').click();
+    await expect(page.locator('#tab-transactions')).toBeVisible({ timeout: 10000 });
+
+    const categoryChips = page.locator('#category-chips');
+    await expect(categoryChips).toContainText('Food & Dining');
+    await expect(categoryChips).not.toContainText('Salary');
+
+    await page.locator('#tab-income').click();
+    await expect(page.locator('#tab-income')).toHaveClass(/btn-success/, { timeout: 3000 });
+    await expect(categoryChips).toContainText('Salary');
+    await expect(categoryChips).not.toContainText('Food & Dining');
+
+    await page.locator('#tab-expense').click();
+    await expect(page.locator('#tab-expense')).toHaveClass(/btn-danger/, { timeout: 3000 });
+    await expect(categoryChips).toContainText('Food & Dining');
+    await expect(categoryChips).not.toContainText('Salary');
+  });
+
   test('shows specific validation guidance when required transaction fields are missing', async ({ page }) => {
     await page.locator('#submit-btn').click();
 

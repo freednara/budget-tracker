@@ -3,6 +3,9 @@ import { VitePWA } from 'vite-plugin-pwa';
 import { existsSync } from 'fs';
 import { resolve, dirname } from 'path';
 
+const APP_VERSION = process.env.npm_package_version || '0.0.0';
+const APP_BUILD_TIME = new Date().toISOString();
+
 // Plugin to resolve .js imports to .ts files during TypeScript migration
 // Enhanced with better path resolution and error handling
 function tsJsResolverPlugin() {
@@ -63,6 +66,10 @@ function cspDevStripPlugin() {
 
 export default defineConfig({
   root: '.',
+  define: {
+    __APP_VERSION__: JSON.stringify(APP_VERSION),
+    __APP_BUILD_TIME__: JSON.stringify(APP_BUILD_TIME),
+  },
   build: {
     outDir: 'dist',
     target: 'esnext',
@@ -107,9 +114,9 @@ export default defineConfig({
         type: 'module'
       },
       manifest: {
-        name: 'Budget Tracker Elite',
-        short_name: 'Budget Tracker',
-        description: 'Premium financial management - track expenses, income, and savings goals',
+        name: 'Harbor Ledger',
+        short_name: 'Harbor',
+        description: 'Harbor Ledger helps you track expenses, income, and savings goals privately.',
         start_url: './',
         scope: './',
         display: 'standalone',

@@ -1,0 +1,121 @@
+- generic [active] [ref=e1]:
+  - alert [ref=e2]
+  - status [ref=e3]
+  - generic [ref=e4]:
+    - banner [ref=e5]:
+      - generic [ref=e6]:
+        - generic [ref=e7]:
+          - generic [ref=e8]:
+            - generic [ref=e9]: 💎
+            - heading "Budget Tracker Elite" [level=1] [ref=e11]
+          - generic [ref=e12]:
+            - button "Open analytics" [ref=e13] [cursor=pointer]: 📈 Analytics
+            - button "Open settings" [ref=e14] [cursor=pointer]: ⚙️
+        - tablist "Main navigation" [ref=e15]:
+          - tab "📊 Dashboard" [selected] [ref=e16] [cursor=pointer]
+          - tab "🎯 Budget" [ref=e17] [cursor=pointer]
+          - tab "💸 Transactions" [ref=e18] [cursor=pointer]
+          - tab "🗓️ Calendar" [ref=e19] [cursor=pointer]
+        - region "Month navigation" [ref=e20]:
+          - button "Previous month" [ref=e21] [cursor=pointer]: ◀
+          - generic [ref=e22]:
+            - heading "March 2026" [level=2] [ref=e23]
+            - paragraph [ref=e24]: Budget Period
+          - button "Next month" [ref=e25] [cursor=pointer]: ▶
+    - main [ref=e26]:
+      - tabpanel "📊 Dashboard" [ref=e27]:
+        - generic [ref=e28]:
+          - generic [ref=e29]:
+            - generic [ref=e30]:
+              - generic [ref=e31]:
+                - generic [ref=e32]: 💰
+                - generic [ref=e33]:
+                  - paragraph [ref=e34]: YOUR DAILY ALLOWANCE
+                  - paragraph [ref=e35]: 0 days left in month
+              - generic [ref=e36]: On Track
+            - generic [ref=e37]:
+              - paragraph [ref=e38]: $0.00
+              - paragraph [ref=e39]: Available to spend per day
+            - generic [ref=e40]:
+              - generic [ref=e41]:
+                - generic [ref=e42]: MONTH ELAPSED
+                - generic [ref=e43]: 0%
+              - generic [ref=e44]:
+                - progressbar
+            - generic [ref=e45]:
+              - generic [ref=e46]:
+                - generic [ref=e47]: SPENDING PACE
+                - generic [ref=e48]: —
+              - paragraph [ref=e49]: Compares how much you've spent with how far the month has progressed
+              - generic [ref=e50]:
+                - progressbar "Monthly spending pace"
+              - generic [ref=e51]:
+                - generic [ref=e52]: Day 1
+                - generic [ref=e53]: —
+                - generic [ref=e54]: Month End
+            - generic [ref=e56]:
+              - generic [ref=e57]:
+                - paragraph [ref=e58]: LEFT TO SPEND
+                - paragraph [ref=e59]: $0.00
+              - generic [ref=e60]:
+                - paragraph [ref=e61]: SPENT TODAY
+                - paragraph [ref=e62]: $0.00
+            - generic [ref=e63]:
+              - paragraph [ref=e64]: Keep tracking to stay on budget!
+              - generic [ref=e65]:
+                - button "Add Transaction" [ref=e66] [cursor=pointer]
+                - button "Review Budget" [ref=e67] [cursor=pointer]
+          - generic [ref=e68]:
+            - generic [ref=e69]:
+              - generic [ref=e70]:
+                - generic [ref=e71]: 💵
+                - generic [ref=e72]: Live
+              - paragraph [ref=e73]: INCOME
+              - paragraph [ref=e74]: $0.00
+            - generic [ref=e75]:
+              - generic [ref=e76]:
+                - generic [ref=e77]: 💸
+                - generic [ref=e78]: Track
+              - paragraph [ref=e79]: EXPENSES
+              - paragraph [ref=e80]: $0.00
+            - generic [ref=e81]:
+              - generic [ref=e82]:
+                - generic [ref=e83]: 📊
+                - generic [ref=e84]: Healthy
+              - paragraph [ref=e85]: BALANCE
+              - paragraph [ref=e86]: $0.00
+              - paragraph [ref=e87]: Income - Expenses
+        - generic [ref=e88]:
+          - generic [ref=e90]:
+            - generic [ref=e91]:
+              - paragraph [ref=e92]: 📊 Income vs Expenses
+              - paragraph [ref=e93]: The one chart that explains how the month is unfolding.
+            - generic [ref=e94]:
+              - button "3M" [ref=e95] [cursor=pointer]
+              - button "6M" [pressed] [ref=e96] [cursor=pointer]
+              - button "12M" [ref=e97] [cursor=pointer]
+          - generic [ref=e99]:
+            - generic [ref=e100]:
+              - paragraph [ref=e101]: 🏆 Category Breakdown
+              - group [ref=e102]:
+                - generic "Explain category breakdown percentages" [ref=e103] [cursor=pointer]:
+                  - generic [ref=e104]: i
+            - paragraph [ref=e105]: Where your expense pressure is coming from this month.
+        - generic [ref=e106]:
+          - generic [ref=e107]:
+            - heading "✨ Smart Insights" [level=2] [ref=e108]
+            - paragraph [ref=e109]: Three clear signals worth acting on right now.
+          - generic [ref=e110]:
+            - generic [ref=e112]:
+              - generic [ref=e113]: 📊
+              - paragraph [ref=e114]: Trend
+            - generic [ref=e116]:
+              - generic [ref=e117]: 🔮
+              - paragraph [ref=e118]: Forecast
+            - generic [ref=e120]:
+              - generic [ref=e121]: 💡
+              - paragraph [ref=e122]: Action
+  - generic:
+    - generic:
+      - generic: ✓
+      - generic: Budget Tracker ready

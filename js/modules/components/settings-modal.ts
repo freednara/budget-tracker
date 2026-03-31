@@ -20,6 +20,30 @@ import { announcer } from '../core/accessibility.js';
  * Render the settings modal
  */
 export function renderSettingsModal(): TemplateResult {
+  const runtimeInfo = typeof window !== 'undefined'
+    ? ((window as Window & {
+        __APP_RUNTIME_INFO__?: {
+          version?: string;
+          buildTime?: string;
+          runtimeMode?: string;
+          serviceWorkerControlled?: boolean;
+        };
+      }).__APP_RUNTIME_INFO__ ?? null)
+    : null;
+
+  const buildTimeLabel = runtimeInfo?.buildTime
+    ? new Date(runtimeInfo.buildTime).toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      })
+    : 'Unknown build';
+
+  const runtimeModeLabel = runtimeInfo?.runtimeMode === 'standalone' ? 'Installed PWA' : 'Browser tab';
+  const serviceWorkerLabel = runtimeInfo?.serviceWorkerControlled ? 'Active' : 'Not controlling';
+
   return html`
     <div id="settings-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
       <div class="rounded-2xl p-6 max-w-lg w-full card-shadow" style="background: var(--bg-card-section); border: 1px solid var(--border-section); max-height: 85vh; overflow-y: auto;">
@@ -30,7 +54,7 @@ export function renderSettingsModal(): TemplateResult {
         <div class="mb-4 pl-3 border-l-2" style="border-color: var(--border-input);">
           <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Theme</label>
           <div class="flex gap-2">
-            <button class="theme-btn flex-1 py-2 rounded-lg text-sm font-bold" data-theme="dark" style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);" aria-pressed="false">🌙 Dark</button>
+            <button class="theme-btn flex-1 py-2 rounded-lg text-sm font-bold" data-theme="dark" data-modal-initial-focus="true" style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);" aria-pressed="false">🌙 Dark</button>
             <button class="theme-btn flex-1 py-2 rounded-lg text-sm font-bold" data-theme="light" style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);" aria-pressed="false">☀️ Light</button>
             <button class="theme-btn flex-1 py-2 rounded-lg text-sm font-bold" data-theme="system" style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);" aria-pressed="false">🖥️ System</button>
           </div>
@@ -152,6 +176,17 @@ export function renderSettingsModal(): TemplateResult {
         <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
           <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Getting Started</label>
           <button id="restart-onboarding" class="w-full py-2 rounded-lg text-sm font-semibold" style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">🎯 Restart App Tour</button>
+        </div>
+
+        <!-- Runtime -->
+        <p class="text-xs font-black mb-3" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">App Runtime</p>
+        <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
+          <div class="text-xs space-y-2 text-secondary">
+            <p><span class="font-bold text-primary">Version:</span> ${runtimeInfo?.version || 'Unknown'}</p>
+            <p><span class="font-bold text-primary">Built:</span> ${buildTimeLabel}</p>
+            <p><span class="font-bold text-primary">Mode:</span> ${runtimeModeLabel}</p>
+            <p><span class="font-bold text-primary">Service Worker:</span> ${serviceWorkerLabel}</p>
+          </div>
         </div>
 
         <!-- Data -->

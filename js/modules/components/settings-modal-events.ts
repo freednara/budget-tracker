@@ -158,9 +158,9 @@ export function enhanceModalFocus(): void {
   const modal = document.getElementById('settings-modal');
   if (!modal) return;
   
-  // Set focus to first focusable element
+  // Keep initial modal focus off native select controls on mobile Safari.
   const firstFocusable = modal.querySelector(
-    'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    '[data-modal-initial-focus], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]), select:not([disabled])'
   ) as HTMLElement;
   
   if (firstFocusable) {

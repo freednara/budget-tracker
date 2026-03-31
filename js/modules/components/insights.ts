@@ -18,7 +18,8 @@ import DOM from '../core/dom-cache.js';
 import type { 
   InsightResult, 
   InsightResultWithAction, 
-  InsightActionData 
+  InsightActionData,
+  InsightAction
 } from '../../types/index.js';
 
 // ==========================================
@@ -68,28 +69,47 @@ function handleInsightAction(actionData: InsightActionData): void {
   handleInsightActionImpl(normalizedType, { category: typeof data === 'string' ? data : undefined });
 }
 
+const DEFAULT_INSIGHT_ACTIONS: Record<'insight1' | 'insight2' | 'insight3', InsightAction> = {
+  insight1: { type: 'goto-transactions', label: 'Open ledger' },
+  insight2: { type: 'goto-budget', label: 'Review budget' },
+  insight3: { type: 'goto-transactions', label: 'Open ledger' }
+};
+
+function renderInsightAction(action: InsightAction) {
+  return html`
+    <button
+      type="button"
+      class="insight-action-btn"
+      @click=${() => handleInsightAction({ actionType: action.type, data: action.category })}
+      style="background: var(--color-accent); color: white;"
+    >
+      ${action.label} →
+    </button>
+  `;
+}
+
 /**
  * Render a single insight result
  */
-function renderInsight(result: InsightResult | null) {
+function renderInsight(result: InsightResult | null, fallbackAction: InsightAction) {
   if (result === null) return nothing;
   
   if (typeof result === 'string') {
-    return html`<div class="dashboard-insight-copy"><p class="dashboard-insight-text">${result}</p></div>`;
+    return html`
+      <div class="dashboard-insight-copy">
+        <p class="dashboard-insight-text">${result}</p>
+        ${renderInsightAction(fallbackAction)}
+      </div>
+    `;
   }
   
   // Result is an object with text and optional action
   const resultObj = result as InsightResultWithAction;
+  const action = resultObj.action ?? fallbackAction;
   return html`
     <div class="dashboard-insight-copy">
       <p class="dashboard-insight-text">${resultObj.text}</p>
-    ${resultObj.action ? html`
-      <button type="button" class="insight-action-btn"
-        @click=${() => handleInsightAction({ actionType: resultObj.action!.type, data: resultObj.action!.category })}
-        style="background: var(--color-accent); color: white;">
-        ${resultObj.action.label} →
-      </button>
-    ` : nothing}
+      ${renderInsightAction(action)}
     </div>
   `;
 }
@@ -114,13 +134,13 @@ export function mountInsights(): () => void {
       const insights = insightsData.value;
 
       if (insight1 && 'insight1' in insights) {
-        render(renderInsight(insights.insight1), insight1);
+        render(renderInsight(insights.insight1, DEFAULT_INSIGHT_ACTIONS.insight1), insight1);
       }
       if (insight2 && 'insight2' in insights) {
-        render(renderInsight(insights.insight2), insight2);
+        render(renderInsight(insights.insight2, DEFAULT_INSIGHT_ACTIONS.insight2), insight2);
       }
       if (insight3 && 'insight3' in insights) {
-        render(renderInsight(insights.insight3), insight3);
+        render(renderInsight(insights.insight3, DEFAULT_INSIGHT_ACTIONS.insight3), insight3);
       }
     }),
   ]);

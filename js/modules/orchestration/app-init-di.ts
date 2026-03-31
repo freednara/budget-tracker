@@ -349,7 +349,7 @@ async function postOnboardingInit(savedTab: string, hasTransactions: boolean): P
   setStartupProgress('post:init-start');
   await getDefaultContainer().resolve(Services.SWIPE_MANAGER);
   const { refreshTransactionsSurface, initTransactionSurfaceCoordinator } = await import('../data/transaction-surface-coordinator.js');
-  const { switchMainTab, switchTab, setRenderQuickShortcutsFn } = await import('../ui/core/ui-navigation.js');
+  const { switchMainTab, switchTab, setRenderCategoriesFn, setRenderQuickShortcutsFn } = await import('../ui/core/ui-navigation.js');
   const { mountEditUI } = await import('../transactions/edit-mode.js');
   const { render, html } = await import('../core/lit-helpers.js');
   setStartupProgress('post:core-imports-ready');
@@ -413,6 +413,7 @@ async function postOnboardingInit(savedTab: string, hasTransactions: boolean): P
 
   // Initialize form UI (always needed for new transactions)
   renderMonthNav();
+  setRenderCategoriesFn(() => renderCategories());
   renderCategories();
   populateCategoryFilter();
   setRenderQuickShortcutsFn(() => renderQuickShortcuts());
@@ -435,7 +436,7 @@ async function postOnboardingInit(savedTab: string, hasTransactions: boolean): P
     if (emptyContainer) {
       render(html`
         <div class="p-6 text-center">
-          <p class="text-sm font-bold" style="color: var(--text-primary);">Welcome to Budget Tracker</p>
+          <p class="text-sm font-bold" style="color: var(--text-primary);">Welcome to Harbor Ledger</p>
           <p class="text-xs mt-2" style="color: var(--text-tertiary);">Start by adding your first transaction.</p>
         </div>
       `, emptyContainer);

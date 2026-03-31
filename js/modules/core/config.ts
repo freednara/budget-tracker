@@ -230,7 +230,7 @@ export const CONFIG: AppConfig = {
   SWIPE: {
     THRESHOLD: 80,
     VELOCITY_THRESHOLD: 0.5,
-    MAX_OFFSET: 140,
+    MAX_OFFSET: 168,
     RESISTANCE: 0.4
   },
 

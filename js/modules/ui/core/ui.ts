@@ -283,11 +283,25 @@ export function openModal(id: string): void {
   m.style.display = 'flex';
   m.setAttribute('aria-hidden', 'false');
 
-  // Auto-focus first focusable element (after a small delay for animation)
+  // Auto-focus a safe initial control without triggering native picker UIs on iPhone.
   setTimeout(() => {
-    const firstInput = m.querySelector<HTMLElement>('input:not([disabled]), select:not([disabled]), textarea:not([disabled])');
-    if (firstInput) {
-      firstInput.focus();
+    const explicitInitialFocus = m.querySelector<HTMLElement>('[data-modal-initial-focus]:not([disabled])');
+    if (explicitInitialFocus) {
+      explicitInitialFocus.focus();
+      return;
+    }
+
+    const firstSafeControl = m.querySelector<HTMLElement>(
+      'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"]), input:not([disabled]):not([type="hidden"]), textarea:not([disabled])'
+    );
+    if (firstSafeControl) {
+      firstSafeControl.focus();
+      return;
+    }
+
+    const firstSelect = m.querySelector<HTMLElement>('select:not([disabled])');
+    if (firstSelect) {
+      firstSelect.focus();
       return;
     }
 

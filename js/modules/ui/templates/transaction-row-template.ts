@@ -59,7 +59,7 @@ function renderCategory(tx: Transaction): TemplateResult {
   return html`
     <span class="cat-chip" style="background: ${catInfo.color}22; color: ${catInfo.color}; padding: 2px 8px; border-radius: 9999px; font-size: 0.75rem; font-weight: bold; display: flex; align-items: center; gap: 4px;">
       <span class="cat-emoji">${catInfo.emoji}</span>
-      <span class="cat-name">${escapeHtml(catInfo.name)}</span>
+      <span class="cat-name">${catInfo.name}</span>
     </span>
   `;
 }
@@ -114,7 +114,7 @@ function renderActions(tx: Transaction, options: TransactionRowOptions): Templat
     : 'color: var(--color-accent); background: color-mix(in srgb, var(--color-accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--color-accent) 30%, var(--border-input));';
 
   return html`
-    <div class="desktop-actions flex gap-1">
+    <div class="desktop-actions transaction-row-actions flex gap-1">
       <button 
         class="reconcile-btn min-w-9 min-h-9 p-2 rounded-lg hover:opacity-100 flex items-center justify-center text-lg font-bold transition-all" 
         style="${reconcileBtnStyle}"
@@ -170,6 +170,65 @@ function renderActions(tx: Transaction, options: TransactionRowOptions): Templat
   `;
 }
 
+function renderSwipeActions(tx: Transaction, options: TransactionRowOptions): TemplateResult {
+  const isReconciled = !!tx.reconciled;
+
+  return html`
+    <div class="swipe-actions-right">
+      <button
+        class="swipe-action-btn reconcile-swipe-btn"
+        style="background: color-mix(in srgb, var(--color-accent) 82%, black 6%);"
+        @click=${(e: Event) => {
+          e.stopPropagation();
+          options.onReconcile?.(tx);
+        }}
+        aria-label="${isReconciled ? 'Mark as unreconciled' : 'Mark as reconciled'}"
+      >
+        <span class="swipe-icon">${isReconciled ? '☑' : '☐'}</span>
+        <span>${isReconciled ? 'Undo' : 'Reconcile'}</span>
+      </button>
+      <button
+        class="swipe-action-btn split-swipe-btn"
+        style="background: color-mix(in srgb, var(--color-purple) 82%, black 6%);"
+        @click=${(e: Event) => {
+          e.stopPropagation();
+          options.onSplit?.(tx);
+        }}
+        aria-label="Split this transaction"
+      >
+        <span class="swipe-icon">✂️</span>
+        <span>Split</span>
+      </button>
+    </div>
+    <div class="swipe-actions-left">
+      <button
+        class="swipe-action-btn edit-swipe-btn"
+        style="background: color-mix(in srgb, var(--color-accent2) 82%, black 6%);"
+        @click=${(e: Event) => {
+          e.stopPropagation();
+          options.onEdit?.(tx);
+        }}
+        aria-label="Edit transaction"
+      >
+        <span class="swipe-icon">✏️</span>
+        <span>Edit</span>
+      </button>
+      <button
+        class="swipe-action-btn delete-swipe-btn"
+        style="background: color-mix(in srgb, var(--color-expense) 88%, black 4%);"
+        @click=${(e: Event) => {
+          e.stopPropagation();
+          options.onDelete?.(tx);
+        }}
+        aria-label="Delete transaction"
+      >
+        <span class="swipe-icon">✕</span>
+        <span>Delete</span>
+      </button>
+    </div>
+  `;
+}
+
 // ==========================================
 // MAIN TEMPLATE
 // ==========================================
@@ -188,9 +247,9 @@ export function transactionRowTemplate(
     ? `Transfer to ${goalName}`
     : tx.description;
   
-  return html`
+  const rowContent = html`
     <div 
-      class="transaction-row flex items-center gap-3 p-3 rounded-lg ${tx.type}-row ${isSavingsTransfer ? 'savings-transfer-row' : ''} ${(tx as any).isPinned ? 'pinned' : ''}"
+      class="swipe-content transaction-row flex items-center gap-3 p-3 rounded-lg ${tx.type}-row ${isSavingsTransfer ? 'savings-transfer-row' : ''} ${(tx as any).isPinned ? 'pinned' : ''} ${options.showSwipeActions ? 'transaction-row--swipe-ready' : ''}"
       data-id="${tx.__backendId}"
       @click=${() => options.onClick?.(tx)}
       style="transition: transform 0.2s, box-shadow 0.2s; cursor: pointer; margin-bottom: 8px;"
@@ -198,17 +257,17 @@ export function transactionRowTemplate(
       <div class="tx-main flex-1 min-w-0">
         <div class="tx-info min-w-0">
           <div class="tx-description" style="margin-bottom: 4px;">
-            <span class="tx-description-text font-bold text-sm" style="color: var(--text-primary);">${escapeHtml(rowDescription)}</span>
+            <span class="tx-description-text font-bold text-sm" style="color: var(--text-primary);">${rowDescription}</span>
             <span class="tx-badges inline-flex items-center gap-1" style="margin-left: 6px;">${renderBadges(tx, options)}</span>
           </div>
           <div class="tx-meta flex items-center gap-2">
             <span class="tx-date text-xs text-secondary">${parseLocalDate(tx.date).toLocaleDateString()}</span>
             ${renderTypeBadge(tx)}
             ${isSavingsTransfer && goalName
-              ? html`<span class="tx-goal-meta" title="Savings goal">${escapeHtml(goalName)}</span>`
+              ? html`<span class="tx-goal-meta" title="Savings goal">${goalName}</span>`
               : renderCategory(tx)}
             ${tx.notes ? html`
-              <span class="tx-notes cursor-help" title="${escapeHtml(tx.notes)}">
+              <span class="tx-notes cursor-help" title="${tx.notes}">
                 📝
               </span>
             ` : ''}
@@ -221,6 +280,17 @@ export function transactionRowTemplate(
       </div>
     </div>
   `;
+
+  if (!options.showSwipeActions) {
+    return rowContent;
+  }
+
+  return html`
+    <div class="swipe-container" data-tx-id="${tx.__backendId}">
+      ${renderSwipeActions(tx, options)}
+      ${rowContent}
+    </div>
+  `;
 }
 
 /**
@@ -228,7 +298,8 @@ export function transactionRowTemplate(
  */
 export function transactionRowSimple(
   tx: Transaction,
-  fmtCur: CurrencyFormatter = (v) => `$${v.toFixed(2)}`
+  fmtCur: CurrencyFormatter = (v) => `$${v.toFixed(2)}`,
+  options: TransactionRowOptions = {}
 ): string {
   const catInfo = getCatInfo(tx.type, tx.category);
   const amount = typeof tx.amount === 'number' ? tx.amount : parseFloat(tx.amount);
@@ -249,8 +320,8 @@ export function transactionRowSimple(
               <span class="cat-name">${escapeHtml(catInfo.name)}</span>
             </span>`;
   
-  return `
-    <div class="transaction-row ${tx.type}-row ${isSavingsTransfer ? 'savings-transfer-row' : ''}" data-id="${escapeHtml(tx.__backendId)}">
+  const rowContent = `
+    <div class="swipe-content transaction-row ${tx.type}-row ${isSavingsTransfer ? 'savings-transfer-row' : ''} ${options.showSwipeActions ? 'transaction-row--swipe-ready' : ''}" data-id="${escapeHtml(tx.__backendId)}">
       <div class="tx-main">
         <div class="tx-info">
           <div class="tx-description">
@@ -267,6 +338,39 @@ export function transactionRowSimple(
           ${amountSign}${fmtCur(amount)}
         </div>
       </div>
+    </div>
+  `;
+
+  if (!options.showSwipeActions) {
+    return rowContent;
+  }
+
+  const reconcileLabel = tx.reconciled ? 'Undo' : 'Reconcile';
+  const reconcileAria = tx.reconciled ? 'Mark as unreconciled' : 'Mark as reconciled';
+
+  return `
+    <div class="swipe-container" data-tx-id="${escapeHtml(tx.__backendId)}">
+      <div class="swipe-actions-right">
+        <button class="swipe-action-btn reconcile-swipe-btn" data-id="${escapeHtml(tx.__backendId)}" aria-label="${reconcileAria}" style="background: color-mix(in srgb, var(--color-accent) 82%, black 6%);">
+          <span class="swipe-icon">${tx.reconciled ? '☑' : '☐'}</span>
+          <span>${reconcileLabel}</span>
+        </button>
+        <button class="swipe-action-btn split-swipe-btn" data-id="${escapeHtml(tx.__backendId)}" aria-label="Split this transaction" style="background: color-mix(in srgb, var(--color-purple) 82%, black 6%);">
+          <span class="swipe-icon">✂️</span>
+          <span>Split</span>
+        </button>
+      </div>
+      <div class="swipe-actions-left">
+        <button class="swipe-action-btn edit-swipe-btn" data-id="${escapeHtml(tx.__backendId)}" aria-label="Edit transaction" style="background: color-mix(in srgb, var(--color-accent2) 82%, black 6%);">
+          <span class="swipe-icon">✏️</span>
+          <span>Edit</span>
+        </button>
+        <button class="swipe-action-btn delete-swipe-btn" data-id="${escapeHtml(tx.__backendId)}" aria-label="Delete transaction" style="background: color-mix(in srgb, var(--color-expense) 88%, black 4%);">
+          <span class="swipe-icon">✕</span>
+          <span>Delete</span>
+        </button>
+      </div>
+      ${rowContent}
     </div>
   `;
 }
@@ -323,7 +427,7 @@ export function createRowRenderer(
   const fmtCur = options.currencyFormatter || ((v: number) => `$${v.toFixed(2)}`);
   
   return (tx: Transaction, _index: number) => {
-    return transactionRowSimple(tx, fmtCur);
+    return transactionRowSimple(tx, fmtCur, options);
   };
 }
 

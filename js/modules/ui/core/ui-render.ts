@@ -88,6 +88,10 @@ export function handleInsightAction(actionType: string, data: InsightActionData)
       switchMainTab('budget');
       revealAfterTabSwitch('savings-goals-section', 'add-savings-goal-btn');
       break;
+    case 'goto-transactions':
+      switchMainTab('transactions');
+      revealAfterTabSwitch('transactions-list');
+      break;
   }
 }
 
@@ -101,12 +105,15 @@ export function renderQuickShortcuts(): void {
 
   const currentType = signals.currentType.value;
   const cats = getAllCats(currentType).slice(0, 6);
-  const renderKey = JSON.stringify(cats.map((cat) => ({
+  const renderKey = JSON.stringify({
+    type: currentType,
+    cats: cats.map((cat) => ({
     id: cat.id,
     emoji: cat.emoji,
     color: cat.color,
     name: cat.name
-  })));
+    }))
+  });
 
   if (container.dataset.renderKey === renderKey) {
     return;
@@ -141,12 +148,15 @@ export function renderCategories(): void {
   const currentType = signals.currentType.value;
   const selectedCategory = signals.selectedCategory.value;
   const cats = getAllCats(currentType);
-  const renderKey = JSON.stringify(cats.map((cat) => ({
+  const renderKey = JSON.stringify({
+    type: currentType,
+    cats: cats.map((cat) => ({
     id: cat.id,
     emoji: cat.emoji,
     color: cat.color,
     name: cat.name
-  })));
+    }))
+  });
 
   if (container.dataset.renderKey === renderKey) {
     syncCategoryChipSelection(container, selectedCategory);
@@ -307,7 +317,7 @@ export function updateCategoryBreakdownChart(): void {
 
     const percentChange = ((currentAmount - previousAmount) / Math.abs(previousAmount)) * 100;
     donutTrends[trend.category.id] = {
-      change: Math.abs(percentChange),
+      change: Math.round(Math.abs(percentChange)),
       direction: percentChange > 0 ? 'up' : percentChange < 0 ? 'down' : 'flat'
     };
   });

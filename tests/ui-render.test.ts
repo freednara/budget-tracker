@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import * as signals from '../js/modules/core/signals.js';
+import DOM from '../js/modules/core/dom-cache.js';
 import { renderCategories, renderQuickShortcuts } from '../js/modules/ui/core/ui-render.js';
 
 describe('ui-render selection updates', () => {
   beforeEach(() => {
+    DOM.clearAll();
     document.body.innerHTML = `
       <div id="category-chips"></div>
       <div id="quick-shortcuts"></div>
@@ -15,6 +17,7 @@ describe('ui-render selection updates', () => {
   });
 
   afterEach(() => {
+    DOM.clearAll();
     document.body.innerHTML = '';
     signals.selectedCategory.value = '';
   });
@@ -37,6 +40,21 @@ describe('ui-render selection updates', () => {
     expect(transportChipAfter.getAttribute('aria-pressed')).toBe('true');
   });
 
+  it('rerenders category chips when the transaction type changes', () => {
+    renderCategories();
+    const container = document.getElementById('category-chips') as HTMLElement;
+
+    expect(container.querySelector('[data-category="food"]')).not.toBeNull();
+    expect(container.querySelector('[data-category="salary"]')).toBeNull();
+
+    signals.currentType.value = 'income';
+    signals.selectedCategory.value = '';
+    renderCategories();
+
+    expect(container.querySelector('[data-category="salary"]')).not.toBeNull();
+    expect(container.querySelector('[data-category="food"]')).toBeNull();
+  });
+
   it('keeps quick shortcuts available after the selected category changes', () => {
     renderQuickShortcuts();
     const container = document.getElementById('quick-shortcuts') as HTMLElement;
@@ -55,5 +73,19 @@ describe('ui-render selection updates', () => {
 
     foodShortcutAfter.click();
     expect(signals.selectedCategory.value).toBe('food');
+  });
+
+  it('rerenders quick shortcuts when the transaction type changes', () => {
+    renderQuickShortcuts();
+    const container = document.getElementById('quick-shortcuts') as HTMLElement;
+
+    expect(container.querySelector('[data-category="food"]')).not.toBeNull();
+    expect(container.querySelector('[data-category="salary"]')).toBeNull();
+
+    signals.currentType.value = 'income';
+    renderQuickShortcuts();
+
+    expect(container.querySelector('[data-category="salary"]')).not.toBeNull();
+    expect(container.querySelector('[data-category="food"]')).toBeNull();
   });
 });

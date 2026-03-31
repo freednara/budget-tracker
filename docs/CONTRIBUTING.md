@@ -1,6 +1,6 @@
-# Contributing to Budget Tracker Elite
+# Contributing to Harbor Ledger
 
-First off, thank you for considering contributing to Budget Tracker Elite! It's people like you that make Budget Tracker Elite such a great tool for the privacy-conscious finance community.
+First off, thank you for considering contributing to Harbor Ledger! It's people like you that make Harbor Ledger such a great tool for the privacy-conscious finance community.
 
 ## 📋 Table of Contents
 
@@ -476,7 +476,7 @@ By contributing, you agree that your contributions will be licensed under the MI
 
 ## 🙏 Thank You!
 
-Every contribution helps make Budget Tracker Elite better for everyone. Whether it's fixing a typo, adding a feature, or improving documentation, we appreciate your help!
+Every contribution helps make Harbor Ledger better for everyone. Whether it's fixing a typo, adding a feature, or improving documentation, we appreciate your help!
 
 **Happy Coding!** 🚀
 

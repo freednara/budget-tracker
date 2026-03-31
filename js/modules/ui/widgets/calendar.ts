@@ -37,6 +37,15 @@ interface BillInfo {
 
 type CurrencyFormatter = (value: number) => string;
 
+interface CalendarDayCell {
+  day: number;
+  spend: number;
+  income: number;
+  isToday: boolean;
+  isSelected: boolean;
+  bills: BillInfo[];
+}
+
 // ==========================================
 // ACTIONS
 // ==========================================
@@ -232,11 +241,11 @@ function renderCalendarGrid(container: HTMLElement, mk: string, txs: Transaction
   const todayDay = (getMonthKey(today) === mk) ? today.getDate() : -1;
 
   // Build rows/weeks
-  const rows: any[] = [];
+  const rows: Array<{ week: Array<CalendarDayCell | null>; weekTotal: number }> = [];
   let dayNum = 1;
 
   while (dayNum <= daysInMonth) {
-    const week: any[] = [];
+    const week: Array<CalendarDayCell | null> = [];
     let weekTotal = 0;
 
     for (let i = 0; i < 7; i++) {
@@ -260,6 +269,66 @@ function renderCalendarGrid(container: HTMLElement, mk: string, txs: Transaction
   }
 
   const fmtCur = getDefaultContainer().resolveSync<CurrencyFormatter>(Services.CURRENCY_FORMATTER);
+  const isPhoneLayout = window.matchMedia('(max-width: 767px)').matches;
+
+  const renderDayCell = (cell: CalendarDayCell) => {
+    const intensity = Math.min(cell.spend / maxSpend, 1);
+    const bg = cell.spend > 0
+      ? `color-mix(in srgb, var(--color-expense) ${Math.round(intensity * 70 + 10)}%, transparent)`
+      : (cell.income > 0 ? 'color-mix(in srgb, var(--color-income) 12%, transparent)' : 'transparent');
+
+    return html`
+      <div class=${classMap({ 'cal-day': true, 'cal-today': cell.isToday, 'cal-selected': cell.isSelected })}
+            data-day="${cell.day}"
+            style="background: ${bg}"
+            tabindex="${cell.isSelected ? '0' : '-1'}"
+            @click=${() => selectDay(cell.day)}>
+        <span class="cal-day-num">${cell.day}</span>
+
+        ${cell.bills.length > 0 ? html`
+          <div class="cal-bill-indicator ${cell.bills.some((bill) => bill.isUpcoming && !bill.isPaid) ? 'cal-bill-upcoming' : (cell.bills.some((bill) => bill.isPaid) ? 'cal-bill-paid' : '')}">
+            <span class="cal-bill-dot"></span>
+            ${cell.bills.length > 1 ? html`<span class="cal-bill-count">${cell.bills.length}</span>` : ''}
+          </div>
+        ` : ''}
+
+        ${cell.spend > 0 ? html`<span class="cal-day-amt text-expense">${fmtShort(cell.spend)}</span>` : ''}
+        ${cell.income > 0 && cell.spend === 0 ? html`<span class="cal-day-amt text-income">+${fmtShort(cell.income)}</span>` : ''}
+      </div>
+    `;
+  };
+
+  if (isPhoneLayout) {
+    const flatCells: Array<CalendarDayCell | null> = [];
+
+    for (let i = 0; i < firstDow; i += 1) {
+      flatCells.push(null);
+    }
+
+    rows.forEach((row) => {
+      row.week.forEach((cell) => {
+        flatCells.push(cell);
+      });
+    });
+
+    while (flatCells.length % 7 !== 0) {
+      flatCells.push(null);
+    }
+
+    render(html`
+      <div class="cal-grid cal-grid--phone" role="grid" aria-label="Monthly Spending Calendar">
+        ${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((dayLabel) => html`<div class="cal-header">${dayLabel}</div>`)}
+
+        ${flatCells.map((cell) => {
+          if (!cell) {
+            return html`<div class="cal-empty" aria-hidden="true"></div>`;
+          }
+          return renderDayCell(cell);
+        })}
+      </div>
+    `, container);
+    return;
+  }
 
   render(html`
     <div class="cal-grid" role="grid" aria-label="Monthly Spending Calendar">
@@ -268,33 +337,9 @@ function renderCalendarGrid(container: HTMLElement, mk: string, txs: Transaction
 
       ${rows.map(row => html`
         <div class="cal-week-total">${row.weekTotal > 0 ? fmtShort(row.weekTotal) : ''}</div>
-        ${row.week.map((cell: any) => {
+        ${row.week.map((cell) => {
           if (!cell) return html`<div class="cal-empty"></div>`;
-          
-          const intensity = Math.min(cell.spend / maxSpend, 1);
-          const bg = cell.spend > 0 
-            ? `color-mix(in srgb, var(--color-expense) ${Math.round(intensity * 70 + 10)}%, transparent)`
-            : (cell.income > 0 ? 'color-mix(in srgb, var(--color-income) 12%, transparent)' : 'transparent');
-
-          return html`
-            <div class=${classMap({ 'cal-day': true, 'cal-today': cell.isToday, 'cal-selected': cell.isSelected })}
-                 data-day="${cell.day}"
-                 style="background: ${bg}"
-                 tabindex="${cell.isSelected ? '0' : '-1'}"
-                 @click=${() => selectDay(cell.day)}>
-              <span class="cal-day-num">${cell.day}</span>
-              
-              ${cell.bills.length > 0 ? html`
-                <div class="cal-bill-indicator ${cell.bills.some((b: any) => b.isUpcoming && !b.isPaid) ? 'cal-bill-upcoming' : (cell.bills.some((b: any) => b.isPaid) ? 'cal-bill-paid' : '')}">
-                  <span class="cal-bill-dot"></span>
-                  ${cell.bills.length > 1 ? html`<span class="cal-bill-count">${cell.bills.length}</span>` : ''}
-                </div>
-              ` : ''}
-
-              ${cell.spend > 0 ? html`<span class="cal-day-amt text-expense">${fmtShort(cell.spend)}</span>` : ''}
-              ${cell.income > 0 && cell.spend === 0 ? html`<span class="cal-day-amt text-income">+${fmtShort(cell.income)}</span>` : ''}
-            </div>
-          `;
+          return renderDayCell(cell);
         })}
       `)}
     </div>

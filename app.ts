@@ -10,12 +10,137 @@ import { showToast } from './js/modules/ui/core/ui.js';
 import { perfMonitor } from './js/modules/core/performance-monitor.js';
 import { switchMainTab } from './js/modules/ui/core/ui-navigation.js';
 
+declare const __APP_VERSION__: string;
+declare const __APP_BUILD_TIME__: string;
+
+interface AppRuntimeInfo {
+  version: string;
+  buildTime: string;
+  runtimeMode: 'browser' | 'standalone';
+  serviceWorkerControlled: boolean;
+}
+
 function setAppDataset(name: string, value: string): void {
   document.documentElement.dataset[name] = value;
 }
 
 function isStartupDebugEnabled(): boolean {
   return import.meta.env.DEV && typeof window !== 'undefined' && (window as any).__APP_DEBUG_STARTUP__ === true;
+}
+
+function isStandaloneRuntime(): boolean {
+  return window.matchMedia('(display-mode: standalone)').matches || (window.navigator as Navigator & { standalone?: boolean }).standalone === true;
+}
+
+function getRuntimeInfo(): AppRuntimeInfo {
+  return {
+    version: __APP_VERSION__,
+    buildTime: __APP_BUILD_TIME__,
+    runtimeMode: isStandaloneRuntime() ? 'standalone' : 'browser',
+    serviceWorkerControlled: !!navigator.serviceWorker?.controller,
+  };
+}
+
+function publishRuntimeInfo(): void {
+  const runtimeInfo = getRuntimeInfo();
+  (window as any).__APP_VERSION__ = runtimeInfo.version;
+  (window as any).__APP_BUILD_TIME__ = runtimeInfo.buildTime;
+  (window as any).__APP_RUNTIME_INFO__ = runtimeInfo;
+  setAppDataset('appVersion', runtimeInfo.version);
+  setAppDataset('appRuntime', runtimeInfo.runtimeMode);
+  setAppDataset('appSwControlled', runtimeInfo.serviceWorkerControlled ? 'true' : 'false');
+}
+
+function removeUpdateBanner(): void {
+  document.getElementById('app-update-banner')?.remove();
+}
+
+function showUpdateBanner(onUpdate: () => void): void {
+  removeUpdateBanner();
+
+  const banner = document.createElement('div');
+  banner.id = 'app-update-banner';
+  banner.className = 'update-banner';
+  banner.innerHTML = `
+    <span>Update ready for Harbor Ledger</span>
+    <button type="button" class="update-btn">Refresh now</button>
+    <button type="button" class="dismiss-btn" aria-label="Dismiss update banner">×</button>
+  `;
+
+  const updateButton = banner.querySelector<HTMLButtonElement>('.update-btn');
+  const dismissButton = banner.querySelector<HTMLButtonElement>('.dismiss-btn');
+
+  updateButton?.addEventListener('click', () => onUpdate());
+  dismissButton?.addEventListener('click', () => removeUpdateBanner());
+
+  document.body.appendChild(banner);
+}
+
+async function activateWaitingServiceWorker(registration: ServiceWorkerRegistration): Promise<void> {
+  if (!registration.waiting) {
+    window.location.reload();
+    return;
+  }
+
+  removeUpdateBanner();
+
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+
+    const finish = (): void => {
+      if (resolved) return;
+      resolved = true;
+      resolve();
+    };
+
+    navigator.serviceWorker.addEventListener(
+      'controllerchange',
+      () => {
+        finish();
+        window.location.reload();
+      },
+      { once: true }
+    );
+
+    registration.waiting?.postMessage({ type: 'SKIP_WAITING' });
+    window.setTimeout(finish, 4000);
+  });
+}
+
+async function syncRuntimeVersion(): Promise<void> {
+  publishRuntimeInfo();
+
+  const versionKey = 'budget_tracker_runtime_version';
+  const previousVersion = localStorage.getItem(versionKey);
+  const currentVersion = __APP_VERSION__;
+
+  if (previousVersion === currentVersion) {
+    return;
+  }
+
+  localStorage.setItem(versionKey, currentVersion);
+
+  if (!import.meta.env.PROD) {
+    return;
+  }
+
+  if (previousVersion && previousVersion !== currentVersion && 'caches' in window) {
+    try {
+      const cacheKeys = await caches.keys();
+      await Promise.all(cacheKeys.map((key) => caches.delete(key)));
+    } catch (error) {
+      if (import.meta.env.DEV) console.error('Failed to clear stale caches on version change:', error);
+    }
+  }
+
+  if ('serviceWorker' in navigator) {
+    try {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(registrations.map((registration) => registration.update().catch(() => undefined)));
+    } catch (error) {
+      if (import.meta.env.DEV) console.error('Failed to refresh service worker registrations:', error);
+    }
+  }
 }
 
 // ==========================================
@@ -27,6 +152,7 @@ function isStartupDebugEnabled(): boolean {
  */
 async function main(): Promise<void> {
   try {
+    publishRuntimeInfo();
     (window as any).__APP_ERRORS__ = null;
     (window as any).__APP_STARTUP_PROGRESS__ = null;
     (window as any).__APP_SHELL_READY__ = false;
@@ -41,6 +167,8 @@ async function main(): Promise<void> {
 
     // Mark initialization start
     perfMonitor.mark('app.init.start');
+
+    await syncRuntimeVersion();
 
     // Check if already initialized
     if (isAppInitialized()) {
@@ -62,11 +190,12 @@ async function main(): Promise<void> {
     if (isStartupDebugEnabled()) console.log(`Budget Tracker initialized in ${initTime.toFixed(2)}ms`);
 
     // Show success message
-    showToast('Budget Tracker ready', 'success');
+    showToast('Harbor Ledger ready', 'success');
 
     // Signal to E2E tests that app is fully initialized
     (window as any).__APP_INITIALIZED__ = true;
     setAppDataset('appInitialized', 'true');
+    publishRuntimeInfo();
 
     if ((window as any).__PW_TEST__ === true) {
       (window as any).__APP_TEST_API__ = {
@@ -182,12 +311,21 @@ async function setupServiceWorkerUpdateListener(): Promise<void> {
   if ('serviceWorker' in navigator && import.meta.env.PROD) {
     try {
       const registration = await navigator.serviceWorker.ready;
+
+      if (registration.waiting) {
+        showUpdateBanner(() => {
+          void activateWaitingServiceWorker(registration);
+        });
+      }
+
       registration.addEventListener('updatefound', () => {
         const newWorker = registration.installing;
         if (newWorker) {
           newWorker.addEventListener('statechange', () => {
             if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-              showToast('New version available! Refresh to update.', 'info');
+              showUpdateBanner(() => {
+                void activateWaitingServiceWorker(registration);
+              });
             }
           });
         }
@@ -224,6 +362,7 @@ if (import.meta.env.DEV && 'serviceWorker' in navigator) {
 
 // Set up service worker update listener after app loads
 window.addEventListener('load', () => {
+  publishRuntimeInfo();
   setupServiceWorkerUpdateListener().catch(console.error);
 });
 

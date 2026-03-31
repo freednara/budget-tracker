@@ -369,9 +369,9 @@ export function generateInsights(): { insight1: InsightResult | string; insight2
   const transactions = signals.transactions.value as Transaction[];
   if (transactions.length === 0) {
     return {
-      insight1: 'Add your first few transactions to reveal spending trends.',
-      insight2: 'This panel will highlight where your month is drifting.',
-      insight3: 'Use the Transactions tab to build a real picture quickly.'
+      insight1: { text: 'Add your first few transactions to reveal what is really driving this month.', action: { type: 'goto-transactions', label: 'Open ledger' } },
+      insight2: { text: 'Set a budget early so the dashboard can tell you what is healthy versus risky.', action: { type: 'goto-budget', label: 'Plan budget' } },
+      insight3: { text: 'Once the basics are in place, review your goals and keep the month intentional.', action: { type: 'goto-budget-goals', label: 'Open goals' } }
     };
   }
 
@@ -392,8 +392,8 @@ export function generateInsights(): { insight1: InsightResult | string; insight2
   };
 
   return {
-    insight1: pickForSlot(1, 'Review this month’s trend to see what changed.'),
-    insight2: pickForSlot(2, 'Open Budget to turn this month into a clearer plan.'),
+    insight1: pickForSlot(1, 'Review the ledger to confirm what changed this month.'),
+    insight2: pickForSlot(2, 'Open Budget to keep this month aligned with your plan.'),
     insight3: pickForSlot(3, 'Review the ledger to spot the transactions driving this month.')
   };
 }

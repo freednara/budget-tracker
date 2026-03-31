@@ -41,7 +41,7 @@ interface OnboardingStep {
 export const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     emoji: '💎',
-    title: 'Welcome to Budget Tracker Elite!',
+    title: 'Welcome to Harbor Ledger!',
     body: 'Track what matters, plan the month, and know what you can safely spend next.',
     btn: 'Start Tour',
     target: null,

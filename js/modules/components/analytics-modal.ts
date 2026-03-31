@@ -23,7 +23,7 @@ export function renderAnalyticsModal(): TemplateResult {
       <div class="rounded-2xl p-6 w-full card-shadow analytics-modal-shell" style="background: var(--bg-card-section); border: 1px solid var(--border-section); max-height: 90vh; overflow-y: auto;">
         <div class="flex justify-between items-center mb-4">
           <h3 id="analytics-modal-title" class="text-xl font-black text-primary">📈 Analytics</h3>
-          <button id="close-analytics" class="w-8 h-8 flex items-center justify-center rounded-lg text-lg" style="background: var(--bg-input); color: var(--text-secondary);" aria-label="Close analytics">✕</button>
+          <button id="close-analytics" data-modal-initial-focus="true" class="w-8 h-8 flex items-center justify-center rounded-lg text-lg" style="background: var(--bg-input); color: var(--text-secondary);" aria-label="Close analytics">✕</button>
         </div>
 
         <!-- Year Tabs -->

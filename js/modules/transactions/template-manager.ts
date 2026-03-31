@@ -60,6 +60,31 @@ let fmtCurFn: CurrencyFormatter = fmtCur;
 let renderCategoriesFn: RenderCategoriesCallback | null = null;
 let switchTabFn: SwitchTabCallback | null = null;
 let templateManagerInitialized = false;
+let templatesCollapsedOnPhone = false;
+let templatesMediaQuery: MediaQueryList | null = null;
+
+function isPhoneTemplatesLayout(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches;
+}
+
+function updateTemplatesCollapseUi(templateCount: number): void {
+  const toggle = DOM.get('toggle-templates-mobile') as HTMLButtonElement | null;
+  const panel = document.querySelector('.transactions-templates-panel') as HTMLElement | null;
+  if (!toggle || !panel) return;
+
+  const showToggle = isPhoneTemplatesLayout() && templateCount > 0;
+  toggle.hidden = !showToggle;
+  panel.classList.toggle('transactions-templates-panel--collapsed', showToggle && templatesCollapsedOnPhone);
+
+  if (!showToggle) {
+    toggle.setAttribute('aria-expanded', 'true');
+    toggle.textContent = 'Hide';
+    return;
+  }
+
+  toggle.setAttribute('aria-expanded', String(!templatesCollapsedOnPhone));
+  toggle.textContent = templatesCollapsedOnPhone ? `Show (${templateCount})` : 'Hide';
+}
 
 /**
  * Set the currency formatting function
@@ -269,12 +294,26 @@ export function renderTemplates(): void {
   if (!container) return;
 
   const templates = signals.txTemplates.value;
+  updateTemplatesCollapseUi(templates.length);
+
   if (!templates.length) {
     render(html`
       <div class="template-empty-state">
         <p class="template-empty-state__title">No templates yet</p>
         <p class="template-empty-state__body">
           Save a transaction pattern to reuse amount, category, and recurring details faster.
+        </p>
+      </div>
+    `, container);
+    return;
+  }
+
+  if (isPhoneTemplatesLayout() && templatesCollapsedOnPhone) {
+    render(html`
+      <div class="template-collapsed-summary" role="status" aria-live="polite">
+        <p class="template-collapsed-summary__title">${templates.length} template${templates.length === 1 ? '' : 's'} ready</p>
+        <p class="template-collapsed-summary__body">
+          Expand this section to reuse saved transaction patterns without adding more scroll by default.
         </p>
       </div>
     `, container);
@@ -361,6 +400,23 @@ export function renderTemplates(): void {
 export function initTemplateManager(): void {
   if (templateManagerInitialized) return;
   templateManagerInitialized = true;
+
+  templatesCollapsedOnPhone = isPhoneTemplatesLayout();
+  templatesMediaQuery = window.matchMedia('(max-width: 767px)');
+  const syncTemplatesForViewport = (matches: boolean): void => {
+    templatesCollapsedOnPhone = matches;
+    renderTemplates();
+  };
+  templatesMediaQuery.addEventListener('change', (event: MediaQueryListEvent) => {
+    syncTemplatesForViewport(event.matches);
+  });
+
+  const toggleTemplatesButton = DOM.get('toggle-templates-mobile') as HTMLButtonElement | null;
+  toggleTemplatesButton?.addEventListener('click', () => {
+    if (!isPhoneTemplatesLayout()) return;
+    templatesCollapsedOnPhone = !templatesCollapsedOnPhone;
+    renderTemplates();
+  });
 
   // Set up signal effects to sync with DOM
   effect(() => {
