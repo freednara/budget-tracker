@@ -12,6 +12,13 @@ function isPerfDebugEnabled(): boolean {
   return import.meta.env.DEV && typeof window !== 'undefined' && (window as any).__APP_DEBUG_PERF__ === true;
 }
 
+let performanceMonitoringInitialized = false;
+let longTaskObserver: PerformanceObserver | null = null;
+let budgetCheckInterval: ReturnType<typeof setInterval> | null = null;
+let visibilityChangeHandler: (() => void) | null = null;
+let onlineHandler: (() => void) | null = null;
+let offlineHandler: (() => void) | null = null;
+
 // ==========================================
 // DATA OPERATIONS MONITORING (Event-Based)
 // ==========================================
@@ -128,14 +135,36 @@ export async function monitoredFetch(
   input: RequestInfo | URL,
   init?: RequestInit
 ): Promise<Response> {
-  const url = typeof input === 'string' ? input : input.toString();
-  const method = init?.method || 'GET';
+  const requestUrl = resolveMonitoredFetchUrl(input);
+  const method = init?.method || (input instanceof Request ? input.method : 'GET');
+  if (requestUrl && typeof window !== 'undefined' && requestUrl.origin !== window.location.origin) {
+    throw new Error(`Blocked external monitored fetch to ${requestUrl.origin}`);
+  }
+
+  const url = requestUrl?.toString() ?? (typeof input === 'string' ? input : input.toString());
   
   return perfMonitor.measureAsync(
     'api.fetch',
     () => fetch(input, init),
     { url, method }
   );
+}
+
+function resolveMonitoredFetchUrl(input: RequestInfo | URL): URL | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const rawUrl =
+    input instanceof URL ? input.toString() :
+    input instanceof Request ? input.url :
+    input;
+
+  try {
+    return new URL(rawUrl, window.location.origin);
+  } catch {
+    return null;
+  }
 }
 
 // ==========================================
@@ -236,10 +265,16 @@ export class PerformanceBudgetEnforcer {
  * Set up automatic performance monitoring for the app
  */
 export function setupPerformanceMonitoring(): void {
+  if (performanceMonitoringInitialized) {
+    return;
+  }
+
+  performanceMonitoringInitialized = true;
+
   // Monitor long tasks
   if ('PerformanceObserver' in window) {
     try {
-      const observer = new PerformanceObserver((list) => {
+      longTaskObserver = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
           perfMonitor.recordMetric(
             'longtask',
@@ -253,30 +288,34 @@ export function setupPerformanceMonitoring(): void {
           }
         }
       });
-      observer.observe({ entryTypes: ['longtask'] });
+      longTaskObserver.observe({ entryTypes: ['longtask'] });
     } catch (e) {
+      longTaskObserver = null;
       // Long task monitoring not available
     }
   }
   
   // Monitor page visibility changes
-  document.addEventListener('visibilitychange', () => {
+  visibilityChangeHandler = () => {
     perfMonitor.recordMetric(
       'visibility.change',
       document.hidden ? 0 : 1,
       'count',
       { hidden: document.hidden.toString() }
     );
-  });
+  };
+  document.addEventListener('visibilitychange', visibilityChangeHandler);
   
   // Monitor online/offline status
-  window.addEventListener('online', () => {
+  onlineHandler = () => {
     perfMonitor.recordMetric('network.online', 1, 'count');
-  });
+  };
+  window.addEventListener('online', onlineHandler);
   
-  window.addEventListener('offline', () => {
+  offlineHandler = () => {
     perfMonitor.recordMetric('network.offline', 1, 'count');
-  });
+  };
+  window.addEventListener('offline', offlineHandler);
   
   // Set up performance budgets
   const budgetEnforcer = new PerformanceBudgetEnforcer();
@@ -312,7 +351,7 @@ export function setupPerformanceMonitoring(): void {
   });
   
   // Check budgets periodically
-  setInterval(() => budgetEnforcer.check(), 60000);
+  budgetCheckInterval = setInterval(() => budgetEnforcer.check(), 60000);
   
   // Note: perfMonitor.logReport() on beforeunload is handled in app.ts
 

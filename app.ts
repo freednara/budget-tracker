@@ -9,6 +9,7 @@ import { initializeApp, cleanupApp, isAppInitialized } from './js/modules/orches
 import { showToast } from './js/modules/ui/core/ui.js';
 import { perfMonitor } from './js/modules/core/performance-monitor.js';
 import { switchMainTab } from './js/modules/ui/core/ui-navigation.js';
+import { safeStorage } from './js/modules/core/safe-storage.js';
 
 declare const __APP_VERSION__: string;
 declare const __APP_BUILD_TIME__: string;
@@ -61,14 +62,21 @@ function showUpdateBanner(onUpdate: () => void): void {
   const banner = document.createElement('div');
   banner.id = 'app-update-banner';
   banner.className = 'update-banner';
-  banner.innerHTML = `
-    <span>Update ready for Harbor Ledger</span>
-    <button type="button" class="update-btn">Refresh now</button>
-    <button type="button" class="dismiss-btn" aria-label="Dismiss update banner">×</button>
-  `;
+  const message = document.createElement('span');
+  message.textContent = 'Update ready for Harbor Ledger';
 
-  const updateButton = banner.querySelector<HTMLButtonElement>('.update-btn');
-  const dismissButton = banner.querySelector<HTMLButtonElement>('.dismiss-btn');
+  const updateButton = document.createElement('button');
+  updateButton.type = 'button';
+  updateButton.className = 'update-btn';
+  updateButton.textContent = 'Refresh now';
+
+  const dismissButton = document.createElement('button');
+  dismissButton.type = 'button';
+  dismissButton.className = 'dismiss-btn';
+  dismissButton.setAttribute('aria-label', 'Dismiss update banner');
+  dismissButton.textContent = '×';
+
+  banner.append(message, updateButton, dismissButton);
 
   updateButton?.addEventListener('click', () => onUpdate());
   dismissButton?.addEventListener('click', () => removeUpdateBanner());
@@ -111,14 +119,14 @@ async function syncRuntimeVersion(): Promise<void> {
   publishRuntimeInfo();
 
   const versionKey = 'budget_tracker_runtime_version';
-  const previousVersion = localStorage.getItem(versionKey);
+  const previousVersion = safeStorage.getItem(versionKey);
   const currentVersion = __APP_VERSION__;
 
   if (previousVersion === currentVersion) {
     return;
   }
 
-  localStorage.setItem(versionKey, currentVersion);
+  safeStorage.setItem(versionKey, currentVersion);
 
   if (!import.meta.env.PROD) {
     return;
@@ -153,28 +161,31 @@ async function syncRuntimeVersion(): Promise<void> {
 async function main(): Promise<void> {
   try {
     publishRuntimeInfo();
+    await syncRuntimeVersion();
+
+    // Check if already initialized before clearing published readiness state.
+    if (isAppInitialized()) {
+      if (isStartupDebugEnabled()) console.warn('Application already initialized');
+      return;
+    }
+
     (window as any).__APP_ERRORS__ = null;
     (window as any).__APP_STARTUP_PROGRESS__ = null;
     (window as any).__APP_SHELL_READY__ = false;
     (window as any).__APP_INTERACTIVE_READY__ = false;
     (window as any).__APP_BACKGROUND_READY__ = false;
+    (window as any).__APP_BACKGROUND_FAILED__ = false;
     (window as any).__APP_INITIALIZED__ = false;
     (window as any).__APP_TEST_API__ = null;
     setAppDataset('appError', 'false');
+    setAppDataset('appShellReady', 'false');
     setAppDataset('appInitialized', 'false');
     setAppDataset('appInteractiveReady', 'false');
     setAppDataset('appBackgroundReady', 'false');
+    setAppDataset('appBackgroundFailed', 'false');
 
     // Mark initialization start
     perfMonitor.mark('app.init.start');
-
-    await syncRuntimeVersion();
-
-    // Check if already initialized
-    if (isAppInitialized()) {
-    if (isStartupDebugEnabled()) console.warn('Application already initialized');
-      return;
-    }
 
     // Initialize application with DI container
     if (isStartupDebugEnabled()) console.log('Starting Budget Tracker Elite...');
@@ -192,7 +203,7 @@ async function main(): Promise<void> {
     // Show success message
     showToast('Harbor Ledger ready', 'success');
 
-    // Signal to E2E tests that app is fully initialized
+    // Signal that blocking startup is complete and the interactive app is ready.
     (window as any).__APP_INITIALIZED__ = true;
     setAppDataset('appInitialized', 'true');
     publishRuntimeInfo();
@@ -216,11 +227,14 @@ async function main(): Promise<void> {
     (window as any).__APP_SHELL_READY__ = false;
     (window as any).__APP_INTERACTIVE_READY__ = false;
     (window as any).__APP_BACKGROUND_READY__ = false;
+    (window as any).__APP_BACKGROUND_FAILED__ = false;
     (window as any).__APP_INITIALIZED__ = false;
     setAppDataset('appError', 'true');
+    setAppDataset('appShellReady', 'false');
     setAppDataset('appInitialized', 'false');
     setAppDataset('appInteractiveReady', 'false');
     setAppDataset('appBackgroundReady', 'false');
+    setAppDataset('appBackgroundFailed', 'false');
     
     // Show error to user
     showToast('Failed to start application. Please refresh the page.', 'error');

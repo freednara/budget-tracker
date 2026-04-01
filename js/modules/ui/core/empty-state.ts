@@ -9,7 +9,7 @@
 'use strict';
 
 import DOM from '../../core/dom-cache.js';
-import { html, render, unsafeHTML, nothing, type LitTemplate } from '../../core/lit-helpers.js';
+import { html, render, nothing, type TemplateResult } from '../../core/lit-helpers.js';
 import type { EmptyStateAction } from '../../../types/index.js';
 
 // ==========================================
@@ -19,6 +19,7 @@ import type { EmptyStateAction } from '../../../types/index.js';
 type SwitchMainTabFn = (tabName: string) => void;
 type OpenModalFn = (modalId: string) => void;
 type LoadSampleDataFn = () => void;
+type OpenTransactionsForDateFn = (date: string) => void;
 
 type IllustrationType = 'no-transactions' | 'no-results' | 'no-goals' | 'no-recurring';
 
@@ -29,6 +30,7 @@ type IllustrationType = 'no-transactions' | 'no-results' | 'no-goals' | 'no-recu
 let switchMainTabFn: SwitchMainTabFn = () => {};
 let openModalFn: OpenModalFn = () => {};
 let loadSampleDataFn: LoadSampleDataFn = () => {};
+let openTransactionsForDateFn: OpenTransactionsForDateFn | null = null;
 
 export function setSwitchMainTabFn(fn: SwitchMainTabFn): void {
   switchMainTabFn = fn;
@@ -40,6 +42,10 @@ export function setOpenModalFn(fn: OpenModalFn): void {
 
 export function setLoadSampleDataFn(fn: LoadSampleDataFn): void {
   loadSampleDataFn = fn;
+}
+
+export function setOpenTransactionsForDateFn(fn: OpenTransactionsForDateFn): void {
+  openTransactionsForDateFn = fn;
 }
 
 // ==========================================
@@ -59,27 +65,27 @@ const ILLUSTRATION_MAP: Record<string, IllustrationType> = {
 // ILLUSTRATIONS
 // ==========================================
 
-const ILLUSTRATIONS: Record<IllustrationType, string> = {
-  'no-transactions': `<div class="empty-state-illustration illustration-no-transactions">
+const ILLUSTRATIONS: Record<IllustrationType, TemplateResult> = {
+  'no-transactions': html`<div class="empty-state-illustration illustration-no-transactions">
     <div class="coin"></div>
     <div class="coin"></div>
     <div class="coin"></div>
     <div class="wallet"></div>
   </div>`,
 
-  'no-results': `<div class="empty-state-illustration illustration-no-results">
+  'no-results': html`<div class="empty-state-illustration illustration-no-results">
     <div class="magnifier"></div>
     <div class="handle"></div>
   </div>`,
 
-  'no-goals': `<div class="empty-state-illustration illustration-no-goals">
+  'no-goals': html`<div class="empty-state-illustration illustration-no-goals">
     <div class="target-ring"></div>
     <div class="target-ring"></div>
     <div class="target-ring"></div>
     <div class="arrow"></div>
   </div>`,
 
-  'no-recurring': `<div class="empty-state-illustration illustration-no-recurring">
+  'no-recurring': html`<div class="empty-state-illustration illustration-no-recurring">
     <div class="calendar">
       <div class="calendar-header"></div>
       <div class="calendar-dots">
@@ -107,20 +113,21 @@ export function emptyState(
   title: string,
   subtitle: string,
   action: EmptyStateAction | null = null
-): LitTemplate {
+): TemplateResult {
   const illustrationType = ILLUSTRATION_MAP[emoji];
-  const illustrationHtml = illustrationType && ILLUSTRATIONS[illustrationType]
+  const illustrationTemplate = illustrationType && ILLUSTRATIONS[illustrationType]
     ? ILLUSTRATIONS[illustrationType]
     : null;
 
   return html`
     <div class="text-center py-8">
-      ${illustrationHtml ? unsafeHTML(illustrationHtml) : html`<div class="text-4xl mb-2">${emoji}</div>`}
+      ${illustrationTemplate ?? html`<div class="text-4xl mb-2">${emoji}</div>`}
       <p class="font-bold" style="color: var(--text-primary);">${title}</p>
       <p class="text-xs mt-1" style="color: var(--text-tertiary);">${subtitle}</p>
       ${action ? html`
         <button class="empty-state-cta mt-4 px-4 py-2 rounded-lg text-sm font-bold transition-all"
                 data-action=${action.id}
+                data-action-date=${action.date || nothing}
                 style="background: var(--color-accent); color: white;">
           ${action.label}
         </button>
@@ -158,6 +165,13 @@ function handleCTAClick(e: MouseEvent): void {
       switchMainTabFn('transactions');
       setTimeout(() => (DOM.get('amount') as HTMLElement | null)?.focus(), FOCUS_DELAY);
       break;
+
+    case 'add-transaction-for-date': {
+      const date = btn.dataset.actionDate;
+      if (!date || !openTransactionsForDateFn) break;
+      openTransactionsForDateFn(date);
+      break;
+    }
 
     case 'add-goal':
       openModalFn('savings-goal-modal');

@@ -2,18 +2,18 @@
 
 ## Overview
 
-Budget Tracker Elite has been successfully refactored into a sophisticated, production-ready TypeScript architecture with 138 modules organized into semantic directories.
+Budget Tracker Elite has been successfully refactored into a sophisticated, production-ready TypeScript architecture with 146 modules organized into semantic directories.
 
 ## Current Status
 
 **Phase**: ✅ **PRODUCTION READY** - All refactoring phases completed
 **Architecture**: Modern TypeScript with dependency injection and reactive state
-**Modules**: 138 TypeScript files with comprehensive test coverage
+**Modules**: 146 TypeScript files with comprehensive test coverage
 **Grade**: A+ (98/100) - Exceptional technical implementation
 
 ## Directory Structure
 
-### 📁 `/core/` - Foundation Layer (43 modules)
+### 📁 `/core/` - Foundation Layer (45 modules)
 Essential infrastructure and framework code:
 - **State Management**: `signals.ts` (reactive state), `state.ts`, `state-actions.ts`, `state-hydration.ts`, `state-revision.ts`, `signal-batcher.ts`, `signal-sync.ts`
 - **Dependency Injection**: `di-container.ts` (production DI container), `app-container.ts`
@@ -21,6 +21,7 @@ Essential infrastructure and framework code:
 - **Concurrency**: `mutex.ts`, `multi-tab-sync.ts`, `multi-tab-sync-activity.ts`, `multi-tab-sync-broadcast.ts`, `multi-tab-sync-conflicts.ts`
 - **Error Handling**: `error-boundary.ts`, `error-handler.ts`, `error-tracker.ts`, `error-state.ts`, `global-error-handler.ts`
 - **Utilities**: `utils.ts`, `utils-dom.ts`, `utils-pure.ts`, `validator.ts`
+- **Dashboard Helpers**: `dashboard-svg-helpers.ts`, `effective-budget.ts`
 - **Rendering**: `lit-helpers.ts`, `signal-directive.ts`, `render-scheduler.ts`
 - **Services**: `currency-service.ts`, `locale-service.ts`, `lazy-loader.ts`, `lifecycle-manager.ts`
 - **Interfaces**: `data-sync-interface.ts`, `feature-event-interface.ts`, `ui-event-interface.ts`
@@ -67,7 +68,7 @@ Application lifecycle and coordination:
 - **Initialization**: `app-init.ts`, `app-init-di.ts` (DI-based app startup)
 - **Analytics**: `analytics.ts` (orchestration layer)
 - **Events**: `app-events.ts`
-- **Dashboard**: `dashboard.ts`, `dashboard-animations.ts`, `dashboard-svg-helpers.ts`, `dashboard-trends.ts`
+- **Dashboard**: `dashboard.ts`, `dashboard-animations.ts`, `dashboard-trends.ts`
 - **Background**: `worker-manager.ts`, `backup-reminder.ts`, `sample-data.ts`
 
 ### 📁 `/ui/` - Presentation Layer (23 modules)
@@ -106,6 +107,11 @@ Modern component architecture:
 - **Core**: `transactions.ts`, `calendar.ts`, `summary-cards.ts`
 - **Modals**: `modal-base.ts`, `mount-modals.ts`, `form-modals.ts`, `simple-modals.ts`
 - **Settings**: `settings-modal.ts`, `settings-modal-events.ts`
+
+Documented bridge exceptions:
+- A small set of dashboard-oriented components currently imports from `features/` and `orchestration/` for financial calculations and shared animation helpers.
+- A small set of components also imports from `ui/` for shared navigation and rendering surfaces.
+- Those `components -> features`, `components -> orchestration`, and `components -> ui` exceptions are tracked explicitly in `tests/architecture-contract.test.ts` and should be narrowed instead of expanded when helpers move.
 
 ### 📁 `/transactions/` - Transaction System (4 modules)
 - **Core**: `index.ts` (main transaction logic), `edit-mode.ts`

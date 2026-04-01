@@ -629,8 +629,11 @@ function setupAlertAndCelebration(): void {
   if (dismissAlertButton) bindModalEvent(dismissAlertButton, 'click', () => {
     const alertText = DOM.get('alert-text');
     const txt = alertText?.textContent || '';
+    const alertId = dismissAlertButton.getAttribute('data-alert-id')
+      || alertText?.getAttribute('data-alert-id')
+      || txt;
     void loadFeatureEventInterface().then(({ dismissAlert }) => {
-      dismissAlert(txt);
+      dismissAlert(alertId);
     });
   });
 

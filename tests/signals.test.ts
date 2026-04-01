@@ -23,6 +23,13 @@ function tx(
 afterEach(() => {
   signals.replaceTransactionLedger([]);
   signals.currentMonth.value = '2026-03';
+  signals.monthlyAlloc.value = {};
+  signals.dismissedAlerts.value = new Set();
+  signals.alerts.value = {
+    budgetThreshold: null,
+    browserNotificationsEnabled: false,
+    lastNotifiedAlertKeys: []
+  };
 });
 
 describe('currentMonthTotals', () => {
@@ -100,5 +107,35 @@ describe('month summary signals', () => {
 
     expect(signals.currentMonthSummary.value.expenses).toBe(0);
     expect(signals.monthSummaries.value['2026-04']?.expenses).toBe(80);
+  });
+});
+
+describe('activeAlertEntries', () => {
+  it('recomputes when an existing category budget amount changes', () => {
+    signals.currentMonth.value = '2026-03';
+    signals.alerts.value = {
+      budgetThreshold: 0.8,
+      browserNotificationsEnabled: false,
+      lastNotifiedAlertKeys: []
+    };
+    signals.monthlyAlloc.value = {
+      '2026-03': {
+        food: 100
+      }
+    };
+    signals.replaceTransactionLedger([
+      tx({ type: 'expense', amount: 85, date: '2026-03-05', category: 'food' })
+    ]);
+
+    expect(signals.activeAlertEntries.value).toHaveLength(1);
+    expect(signals.activeAlertEntries.value[0]?.key).toBe('2026-03:food:budget-threshold');
+
+    signals.monthlyAlloc.value = {
+      '2026-03': {
+        food: 120
+      }
+    };
+
+    expect(signals.activeAlertEntries.value).toEqual([]);
   });
 });

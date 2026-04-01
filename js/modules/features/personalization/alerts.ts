@@ -9,9 +9,6 @@ import * as signals from '../../core/signals.js';
 import { alerts as alertActions } from '../../core/state-actions.js';
 import { on } from '../../core/event-bus.js';
 import { FeatureEvents } from '../../core/feature-event-interface.js';
-import DOM from '../../core/dom-cache.js';
-import { html, render } from '../../core/lit-helpers.js';
-import { effect } from '@preact/signals-core';
 import { initBrowserBudgetNotifications } from './browser-notifications.js';
 
 // ==========================================
@@ -21,52 +18,8 @@ import { initBrowserBudgetNotifications } from './browser-notifications.js';
 /**
  * Dismiss an alert (won't show again this month)
  */
-export function dismissAlert(alertText: string): void {
-  alertActions.dismissAlert(alertText, signals.currentMonth.value);
-}
-
-// ==========================================
-// RENDERER
-// ==========================================
-
-/**
- * Mount the reactive alert banner component
- */
-export function mountAlertBanner(): () => void {
-  const container = DOM.get('alert-banner');
-  if (!container) return () => {};
-
-  const cleanup = effect(() => {
-    const alerts = signals.activeAlerts.value;
-    
-    if (alerts.length === 0) {
-      container.classList.add('hidden');
-      render(html``, container);
-      return;
-    }
-
-    container.classList.remove('hidden');
-    const firstAlert = alerts[0];
-    const moreCount = alerts.length - 1;
-    const displayText = firstAlert + (moreCount > 0 ? ` (+${moreCount} more)` : '');
-
-    render(html`
-      <div class="w-full px-4 md:px-8 py-3 flex items-center justify-between gap-3">
-        <div class="flex items-center gap-3">
-          <span class="text-lg">⚠️</span>
-          <p id="alert-text" class="text-sm font-semibold text-warning">${displayText}</p>
-        </div>
-        <button @click=${() => dismissAlert(firstAlert)}
-                id="dismiss-alert"
-                class="touch-btn text-sm font-bold rounded text-warning"
-                aria-label="Dismiss alert">
-          ✕
-        </button>
-      </div>
-    `, container);
-  });
-
-  return cleanup;
+export function dismissAlert(alertId: string): void {
+  alertActions.dismissAlert(alertId, signals.currentMonth.value);
 }
 
 // ==========================================
@@ -92,5 +45,5 @@ export function initAlerts(): () => void {
  * Legacy support for checkAlerts (now reactive)
  */
 export function checkAlerts(): void {
-  // Logic is now automatic via signals.activeAlerts and mountAlertBanner
+  // Logic is now automatic via signals.activeAlertEntries and mountInlineAlerts
 }

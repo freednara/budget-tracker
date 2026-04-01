@@ -59,9 +59,11 @@ class StorageManager {
   private adapter: StorageAdapter | null = null;
   private type: StorageType | null = null;
   private syncChannel: BroadcastChannel | null = null;
+  private storageSyncHandler: ((event: StorageEvent) => void) | null = null;
   private _tabId: string;
   private _errorCount: number = 0;
   private _initialized: boolean = false;
+  private _syncMessageCounter: number = 0;
   readonly ERROR_THRESHOLD: number = 5;
 
   constructor() {
@@ -167,7 +169,11 @@ class StorageManager {
    * Set up localStorage events for multi-tab sync (fallback)
    */
   private _setupLocalStorageSync(): void {
-    window.addEventListener('storage', (event: StorageEvent) => {
+    if (this.storageSyncHandler) {
+      window.removeEventListener('storage', this.storageSyncHandler);
+    }
+
+    this.storageSyncHandler = (event: StorageEvent) => {
       if (event.key?.startsWith('budget_tracker_sync_')) {
         try {
           const message = JSON.parse(event.newValue || '') as SyncMessage;
@@ -176,7 +182,9 @@ class StorageManager {
           // Ignore parse errors
         }
       }
-    });
+    };
+
+    window.addEventListener('storage', this.storageSyncHandler);
   }
 
   /**
@@ -224,7 +232,7 @@ class StorageManager {
    */
   private _broadcastViaLocalStorage(message: SyncMessage): void {
     try {
-      const key = `budget_tracker_sync_${Date.now()}`;
+      const key = `budget_tracker_sync_${Date.now()}_${this._tabId}_${this._syncMessageCounter++}`;
       localStorage.setItem(key, JSON.stringify(message));
       // Clean up after a short delay
       setTimeout(() => {
@@ -620,10 +628,15 @@ class StorageManager {
       this.syncChannel.close();
       this.syncChannel = null;
     }
+    if (this.storageSyncHandler) {
+      window.removeEventListener('storage', this.storageSyncHandler);
+      this.storageSyncHandler = null;
+    }
     this.adapter = null;
     this.type = null;
     this._initialized = false;
     this._errorCount = 0;
+    this._syncMessageCounter = 0;
   }
 }
 

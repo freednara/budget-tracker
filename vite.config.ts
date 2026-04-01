@@ -180,74 +180,7 @@ export default defineConfig({
         navigateFallback: 'index.html',
         // Define maximum cache sizes to prevent bloat
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024, // 5MB
-        runtimeCaching: [
-          // Google Fonts
-          {
-            urlPattern: /^https:\/\/fonts\.(googleapis|gstatic)\.com/,
-            handler: 'StaleWhileRevalidate',
-            options: {
-              cacheName: 'google-fonts',
-              expiration: { maxEntries: 30, maxAgeSeconds: 60 * 60 * 24 * 365 }
-            }
-          },
-          // External API calls (if any)
-          {
-            urlPattern: /^https:\/\/api\./,
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'api-cache',
-              networkTimeoutSeconds: 5,
-              expiration: { maxEntries: 50, maxAgeSeconds: 60 * 60 * 24 * 7 }, // 7 days
-              cacheableResponse: { statuses: [0, 200] }
-            }
-          },
-          // Currency data or external resources
-          {
-            urlPattern: /^https:\/\/cdn\./,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'cdn-cache',
-              expiration: { maxEntries: 100, maxAgeSeconds: 60 * 60 * 24 * 30 }, // 30 days
-              cacheableResponse: { statuses: [0, 200] }
-            }
-          },
-          // Currency exchange rates (if used)
-          {
-            urlPattern: /^https:\/\/(api\.exchangerate-api\.com|api\.currencyapi\.com|cdn\.jsdelivr\.net\/npm\/@fawazahmed0\/currency-api)/,
-            handler: 'StaleWhileRevalidate',
-            options: {
-              cacheName: 'currency-rates',
-              expiration: { maxEntries: 10, maxAgeSeconds: 60 * 60 * 24 }, // 24 hours
-              cacheableResponse: { statuses: [0, 200] }
-            }
-          },
-          // Icon libraries and resources
-          {
-            urlPattern: /^https:\/\/(unpkg\.com|cdnjs\.cloudflare\.com).*\.(svg|png|jpg|jpeg|gif|webp|ico)/,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'icon-cache',
-              expiration: { maxEntries: 200, maxAgeSeconds: 60 * 60 * 24 * 90 }, // 90 days
-              cacheableResponse: { statuses: [0, 200] }
-            }
-          },
-          // LocalStorage/IndexedDB backup (for cross-device sync in future)
-          {
-            urlPattern: ({ url }) => {
-              // Cache any backup/sync endpoints
-              return url.pathname.includes('/backup') || 
-                     url.pathname.includes('/sync') ||
-                     url.pathname.includes('/export');
-            },
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'data-sync',
-              networkTimeoutSeconds: 10,
-              expiration: { maxEntries: 20, maxAgeSeconds: 60 * 60 * 24 }, // 24 hours
-              cacheableResponse: { statuses: [0, 200] }
-            }
-          }
-        ]
+        runtimeCaching: []
       }
     })
   ]

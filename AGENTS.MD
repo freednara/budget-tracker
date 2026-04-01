@@ -42,7 +42,7 @@ types/ --> core/ --> data/ --> features/ --> orchestration/ --> ui/ + components
 - `moduleResolution: "bundler"` -- modern ESM resolution
 - All signals must have explicit generic types: `signal<Type>(value)`
 - All function parameters must have explicit types in strict mode
-- Run `npx tsc --noEmit` to verify -- must produce 0 errors
+- Run `npm run typecheck` (`tsc --noEmit`) to verify -- must produce 0 errors
 
 ## State Management
 
@@ -71,6 +71,7 @@ export const budgetUsagePercent = computed(() => {
 
 Default all app-facing state changes through action methods. Direct signal writes are reserved for a narrow low-level allowlist that is enforced by tests:
 - `js/modules/core/state-actions.ts`
+- `js/modules/core/state-hydration.ts`
 - `js/modules/data/transaction-renderer.ts`
 - `js/modules/features/backup/auto-backup.ts`
 - `js/modules/features/gamification/achievements.ts`
@@ -92,7 +93,7 @@ settings.setPin(bundle);
 signals.currentMonth.value = '2026-03';
 ```
 
-**Action object groups:** `navigation`, `form`, `modal`, `settings`, `data`, `savingsGoals`, `pagination`
+**Action object groups:** `navigation`, `form`, `modal`, `settings`, `data`, `savingsGoals`, `pagination`, `filters`, `calendar`, `alerts`, `onboarding`, `debts`, `syncState`
 
 Action methods should:
 
@@ -299,6 +300,32 @@ const spent = (totals.categoryTotals || {})[categoryId] || 0;
 - **Tests:** `tests/**/*.test.ts`
 - **E2E:** `e2e/*.spec.ts` with Playwright
 
+### Useful Commands
+
+```bash
+npm run typecheck
+npm test
+npm run test:run
+npm run test:coverage
+npm run test:e2e
+npm run test:e2e:smoke
+npm run test:e2e:ui
+npm run test:e2e:debug
+npx playwright test e2e/accessibility.spec.ts
+npx playwright test e2e/security.spec.ts
+npx playwright test e2e/visual-regression.spec.ts --project=chromium
+```
+
+- Use `npm run test:e2e:smoke` for the pinned smoke subset: `transaction-crud`, `dashboard-layout`, `data-lifecycle`, `advanced-resilience`
+- Playwright runs three browser projects by default: `chromium`, `webkit`, and `mobile-safari`
+- Some layout interactions are intentionally `webkit`-only in `e2e/dashboard-layout.spec.ts`; use `--project=webkit` when investigating those cases
+- Set `PW_PERF_PROFILE=1` to run Playwright against `npm run build && npm run preview -- --host 127.0.0.1 --port 4173` instead of the Vite dev server
+- Set `PW_REUSE_SERVER=1` to reuse an existing local server, and `PW_REPORTER` to override the default Playwright `line` reporter
+- Set `RUN_PERF_BENCH=1` to enable `e2e/performance-benchmark.spec.ts`; without it, the benchmark-only Playwright tests are skipped
+- `e2e/visual-regression.spec.ts-snapshots/` contains generated Playwright baselines; regenerate via the spec, do not hand-edit the snapshot files
+- The browser perf workflow has two modes: the required shell and hot-path regression check, plus advisory 1k/5k/10k ledger benchmark runs for local scale testing
+- GitHub Pages deploy uses `npm run test:run` before `npm run build`, so prefer `npm run test:run` for a fast local pre-deploy check when you do not need coverage
+
 ### Transaction Factory Pattern
 
 Test Transaction objects MUST include all required fields:
@@ -378,7 +405,7 @@ These are the specific mistakes that caused 180 TypeScript errors. Do not repeat
 
 Before submitting changes, verify:
 
-- [ ] `npx tsc --noEmit` produces 0 errors
+- [ ] `npm run typecheck` passes
 - [ ] All imports use `.js` extensions
 - [ ] All new signals have corresponding action methods in `state-actions.ts`
 - [ ] All new storage keys use `SK` constants with defaults in `STORAGE_DEFAULTS`

@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { cleanAppState, waitForAppReady, waitForTransactionsSurfaceReady } from './test-helpers.js';
+import { cleanAppState, waitForAppPhase, waitForTransactionsSurfaceReady } from './test-helpers.js';
 
 const RUN_PERF_BENCH = process.env.RUN_PERF_BENCH === '1';
 const DATASET_SIZES = [1000, 5000, 10000] as const;
@@ -95,7 +95,7 @@ test.describe('Performance Benchmark', () => {
 
     const navStart = Date.now();
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await waitForAppReady(page, 120000);
+    await waitForAppPhase(page, 'shell', 120000);
     const shellReadyMs = Date.now() - navStart;
 
     const transactionsSurfaceStart = Date.now();
@@ -150,7 +150,7 @@ test.describe('Performance Benchmark', () => {
 
       const navStart = Date.now();
       await page.reload({ waitUntil: 'domcontentloaded' });
-      await waitForAppReady(page, 120000);
+      await waitForAppPhase(page, 'shell', 120000);
       const shellReadyMs = Date.now() - navStart;
 
       const transactionsSurfaceStart = Date.now();

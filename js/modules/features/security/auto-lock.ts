@@ -21,6 +21,12 @@ let lockCallback: (() => void) | null = null;
 
 const ACTIVITY_EVENTS: readonly string[] = ['click', 'keydown', 'touchstart', 'scroll'];
 
+function triggerLock(): void {
+  if (!paused && lockCallback) {
+    lockCallback();
+  }
+}
+
 // ==========================================
 // INTERNAL HELPERS
 // ==========================================
@@ -36,22 +42,28 @@ function scheduleTimer(): void {
     timerId = null;
   }
   timerId = setTimeout(() => {
-    if (!paused && lockCallback) {
-      lockCallback();
-    }
+    triggerLock();
   }, currentTimeoutMs);
+}
+
+function onVisibilityChange(): void {
+  if (document.visibilityState === 'hidden') {
+    triggerLock();
+  }
 }
 
 function addListeners(): void {
   for (const event of ACTIVITY_EVENTS) {
     window.addEventListener(event, onActivity, { passive: true });
   }
+  document.addEventListener('visibilitychange', onVisibilityChange);
 }
 
 function removeListeners(): void {
   for (const event of ACTIVITY_EVENTS) {
     window.removeEventListener(event, onActivity);
   }
+  document.removeEventListener('visibilitychange', onVisibilityChange);
 }
 
 // ==========================================

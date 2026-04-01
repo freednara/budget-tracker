@@ -32,12 +32,11 @@ export function downloadBlob(blob: Blob, filename: string): void {
 // ==========================================
 
 /**
- * Get month badge HTML string
+ * Get the month badge label text.
  */
 export function getMonthBadge(monthKey: string): string {
   const [y, m] = monthKey.split('-');
-  const monthName = new Date(parseInt(y), parseInt(m) - 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-  return `<span class="time-badge">${monthName}</span>`;
+  return new Date(parseInt(y), parseInt(m) - 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
 }
 
 // ==========================================

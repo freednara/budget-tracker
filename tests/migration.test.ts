@@ -209,4 +209,17 @@ describe('MigrationManager public migration safety', () => {
     };
     expect(marker.reason).toBe('migration_indexeddb_restore_failed');
   });
+
+  it('does not persist the PIN bundle inside durable migration backup snapshots', async () => {
+    const manager = new MigrationManager();
+    const result = await manager.migrate();
+
+    expect(result.isOk).toBe(false);
+
+    const backupKey = Object.keys(localStorage).find((key) => key.startsWith('budget_tracker_backup_'));
+    expect(backupKey).toBeTruthy();
+
+    const backupSnapshot = JSON.parse(localStorage.getItem(backupKey!) || '{}') as Record<string, unknown>;
+    expect(backupSnapshot.pin).toBeUndefined();
+  });
 });

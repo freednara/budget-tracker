@@ -142,7 +142,7 @@ function restoreStorageSnapshot(snapshot: StorageSnapshotEntry[]): void {
     if (raw === null) {
       safeStorage.removeItem(key);
     } else {
-      localStorage.setItem(key, raw);
+      safeStorage.setItem(key, raw);
     }
   });
 }

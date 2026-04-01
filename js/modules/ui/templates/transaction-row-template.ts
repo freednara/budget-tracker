@@ -11,6 +11,7 @@ import { html, TemplateResult } from '../../core/lit-helpers.js';
 import { getCatInfo } from '../../core/categories.js';
 import { escapeHtml, parseLocalDate } from '../../core/utils.js';
 import { isSavingsTransferTransaction, getSavingsTransferGoalName } from '../../core/transaction-classification.js';
+import { emptyState } from '../core/empty-state.js';
 import type { Transaction, CurrencyFormatter } from '../../../types/index.js';
 
 // ==========================================
@@ -392,15 +393,20 @@ export function emptyTransactionListTemplate(options: {
     ? (hasActiveFilters
         ? 'Adjust or clear filters to see more results.'
         : (isAllMonths ? 'Try a different filter or add a new transaction.' : 'Try another month or add a new transaction.'))
-    : 'Add your first transaction to start tracking';
+    : 'Add your first transaction to start tracking this month.';
 
-  return html`
-    <div class="empty-state text-center py-12">
-      <div class="empty-icon text-5xl mb-4">📊</div>
-      <h3 class="text-lg font-black text-primary">${title}</h3>
-      <p class="text-secondary">${body}</p>
-    </div>
-  `;
+  const action = hasTransactions && hasActiveFilters
+    ? { id: 'clear-filters', label: 'Clear Filters' }
+    : !hasTransactions
+      ? { id: 'add-transaction', label: 'Add Transaction' }
+      : null;
+
+  return emptyState(
+    hasActiveFilters ? '🔍' : '📝',
+    title,
+    body,
+    action
+  );
 }
 
 /**

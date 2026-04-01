@@ -76,6 +76,41 @@ describe('architecture contract', () => {
     ]);
   });
 
+  it('limits components-to-features/orchestration bridges to the documented exceptions', () => {
+    const componentBridgeImportPattern = /from\s+['"]\.\.\/(?:features|orchestration)\//;
+    const bridgeImporters = getTypeScriptFiles(join(MODULE_ROOT, 'components'))
+      .filter((filePath) => componentBridgeImportPattern.test(readFileSync(filePath, 'utf8')))
+      .map(toRepoPath)
+      .sort();
+
+    expect(bridgeImporters).toEqual([
+      'js/modules/components/daily-allowance.ts',
+      'js/modules/components/debt-list.ts',
+      'js/modules/components/debt-summary.ts',
+      'js/modules/components/envelope-budget.ts',
+      'js/modules/components/insights.ts',
+      'js/modules/components/savings-goals.ts',
+      'js/modules/components/summary-cards.ts',
+      'js/modules/components/weekly-rollup.ts'
+    ]);
+  });
+
+  it('limits components-to-ui bridges to the documented exceptions', () => {
+    const componentUiBridgeImportPattern = /from\s+['"]\.\.\/ui\//;
+    const bridgeImporters = getTypeScriptFiles(join(MODULE_ROOT, 'components'))
+      .filter((filePath) => componentUiBridgeImportPattern.test(readFileSync(filePath, 'utf8')))
+      .map(toRepoPath)
+      .sort();
+
+    expect(bridgeImporters).toEqual([
+      'js/modules/components/calendar.ts',
+      'js/modules/components/charts.ts',
+      'js/modules/components/daily-allowance.ts',
+      'js/modules/components/insights.ts',
+      'js/modules/components/savings-goals.ts'
+    ]);
+  });
+
   it('keeps relative imports on the .js extension convention', () => {
     const offendingFiles = getTypeScriptFiles(MODULE_ROOT).filter((filePath) => {
       const source = readFileSync(filePath, 'utf8');

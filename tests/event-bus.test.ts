@@ -73,4 +73,34 @@ describe('event bus lifecycle cleanup', () => {
 
     expect(checkOrphanedListeners().some((entry) => entry.event === FeatureEvents.SET_THEME)).toBe(false);
   });
+
+  it('removes the system theme listener from the same media query instance', () => {
+    signals.theme.value = 'system';
+
+    const queries: Array<{
+      addEventListener: ReturnType<typeof vi.fn>;
+      removeEventListener: ReturnType<typeof vi.fn>;
+      matches: boolean;
+    }> = [];
+
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation(() => {
+        const query = {
+          matches: false,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn()
+        };
+        queries.push(query);
+        return query;
+      })
+    });
+
+    const cleanup = initTheme();
+    cleanup();
+
+    expect(queries[0]?.addEventListener).toHaveBeenCalledTimes(1);
+    expect(queries[0]?.removeEventListener).toHaveBeenCalledTimes(1);
+    expect(queries[1]?.removeEventListener).toBeUndefined();
+  });
 });

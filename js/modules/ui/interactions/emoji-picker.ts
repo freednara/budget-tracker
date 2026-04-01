@@ -41,6 +41,7 @@ let preview: HTMLElement | null = null;
 let hiddenInput: HTMLInputElement | null = null;
 let tabsContainer: HTMLElement | null = null;
 let grid: HTMLElement | null = null;
+const EMOJI_GRID_COLUMNS = 8;
 
 function refreshRefs(): void {
   trigger = document.getElementById('emoji-picker-trigger');
@@ -59,22 +60,73 @@ function renderTabs(): void {
   refreshRefs();
   if (!tabsContainer) return;
   const categories = Object.keys(EMOJI_PICKER_CATEGORIES);
-  tabsContainer.innerHTML = categories.map(cat => {
+  tabsContainer.replaceChildren(...categories.map((cat) => {
     const firstEmoji = EMOJI_PICKER_CATEGORIES[cat][0];
     const label = cat.charAt(0).toUpperCase() + cat.slice(1);
-    return `<button type="button" class="emoji-tab ${cat === currentCategory ? 'active' : ''}" data-category="${cat}">
-      ${firstEmoji} ${label}
-    </button>`;
-  }).join('');
+    const isActive = cat === currentCategory;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `emoji-tab${isActive ? ' active' : ''}`;
+    button.dataset.category = cat;
+    button.setAttribute('role', 'tab');
+    button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    button.setAttribute('tabindex', isActive ? '0' : '-1');
+    button.setAttribute('aria-label', `${label} emojis`);
+    button.textContent = `${firstEmoji} ${label}`;
+    return button;
+  }));
 }
 
 function renderGrid(): void {
   refreshRefs();
   if (!grid) return;
   const emojis = EMOJI_PICKER_CATEGORIES[currentCategory] || [];
-  grid.innerHTML = emojis.map(emoji =>
-    `<button type="button" class="emoji-cell ${emoji === selectedEmoji ? 'selected' : ''}" data-emoji="${emoji}">${emoji}</button>`
-  ).join('');
+  grid.replaceChildren(...emojis.map((emoji) => {
+    const isSelected = emoji === selectedEmoji;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `emoji-cell${isSelected ? ' selected' : ''}`;
+    button.dataset.emoji = emoji;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+    button.setAttribute('tabindex', isSelected ? '0' : '-1');
+    button.setAttribute('aria-label', `Choose ${emoji}`);
+    button.textContent = emoji;
+    return button;
+  }));
+}
+
+function getTabButtons(): HTMLButtonElement[] {
+  return tabsContainer ? Array.from(tabsContainer.querySelectorAll<HTMLButtonElement>('.emoji-tab')) : [];
+}
+
+function getEmojiButtons(): HTMLButtonElement[] {
+  return grid ? Array.from(grid.querySelectorAll<HTMLButtonElement>('.emoji-cell')) : [];
+}
+
+function focusCurrentTab(): void {
+  getTabButtons().find((button) => button.dataset.category === currentCategory)?.focus();
+}
+
+function focusSelectedEmoji(): void {
+  const buttons = getEmojiButtons();
+  const selected = buttons.find((button) => button.dataset.emoji === selectedEmoji);
+  (selected || buttons[0])?.focus();
+}
+
+function setCurrentCategory(nextCategory: string): void {
+  currentCategory = nextCategory;
+  renderTabs();
+  renderGrid();
+}
+
+function moveEmojiFocus(currentButton: HTMLButtonElement, offset: number): void {
+  const buttons = getEmojiButtons();
+  const currentIndex = buttons.indexOf(currentButton);
+  if (currentIndex === -1) return;
+
+  const nextIndex = Math.min(Math.max(currentIndex + offset, 0), buttons.length - 1);
+  buttons[nextIndex]?.focus();
 }
 
 // ==========================================
@@ -97,9 +149,8 @@ function handleTabClick(e: MouseEvent): void {
   const target = e.target as HTMLElement;
   const tab = target.closest('.emoji-tab') as HTMLElement | null;
   if (!tab) return;
-  currentCategory = tab.dataset.category || 'money';
-  renderTabs();
-  renderGrid();
+  setCurrentCategory(tab.dataset.category || 'money');
+  focusCurrentTab();
 }
 
 function handleEmojiSelect(e: MouseEvent): void {
@@ -112,6 +163,7 @@ function handleEmojiSelect(e: MouseEvent): void {
   if (hiddenInput) hiddenInput.value = selectedEmoji;
   closeDropdown();
   renderGrid();
+  trigger?.focus();
 }
 
 function handleOutsideClick(e: MouseEvent): void {
@@ -124,9 +176,75 @@ function handleOutsideClick(e: MouseEvent): void {
 
 function handleKeydown(e: KeyboardEvent): void {
   refreshRefs();
-  if (e.key === 'Escape' && dropdown && !dropdown.classList.contains('hidden')) {
+  const target = e.target as HTMLElement | null;
+  if (!dropdown || dropdown.classList.contains('hidden')) return;
+
+  if (e.key === 'Escape') {
+    e.preventDefault();
     closeDropdown();
     trigger?.focus();
+    return;
+  }
+
+  if (target?.classList.contains('emoji-tab')) {
+    const tabs = getTabButtons();
+    const currentIndex = tabs.findIndex((button) => button === target);
+    if (currentIndex === -1) return;
+
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      const nextIndex =
+        e.key === 'Home' ? 0 :
+        e.key === 'End' ? tabs.length - 1 :
+        (currentIndex + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+      setCurrentCategory(tabs[nextIndex]?.dataset.category || 'money');
+      focusCurrentTab();
+      return;
+    }
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      focusSelectedEmoji();
+      return;
+    }
+  }
+
+  if (target?.classList.contains('emoji-cell')) {
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      moveEmojiFocus(target as HTMLButtonElement, 1);
+      return;
+    }
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      moveEmojiFocus(target as HTMLButtonElement, -1);
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      moveEmojiFocus(target as HTMLButtonElement, EMOJI_GRID_COLUMNS);
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      moveEmojiFocus(target as HTMLButtonElement, -EMOJI_GRID_COLUMNS);
+      return;
+    }
+    if (e.key === 'Home') {
+      e.preventDefault();
+      getEmojiButtons()[0]?.focus();
+      return;
+    }
+    if (e.key === 'End') {
+      e.preventDefault();
+      const buttons = getEmojiButtons();
+      buttons[buttons.length - 1]?.focus();
+      return;
+    }
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      target.click();
+    }
   }
 }
 
@@ -144,6 +262,7 @@ function openDropdown(): void {
   if (trigger) trigger.setAttribute('aria-expanded', 'true');
   renderTabs();
   renderGrid();
+  focusSelectedEmoji();
 }
 
 // ==========================================
@@ -211,10 +330,15 @@ export function init(): void {
   refreshRefs();
 
   // Set ARIA attributes
-  trigger?.setAttribute('aria-haspopup', 'listbox');
+  trigger?.setAttribute('aria-haspopup', 'dialog');
   trigger?.setAttribute('aria-expanded', 'false');
-  dropdown?.setAttribute('role', 'listbox');
+  trigger?.setAttribute('aria-controls', 'emoji-picker-dropdown');
+  dropdown?.setAttribute('role', 'dialog');
   dropdown?.setAttribute('aria-label', 'Emoji picker');
+  tabsContainer?.setAttribute('role', 'tablist');
+  tabsContainer?.setAttribute('aria-label', 'Emoji categories');
+  grid?.setAttribute('role', 'listbox');
+  grid?.setAttribute('aria-label', 'Available emojis');
 
   document.addEventListener('click', handleDocumentClick);
   document.addEventListener('keydown', handleKeydown);

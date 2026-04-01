@@ -400,29 +400,11 @@ export function initLazyLoading(): void {
       priority: 'high'
     },
     {
-      name: 'alert-banner',
-      selector: '#alert-banner',
-      loader: async () => {
-        const module = await import('../features/personalization/alerts.js');
-        return { mount: () => module.mountAlertBanner() };
-      },
-      priority: 'high'
-    },
-    {
       name: 'onboarding-ui',
       selector: '#onboarding-overlay',
       loader: async () => {
         const module = await import('../features/personalization/onboarding.js');
         return { mount: () => module.mountOnboarding() };
-      },
-      priority: 'high'
-    },
-    {
-      name: 'split-modal',
-      selector: '#split-modal',
-      loader: async () => {
-        const module = await import('../features/financial/split-transactions.js');
-        return { mount: () => module.mountSplitModal() };
       },
       priority: 'high'
     },

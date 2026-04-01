@@ -15,7 +15,7 @@ import {
   openResetAppDataModal,
   openSettingsModal,
   resetAppDataFromModal,
-  waitForAppReady,
+  waitForInteractiveAppReady,
   waitForTransactionsSurfaceReady
 } from './test-helpers.js';
 
@@ -264,7 +264,7 @@ test.describe('Advanced Resilience', () => {
     await assertDashboardTotal(page, '#total-expenses', '123.45', 5000);
 
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await waitForAppReady(page);
+    await waitForInteractiveAppReady(page);
     await assertDashboardPopulated(page, 15000);
     await assertLedgerHasRows(page, 1, 15000);
     await assertTransactionVisible(page, 'Important Backup Data', 10000);
@@ -272,7 +272,7 @@ test.describe('Advanced Resilience', () => {
   });
 
   test('clear app data offers both backup paths and preserves stored backups by default', async ({ page }) => {
-    await waitForAppReady(page);
+    await waitForInteractiveAppReady(page);
     await seedStoredBackupPayloads(page);
 
     await openResetAppDataModal(page);
@@ -289,7 +289,7 @@ test.describe('Advanced Resilience', () => {
   });
 
   test('clear app data and backups removes stored backups from all backup stores', async ({ page }) => {
-    await waitForAppReady(page);
+    await waitForInteractiveAppReady(page);
     await seedStoredBackupPayloads(page);
 
     await resetAppDataFromModal(page, { clearBackups: true });

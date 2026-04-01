@@ -13,7 +13,7 @@ import { syncState } from '../../core/state-actions.js';
 import { setTheme } from '../../core/feature-event-interface.js';
 import { shouldShowPinLock, showPinLock } from '../widgets/pin-ui-handlers.js';
 import { DOM } from '../../core/dom-cache.js';
-import type { Theme, CustomCategory, CurrencySettings, RolloverSettings, AlertPrefs, StreakData, SavingsGoal, SavingsContribution, FilterPreset, TxTemplate } from '../../../types/index.js';
+import type { Theme, CustomCategory, CurrencySettings, RolloverSettings, AlertPrefs, StreakData, SavingsGoal, SavingsContribution, FilterPreset, TxTemplate, InsightPersonality } from '../../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
@@ -41,6 +41,21 @@ let callbacks: StorageEventCallbacks | null = null;
 
 // Store previous handler for cleanup on re-init
 let _storageHandler: ((e: StorageEvent) => void) | null = null;
+
+const SUPPORTED_INSIGHT_PERSONALITIES = new Set<InsightPersonality>([
+  'serious',
+  'friendly',
+  'roast',
+  'casual',
+  'motivating'
+]);
+
+function normalizeInsightPersonality(value: unknown): InsightPersonality {
+  if (typeof value === 'string' && SUPPORTED_INSIGHT_PERSONALITIES.has(value as InsightPersonality)) {
+    return value as InsightPersonality;
+  }
+  return 'serious';
+}
 
 export function cleanupStorageEvents(): void {
   if (_storageHandler) {
@@ -138,7 +153,7 @@ export function initStorageEvents(cb: StorageEventCallbacks): void {
         break;
 
       case SK.INSIGHT_PERS:
-        syncState.applyKeyUpdate(SK.INSIGHT_PERS, lsGet(SK.INSIGHT_PERS, 'serious') as 'serious' | 'casual' | 'motivating');
+        syncState.applyKeyUpdate(SK.INSIGHT_PERS, normalizeInsightPersonality(lsGet(SK.INSIGHT_PERS, 'serious')));
         cb.updateInsights();
         break;
 

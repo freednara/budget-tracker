@@ -115,10 +115,17 @@ function setBackgroundReadyState(isReady: boolean): void {
   document.documentElement.dataset.appBackgroundReady = isReady ? 'true' : 'false';
 }
 
+function setBackgroundFailedState(isFailed: boolean): void {
+  (window as any).__APP_BACKGROUND_FAILED__ = isFailed;
+  document.documentElement.dataset.appBackgroundFailed = isFailed ? 'true' : 'false';
+}
+
 function recordDeferredStartupFailure(errorLabel: string, error: unknown): void {
   if (import.meta.env.DEV) console.error(errorLabel, error);
   const normalizedError = error instanceof Error ? error : new Error(String(error));
   initStatus.errors.push(normalizedError);
+  setBackgroundFailedState(true);
+  setStartupProgress('initialize:background-failed');
   const deferredErrors = Array.isArray((window as any).__APP_DEFERRED_ERRORS__)
     ? (window as any).__APP_DEFERRED_ERRORS__
     : [];
@@ -133,13 +140,43 @@ function recordDeferredStartupFailure(errorLabel: string, error: unknown): void 
 function createBackgroundTaskTracker(totalTasks: number): (step: string) => void {
   let remainingTasks = totalTasks;
   return (step: string) => {
+    if ((window as any).__APP_BACKGROUND_FAILED__ === true) {
+      return;
+    }
     setStartupProgress(step);
     remainingTasks--;
     if (remainingTasks <= 0) {
+      setBackgroundFailedState(false);
       setBackgroundReadyState(true);
       setStartupProgress('initialize:background-ready');
     }
   };
+}
+
+function scheduleTrackedDeferredInteractiveWork(
+  task: (isCancelled: () => boolean) => Promise<void>,
+  errorLabel: string,
+  completionStep: string,
+  completeBackgroundTask: (step: string) => void
+): void {
+  let completed = false;
+  const completeOnce = (): void => {
+    if (completed) return;
+    completed = true;
+    completeBackgroundTask(completionStep);
+  };
+
+  scheduleDeferredInteractiveWork(async (isCancelled) => {
+    let succeeded = false;
+    try {
+      await task(isCancelled);
+      succeeded = !isCancelled();
+    } finally {
+      if (succeeded) {
+        completeOnce();
+      }
+    }
+  }, errorLabel);
 }
 
 // ==========================================
@@ -147,7 +184,8 @@ function createBackgroundTaskTracker(totalTasks: number): (step: string) => void
 // ==========================================
 
 /**
- * Initialize the application using dependency injection
+ * Initialize the application using dependency injection.
+ * Completes blocking startup and schedules deferred background work separately.
  */
 export async function initializeApp(): Promise<InitializationStatus> {
   try {
@@ -155,6 +193,7 @@ export async function initializeApp(): Promise<InitializationStatus> {
     setShellReadyState(false);
     setInteractiveReadyState(false);
     setBackgroundReadyState(false);
+    setBackgroundFailedState(false);
     setStartupProgress('initialize:start');
     (window as any).__APP_DEFERRED_ERRORS__ = [];
 
@@ -223,7 +262,7 @@ export async function initializeApp(): Promise<InitializationStatus> {
 
     const completeBackgroundTask = createBackgroundTaskTracker(4);
 
-    scheduleDeferredInteractiveWork(async (isCancelled) => {
+    scheduleTrackedDeferredInteractiveWork(async (isCancelled) => {
       const { initOnboarding } = await import('../features/personalization/onboarding.js');
       if (isCancelled()) return;
       initOnboarding();
@@ -242,10 +281,9 @@ export async function initializeApp(): Promise<InitializationStatus> {
       if (!hasCompletedOnboarding && !hasTransactions) {
         startOnboarding();
       }
-      completeBackgroundTask('deferred:onboarding-alerts-ready');
-    }, 'Deferred onboarding/alerts init failed');
+    }, 'Deferred onboarding/alerts init failed', 'deferred:onboarding-alerts-ready', completeBackgroundTask);
 
-    scheduleDeferredInteractiveWork(async (isCancelled) => {
+    scheduleTrackedDeferredInteractiveWork(async (isCancelled) => {
       if (await migrationManager.needsMigration()) {
         if (isCancelled()) return;
         setStartupProgress('initialize:migration-start');
@@ -264,8 +302,7 @@ export async function initializeApp(): Promise<InitializationStatus> {
           showToast('Database upgrade deferred', 'warning');
         }
       }
-      completeBackgroundTask('initialize:migration-ready');
-    }, 'Deferred migration init failed');
+    }, 'Deferred migration init failed', 'initialize:migration-ready', completeBackgroundTask);
 
     scheduleBackgroundInitialization(hasTransactions, savedTab, completeBackgroundTask);
 
@@ -278,6 +315,7 @@ export async function initializeApp(): Promise<InitializationStatus> {
     setShellReadyState(false);
     setInteractiveReadyState(false);
     setBackgroundReadyState(false);
+    setBackgroundFailedState(false);
     
     // Show error to user
     showToast('Failed to initialize application', 'error');
@@ -349,9 +387,12 @@ async function postOnboardingInit(savedTab: string, hasTransactions: boolean): P
   setStartupProgress('post:init-start');
   await getDefaultContainer().resolve(Services.SWIPE_MANAGER);
   const { refreshTransactionsSurface, initTransactionSurfaceCoordinator } = await import('../data/transaction-surface-coordinator.js');
-  const { switchMainTab, switchTab, setRenderCategoriesFn, setRenderQuickShortcutsFn } = await import('../ui/core/ui-navigation.js');
+  const { openTransactionsForDate, switchMainTab, switchTab, setRenderCategoriesFn, setRenderQuickShortcutsFn } = await import('../ui/core/ui-navigation.js');
   const { mountEditUI } = await import('../transactions/edit-mode.js');
-  const { render, html } = await import('../core/lit-helpers.js');
+  const { openModal } = await import('../ui/core/ui.js');
+  const emptyStateModule = await import('../ui/core/empty-state.js');
+  const { mountInlineAlerts } = await import('../ui/widgets/inline-alerts.js');
+  const splitTransactions = await import('../features/financial/split-transactions.js');
   setStartupProgress('post:core-imports-ready');
   const { renderMonthNav, renderCategories, renderQuickShortcuts, populateCategoryFilter } = await import('../ui/core/ui-render.js');
 
@@ -411,6 +452,18 @@ async function postOnboardingInit(savedTab: string, hasTransactions: boolean): P
   setStartupProgress('post:keyboard-ready');
   registerCleanup(initTransactionSurfaceCoordinator());
 
+  emptyStateModule.init();
+  registerCleanup(emptyStateModule.destroy);
+  emptyStateModule.setSwitchMainTabFn(switchMainTab as (tabName: string) => void);
+  emptyStateModule.setOpenModalFn((modalId: string) => openModal(modalId));
+  emptyStateModule.setLoadSampleDataFn(async () => {
+    await loadSampleData();
+  });
+  emptyStateModule.setOpenTransactionsForDateFn((date: string) => {
+    void openTransactionsForDate(date);
+  });
+  setStartupProgress('post:empty-state-ready');
+
   // Initialize form UI (always needed for new transactions)
   renderMonthNav();
   setRenderCategoriesFn(() => renderCategories());
@@ -419,6 +472,9 @@ async function postOnboardingInit(savedTab: string, hasTransactions: boolean): P
   setRenderQuickShortcutsFn(() => renderQuickShortcuts());
   renderQuickShortcuts();
   registerCleanup(mountEditUI());
+  registerCleanup(mountInlineAlerts());
+  splitTransactions.setSplitFmtCur((v: number) => signals.currency.value.symbol + v.toFixed(2));
+  registerCleanup(splitTransactions.mountSplitModal());
   void import('../ui/widgets/filters.js').then(({ renderFilterPresets }) => {
     renderFilterPresets();
   });
@@ -428,21 +484,8 @@ async function postOnboardingInit(savedTab: string, hasTransactions: boolean): P
   const initialTab = (validTabs.includes(savedTab) ? savedTab : 'dashboard') as any;
   switchMainTab(initialTab);
 
-  if (hasTransactions) {
-    await refreshTransactionsSurface();
-    setStartupProgress('post:transactions-rendered');
-  } else {
-    const emptyContainer = DOM.get('transactions-list');
-    if (emptyContainer) {
-      render(html`
-        <div class="p-6 text-center">
-          <p class="text-sm font-bold" style="color: var(--text-primary);">Welcome to Harbor Ledger</p>
-          <p class="text-xs mt-2" style="color: var(--text-tertiary);">Start by adding your first transaction.</p>
-        </div>
-      `, emptyContainer);
-    }
-    setStartupProgress('post:empty-state-rendered');
-  }
+  await refreshTransactionsSurface();
+  setStartupProgress(hasTransactions ? 'post:transactions-rendered' : 'post:empty-state-rendered');
 
   registerCleanup(await setupWorkerDeltaSync());
   const { syncWorkerDataset, shouldUseWorker, isWorkerReady } = await import('./worker-manager.js');
@@ -462,7 +505,7 @@ function scheduleBackgroundInitialization(
   savedTab: string,
   completeBackgroundTask: (step: string) => void
 ): void {
-  scheduleDeferredInteractiveWork(async (isCancelled) => {
+  scheduleTrackedDeferredInteractiveWork(async (isCancelled) => {
     const { switchMainTab, switchTab } = await import('../ui/core/ui-navigation.js');
     const { renderMonthNav, renderCategories, renderQuickShortcuts, populateCategoryFilter, updateCharts } = await import('../ui/core/ui-render.js');
     const { refreshTransactionsSurface } = await import('../data/transaction-surface-coordinator.js');
@@ -471,18 +514,6 @@ function scheduleBackgroundInitialization(
     initLazyLoading();
     registerCleanup(cleanupLazyLoading);
     setStartupProgress('post:lazy-loader-ready');
-
-    const { openModal } = await import('../ui/core/ui.js');
-    const emptyStateModule = await import('../ui/core/empty-state.js');
-    if (isCancelled()) return;
-    emptyStateModule.init();
-    registerCleanup(emptyStateModule.destroy);
-    emptyStateModule.setSwitchMainTabFn(switchMainTab as (tabName: string) => void);
-    emptyStateModule.setOpenModalFn((modalId: string) => openModal(modalId));
-    emptyStateModule.setLoadSampleDataFn(async () => {
-      await loadSampleData();
-    });
-    setStartupProgress('post:empty-state-ready');
 
     const cleanupDashboard = initDashboard();
     if (isCancelled()) {
@@ -534,6 +565,7 @@ function scheduleBackgroundInitialization(
 
     const {
       initTemplateManager,
+      cleanupTemplateManager,
       setTemplateFmtCurFn,
       setTemplateRenderCategoriesFn,
       setTemplateSwitchTabFn,
@@ -545,6 +577,7 @@ function scheduleBackgroundInitialization(
     setTemplateRenderCategoriesFn(() => renderCategories());
     setTemplateSwitchTabFn((type: 'expense' | 'income') => switchTab(type));
     renderTemplates();
+    registerCleanup(cleanupTemplateManager);
     setStartupProgress('post:templates-ready');
 
     const { processRecurringTemplates } = await import('../data/recurring-templates.js');
@@ -562,10 +595,9 @@ function scheduleBackgroundInitialization(
     renderMonthComparison();
 
     setupPerformanceMonitoring();
-    completeBackgroundTask('post:performance-ready');
-  }, 'Deferred analytics/template init failed');
+  }, 'Deferred analytics/template init failed', 'post:performance-ready', completeBackgroundTask);
 
-  scheduleDeferredInteractiveWork(async (isCancelled) => {
+  scheduleTrackedDeferredInteractiveWork(async (isCancelled) => {
     const [
       storageEv,
       debtUiHandlers,
@@ -602,7 +634,6 @@ function scheduleBackgroundInitialization(
     registerCleanup(await setupRemoteTransactionFollowUps());
 
     splitTransactions.setSplitFmtCur((v: number) => signals.currency.value.symbol + v.toFixed(2));
-    registerCleanup(splitTransactions.mountSplitModal());
 
     debtUiHandlers.initDebtHandlers();
     registerCleanup(debtUiHandlers.cleanupDebtHandlers);
@@ -656,8 +687,7 @@ function scheduleBackgroundInitialization(
     if (isCancelled()) return;
     emojiPicker.init();
     registerCleanup(emojiPicker.destroy);
-    completeBackgroundTask('post:deferred-ready');
-  }, 'Deferred post-init setup failed');
+  }, 'Deferred post-init setup failed', 'post:deferred-ready', completeBackgroundTask);
 }
 
 async function setupWorkerDeltaSync(): Promise<() => void> {
@@ -891,6 +921,7 @@ export function cleanupApp(): void {
   setShellReadyState(false);
   setInteractiveReadyState(false);
   setBackgroundReadyState(false);
+  setBackgroundFailedState(false);
 }
 
 // ==========================================

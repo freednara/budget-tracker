@@ -20,6 +20,19 @@ import type { Theme, ActualTheme } from '../../../types/index.js';
 
 // Track system theme listener for cleanup
 let systemThemeListener: ((e: MediaQueryListEvent) => void) | null = null;
+let systemThemeMediaQuery: MediaQueryList | null = null;
+
+function getSystemThemeMediaQuery(): MediaQueryList | null {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return null;
+  }
+
+  if (!systemThemeMediaQuery) {
+    systemThemeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+  }
+
+  return systemThemeMediaQuery;
+}
 
 // ==========================================
 // THEME FUNCTIONS
@@ -29,7 +42,7 @@ let systemThemeListener: ((e: MediaQueryListEvent) => void) | null = null;
  * Get the current system theme preference
  */
 export function getSystemTheme(): ActualTheme {
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  return getSystemThemeMediaQuery()?.matches ? 'dark' : 'light';
 }
 
 /**
@@ -57,10 +70,11 @@ export function initTheme(): () => void {
   // Create a reactive effect that applies the theme whenever the signal changes
   const cleanup = effect(() => {
     const theme = signals.theme.value;
+    const mediaQuery = getSystemThemeMediaQuery();
 
     // 1. Manage system theme listener
-    if (systemThemeListener) {
-      window.matchMedia('(prefers-color-scheme: dark)').removeEventListener('change', systemThemeListener);
+    if (systemThemeListener && mediaQuery) {
+      mediaQuery.removeEventListener('change', systemThemeListener);
       systemThemeListener = null;
     }
 
@@ -74,7 +88,7 @@ export function initTheme(): () => void {
         }
       };
       
-      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', systemThemeListener);
+      mediaQuery?.addEventListener('change', systemThemeListener);
     } else {
       applyTheme(theme as ActualTheme);
     }
@@ -96,10 +110,11 @@ export function initTheme(): () => void {
   return () => {
     cleanup();
     unsubscribeThemeEvent();
-    if (systemThemeListener) {
-      window.matchMedia('(prefers-color-scheme: dark)').removeEventListener('change', systemThemeListener);
+    if (systemThemeListener && systemThemeMediaQuery) {
+      systemThemeMediaQuery.removeEventListener('change', systemThemeListener);
       systemThemeListener = null;
     }
+    systemThemeMediaQuery = null;
   };
 }
 

@@ -5,6 +5,7 @@ interface AppStatusSnapshot {
   shellReady: string | null;
   interactiveReady: string | null;
   backgroundReady: string | null;
+  backgroundFailed: string | null;
   error: string | null;
   monthLabel: string;
   transactionsTabSelected: string | null;
@@ -81,11 +82,12 @@ async function getAppStatus(page: Page): Promise<AppStatusSnapshot> {
   const monthLabelLocator = page.locator('#current-month-label');
   const transactionsTabButton = page.locator('#tab-transactions-btn');
 
-  const [initialized, shellReady, interactiveReady, backgroundReady, error, monthLabel, transactionsTabSelected] = await Promise.all([
+  const [initialized, shellReady, interactiveReady, backgroundReady, backgroundFailed, error, monthLabel, transactionsTabSelected] = await Promise.all([
     root.getAttribute('data-app-initialized'),
     root.getAttribute('data-app-shell-ready'),
     root.getAttribute('data-app-interactive-ready'),
     root.getAttribute('data-app-background-ready'),
+    root.getAttribute('data-app-background-failed'),
     root.getAttribute('data-app-error'),
     monthLabelLocator.textContent(),
     transactionsTabButton.getAttribute('aria-selected'),
@@ -96,6 +98,7 @@ async function getAppStatus(page: Page): Promise<AppStatusSnapshot> {
     shellReady,
     interactiveReady,
     backgroundReady,
+    backgroundFailed,
     error,
     monthLabel: monthLabel?.trim() || '',
     transactionsTabSelected,
@@ -123,7 +126,7 @@ function formatDiagnostics(page: Page, appStatus: AppStatusSnapshot | null): str
   return sections.join('\n');
 }
 
-async function resetBrowserState(page: Page, skipOnboarding: boolean): Promise<void> {
+export async function resetAppState(page: Page, skipOnboarding: boolean): Promise<void> {
   installPageDiagnostics(page);
 
   await page.goto(`/e2e-reset.html?skipOnboarding=${skipOnboarding ? '1' : '0'}`, {
@@ -159,10 +162,17 @@ async function openFreshApp(page: Page): Promise<void> {
   });
 }
 
+export async function installPlaywrightBootstrap(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    (window as any).__PW_TEST__ = true;
+  });
+}
+
 async function getRuntimeFlags(page: Page): Promise<{
   shellReady: boolean;
   interactiveReady: boolean;
   backgroundReady: boolean;
+  backgroundFailed: boolean;
   initialized: boolean;
   startupProgress: string | null;
 }> {
@@ -170,6 +180,7 @@ async function getRuntimeFlags(page: Page): Promise<{
     shellReady: (window as any).__APP_SHELL_READY__ === true,
     interactiveReady: (window as any).__APP_INTERACTIVE_READY__ === true,
     backgroundReady: (window as any).__APP_BACKGROUND_READY__ === true,
+    backgroundFailed: (window as any).__APP_BACKGROUND_FAILED__ === true,
     initialized: (window as any).__APP_INITIALIZED__ === true,
     startupProgress: (window as any).__APP_STARTUP_PROGRESS__ || null,
   }));
@@ -179,33 +190,40 @@ export async function waitForAppPhase(page: Page, phase: AppReadyPhase, timeout 
   installPageDiagnostics(page);
 
   try {
-    await expect
-      .poll(
-        async () => {
-          const status = await getAppStatus(page);
-          const runtime = await getRuntimeFlags(page);
+    const start = Date.now();
+    let delayMs = 100;
+    let lastState = `waiting:${phase}`;
 
-          if (status.error === 'true') {
-            return `error:${runtime.startupProgress || 'unknown'}`;
-          }
+    while (Date.now() - start < timeout) {
+      const status = await getAppStatus(page);
+      const runtime = await getRuntimeFlags(page);
 
-          if (phase === 'shell') {
-            return runtime.shellReady && status.initialized === 'true' ? 'ready' : `waiting:${runtime.startupProgress || 'unknown'}`;
-          }
+      if (status.error === 'true') {
+        throw new Error(`App entered startup error state: ${runtime.startupProgress || 'unknown'}`);
+      }
 
-          if (phase === 'interactive') {
-            return runtime.interactiveReady ? 'ready' : `waiting:${runtime.startupProgress || 'unknown'}`;
-          }
+      if (phase === 'background' && runtime.backgroundFailed) {
+        throw new Error(`App entered terminal background failure state: ${runtime.startupProgress || 'unknown'}`);
+      }
 
-          return runtime.backgroundReady ? 'ready' : `waiting:${runtime.startupProgress || 'unknown'}`;
-        },
-        {
-          timeout,
-          intervals: [100, 250, 500, 1000],
-          message: `App did not reach ${phase} readiness`,
-        }
-      )
-      .toBe('ready');
+      if (phase === 'shell' && runtime.shellReady) {
+        return;
+      }
+
+      if (phase === 'interactive' && runtime.interactiveReady) {
+        return;
+      }
+
+      if (phase === 'background' && runtime.backgroundReady) {
+        return;
+      }
+
+      lastState = `waiting:${runtime.startupProgress || 'unknown'}`;
+      await page.waitForTimeout(delayMs);
+      delayMs = Math.min(delayMs < 250 ? 250 : delayMs * 2, 1000);
+    }
+
+    throw new Error(`App did not reach ${phase} readiness: ${lastState}`);
   } catch (error) {
     const appStatus = await safeGetAppStatus(page);
     throw new Error(
@@ -219,29 +237,38 @@ export async function waitForAppPhase(page: Page, phase: AppReadyPhase, timeout 
 
 /**
  * Clean all app state before a test.
- * Navigates to the app, clears state, then reloads for a clean start.
+ * Resets browser/app state, installs the Playwright bootstrap, then boots once.
  */
 export async function cleanAppState(page: Page): Promise<void> {
   installPageDiagnostics(page);
-  await resetBrowserState(page, true);
-
-  await page.addInitScript(() => {
-    (window as any).__PW_TEST__ = true;
-  });
-
-  await openFreshApp(page);
-  await waitForAppReady(page);
+  await resetAppState(page, true);
+  await installPlaywrightBootstrap(page);
+  await bootFreshApp(page, 'interactive');
 }
 
 /**
- * Wait for the app to fully initialize.
+ * Wait for the app to become interactive.
  */
-export async function waitForAppReady(page: Page, timeout = 50000): Promise<void> {
+export async function waitForInteractiveAppReady(page: Page, timeout = 50000): Promise<void> {
   installPageDiagnostics(page);
   await waitForAppPhase(page, 'interactive', timeout);
   await expect(page.locator('#tab-transactions-btn')).toBeVisible({ timeout: 10000 });
   await expect(page.locator('#prev-month')).toBeVisible({ timeout: 10000 });
   await expect(page.locator('#current-month-label')).not.toHaveText('', { timeout: 10000 });
+}
+
+export async function bootFreshApp(
+  page: Page,
+  phase: AppReadyPhase = 'interactive',
+  timeout = 50000
+): Promise<void> {
+  installPageDiagnostics(page);
+  await openFreshApp(page);
+  if (phase === 'interactive') {
+    await waitForInteractiveAppReady(page, timeout);
+    return;
+  }
+  await waitForAppPhase(page, phase, timeout);
 }
 
 async function switchMainTabForTest(page: Page, tab: 'dashboard' | 'transactions' | 'budget' | 'calendar'): Promise<void> {
@@ -299,11 +326,11 @@ export async function bootSecondaryPage(
   );
 
   await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await waitForAppReady(page, timeout);
+  await waitForInteractiveAppReady(page, timeout);
 }
 
 export async function openSettingsModal(page: Page, timeout = 15000): Promise<void> {
-  await waitForAppReady(page, timeout);
+  await waitForInteractiveAppReady(page, timeout);
   await page.locator('#open-settings').click();
   await expect(page.locator('#settings-modal')).toBeVisible({ timeout });
   await expect(page.locator('#close-settings')).toBeVisible({ timeout });
@@ -429,12 +456,7 @@ export async function loadSampleDataFromSettings(page: Page, timeout = 20000): P
  */
 export async function cleanAppStateRaw(page: Page): Promise<void> {
   installPageDiagnostics(page);
-  await resetBrowserState(page, false);
-
-  await page.addInitScript(() => {
-    (window as any).__PW_TEST__ = true;
-  });
-
-  await openFreshApp(page);
-  await waitForAppReady(page);
+  await resetAppState(page, false);
+  await installPlaywrightBootstrap(page);
+  await bootFreshApp(page, 'interactive');
 }

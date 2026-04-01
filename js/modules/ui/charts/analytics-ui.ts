@@ -7,11 +7,12 @@
 'use strict';
 
 import * as signals from '../../core/signals.js';
-import { getPrevMonthKey, esc } from '../../core/utils.js';
+import { getPrevMonthKey } from '../../core/utils.js';
 import { getMonthTx, calcTotals, getEffectiveIncome, getMonthExpByCat } from '../../features/financial/calculations.js';
 import { getAllCats } from '../../core/categories.js';
 import { fmtShort } from './chart-renderers.js';
 import DOM from '../../core/dom-cache.js';
+import { html, nothing, render, repeat, type TemplateResult } from '../../core/lit-helpers.js';
 
 // ==========================================
 // TYPES
@@ -64,7 +65,7 @@ export function renderMonthComparison(): void {
   if (compBadge) {
     const [py, pm] = prevMk.split('-');
     const prevName = new Date(parseInt(py), parseInt(pm) - 1).toLocaleDateString('en-US', { month: 'short' });
-    compBadge.innerHTML = `<span class="time-badge">vs ${prevName}</span>`;
+    render(html`<span class="time-badge">vs ${prevName}</span>`, compBadge);
   }
 
   // Calculate totals for both months
@@ -76,7 +77,7 @@ export function renderMonthComparison(): void {
   const prevSav = prevInc - prevExp;
 
   if (curExp === 0 && prevExp === 0 && curInc === 0 && prevInc === 0) {
-    el.innerHTML = `<div class="p-4 rounded-lg text-center text-xs" style="background: var(--bg-input); color: var(--text-tertiary);">No current or previous month activity to compare yet.</div>`;
+    render(html`<div class="p-4 rounded-lg text-center text-xs" style="background: var(--bg-input); color: var(--text-tertiary);">No current or previous month activity to compare yet.</div>`, el);
     return;
   }
 
@@ -102,12 +103,11 @@ export function renderMonthComparison(): void {
   const maxVal = Math.max(curInc, prevInc, curExp, prevExp, 1);
   const barPct = (v: number): number => Math.round((v / maxVal) * 100);
 
-  // Build HTML
-  let html = buildSummaryCards(curExp, curInc, curSav, expChange, incChange, savChange);
-  html += buildComparisonBars(curInc, prevInc, curExp, prevExp, barPct);
-  html += buildCategoryBreakdown(catChanges);
-
-  el.innerHTML = html;
+  render(html`
+    ${buildSummaryCards(curExp, curInc, curSav, expChange, incChange, savChange)}
+    ${buildComparisonBars(curInc, prevInc, curExp, prevExp, barPct)}
+    ${buildCategoryBreakdown(catChanges)}
+  `, el);
 }
 
 /**
@@ -120,8 +120,8 @@ function buildSummaryCards(
   expChange: number,
   incChange: number,
   savChange: number
-): string {
-  return `<div class="grid grid-cols-3 gap-3 mb-4" role="region" aria-label="Month comparison: current vs previous month">
+): TemplateResult {
+  return html`<div class="grid grid-cols-3 gap-3 mb-4" role="region" aria-label="Month comparison: current vs previous month">
     <div class="p-3 rounded-lg" style="background: var(--bg-input);">
       <p class="text-xs font-bold" style="color: var(--text-secondary);">Expenses</p>
       <p class="text-lg font-black" style="color: var(--color-expense);">${fmtCurFn(curExp)}</p>
@@ -149,8 +149,8 @@ function buildComparisonBars(
   curExp: number,
   prevExp: number,
   barPct: (v: number) => number
-): string {
-  return `<div class="mb-4 p-3 rounded-lg" style="background: var(--bg-input);">
+): TemplateResult {
+  return html`<div class="mb-4 p-3 rounded-lg" style="background: var(--bg-input);">
     <div class="flex items-center gap-2 mb-2">
       <span class="text-xs font-bold w-16" style="color: var(--text-secondary);">Income</span>
       <div class="flex-1 flex gap-1 items-center">
@@ -185,17 +185,17 @@ function buildComparisonBars(
 /**
  * Build the category breakdown HTML
  */
-function buildCategoryBreakdown(catChanges: CategoryChange[]): string {
-  if (!catChanges.length) return '';
+function buildCategoryBreakdown(catChanges: CategoryChange[]): TemplateResult | typeof nothing {
+  if (!catChanges.length) return nothing;
 
-  return `<div class="p-3 rounded-lg" style="background: var(--bg-input);">
+  return html`<div class="p-3 rounded-lg" style="background: var(--bg-input);">
     <p class="text-xs font-bold mb-2" style="color: var(--text-secondary);">Biggest Changes</p>
-    ${catChanges.map(c => {
-      const isUp = c.diff > 0;
-      return `<div class="flex justify-between items-center py-1">
-        <span class="text-xs" style="color: var(--text-primary);">${esc(c.emoji)} ${esc(c.name)}</span>
-        <span class="text-xs font-bold" style="color: ${isUp ? 'var(--color-expense)' : 'var(--color-income)'};">${isUp ? '+' : ''}${fmtCurFn(c.diff)} (${isUp ? '+' : ''}${c.pct}%)</span>
+    ${repeat(catChanges, (change) => change.id, (change) => {
+      const isUp = change.diff > 0;
+      return html`<div class="flex justify-between items-center py-1">
+        <span class="text-xs" style="color: var(--text-primary);">${change.emoji} ${change.name}</span>
+        <span class="text-xs font-bold" style="color: ${isUp ? 'var(--color-expense)' : 'var(--color-income)'};">${isUp ? '+' : ''}${fmtCurFn(change.diff)} (${isUp ? '+' : ''}${change.pct}%)</span>
       </div>`;
-    }).join('')}
+    })}
   </div>`;
 }

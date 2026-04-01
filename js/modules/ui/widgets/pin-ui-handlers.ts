@@ -259,12 +259,26 @@ export function initPinHandlers(): void {
       const words = recoveryPhrase.split(' ');
       const grid = document.querySelector('#recovery-phrase-display .grid');
       if (grid) {
-        grid.innerHTML = words.map((word: string, i: number) =>
-          `<div class="p-2 rounded text-center" style="background: var(--bg-primary);">
-            <span class="text-xs" style="color: var(--text-tertiary);">${i + 1}.</span>
-            <span class="font-bold" style="color: var(--text-primary);">${escapeHtml(word)}</span>
-          </div>`
-        ).join('');
+        const wordItems = words.map((word: string, i: number) => {
+          const item = document.createElement('div');
+          item.className = 'p-2 rounded text-center';
+          item.style.background = 'var(--bg-primary)';
+
+          const label = document.createElement('span');
+          label.className = 'text-xs';
+          label.style.color = 'var(--text-tertiary)';
+          label.textContent = `${i + 1}.`;
+
+          const text = document.createElement('span');
+          text.className = 'font-bold';
+          text.style.color = 'var(--text-primary)';
+          text.textContent = escapeHtml(word);
+
+          item.append(label, text);
+          return item;
+        });
+
+        grid.replaceChildren(...wordItems);
       }
 
       openModal('recovery-phrase-modal');

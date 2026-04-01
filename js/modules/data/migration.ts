@@ -54,6 +54,8 @@ interface LocalStorageData {
   alerts: AlertPrefs | null;
 }
 
+type LocalStorageBackupSnapshot = Omit<LocalStorageData, 'pin'>;
+
 interface MigrationResult {
   isOk: boolean;
   migrated?: number;
@@ -523,7 +525,7 @@ export class MigrationManager {
    * Create a backup snapshot of all localStorage data
    * FIXED: Added for safe rollback capability
    */
-  private _createBackupSnapshot(): LocalStorageData {
+  private _createBackupSnapshot(): LocalStorageBackupSnapshot {
     return {
       transactions: lsGet(SK.TX, []) as Transaction[],
       savingsGoals: lsGet(SK.SAVINGS, {}) as Record<string, SavingsGoal>,
@@ -538,7 +540,6 @@ export class MigrationManager {
       rolloverSettings: lsGet(SK.ROLLOVER_SETTINGS, null) as RolloverSettings | null,
       currency: lsGet(SK.CURRENCY, null) as CurrencySettings | null,
       theme: lsGet(SK.THEME, null) as string | null,
-      pin: lsGet(SK.PIN, null) as string | null,
       sections: lsGet(SK.SECTIONS, null) as SectionsConfig | null,
       insightPers: lsGet(SK.INSIGHT_PERS, null) as InsightPersonality | null,
       alerts: lsGet(SK.ALERTS, null) as AlertPrefs | null
@@ -573,7 +574,7 @@ export class MigrationManager {
    * Restore from a backup snapshot
    * FIXED: Added for proper rollback capability
    */
-  private _restoreFromBackup(backup: LocalStorageData): boolean {
+  private _restoreFromBackup(backup: LocalStorageBackupSnapshot): boolean {
     try {
       // Restore all localStorage data
       localStorage.setItem(SK.TX, JSON.stringify(backup.transactions));
@@ -589,7 +590,6 @@ export class MigrationManager {
       if (backup.rolloverSettings) localStorage.setItem(SK.ROLLOVER_SETTINGS, JSON.stringify(backup.rolloverSettings));
       if (backup.currency) localStorage.setItem(SK.CURRENCY, JSON.stringify(backup.currency));
       if (backup.theme) localStorage.setItem(SK.THEME, JSON.stringify(backup.theme));
-      if (backup.pin) localStorage.setItem(SK.PIN, JSON.stringify(backup.pin));
       if (backup.sections) localStorage.setItem(SK.SECTIONS, JSON.stringify(backup.sections));
       if (backup.insightPers) localStorage.setItem(SK.INSIGHT_PERS, JSON.stringify(backup.insightPers));
       if (backup.alerts) localStorage.setItem(SK.ALERTS, JSON.stringify(backup.alerts));

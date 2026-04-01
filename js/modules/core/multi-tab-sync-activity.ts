@@ -23,6 +23,48 @@ let currentActivity: UserActivityState = {
 
 const ACTIVITY_TIMEOUT = 3000; // 3 seconds of inactivity
 let activityTimer: number | null = null;
+let trackingInitialized = false;
+let activityIntervalId: ReturnType<typeof setInterval> | null = null;
+let beforeUnloadRegistered = false;
+
+const trackInput = debounce((event: Event) => {
+  const target = event.target as HTMLElement | null;
+  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+    markUserTyping(target.id);
+  }
+}, 100);
+
+const trackFocus = (event: Event): void => {
+  const target = event.target as HTMLElement | null;
+  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+    updateUserActivity({
+      activeField: target.id
+    });
+  }
+};
+
+const trackBlur = debounce(() => {
+  if (!document.activeElement ||
+      (document.activeElement.tagName !== 'INPUT' &&
+       document.activeElement.tagName !== 'TEXTAREA')) {
+    markUserStoppedTyping();
+  }
+}, 500);
+
+const trackActivity = debounce(() => {
+  updateUserActivity({});
+}, 1000);
+
+const trackFormChange = (event: Event): void => {
+  const target = event.target as HTMLElement | null;
+  if (target && target.closest('form')) {
+    markUnsavedChanges(true);
+  }
+};
+
+const handleSubmit = (): void => {
+  markUnsavedChanges(false);
+};
 
 // ==========================================
 // ACTIVITY TRACKING FUNCTIONS
@@ -105,58 +147,33 @@ export function isUserActive(): boolean {
  * Set up activity tracking listeners
  */
 export function initActivityTracking(): void {
-  // Track input events
-  const trackInput = debounce((e: unknown) => {
-    const event = e as Event;
-    const target = event.target as HTMLElement;
-    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
-      markUserTyping(target.id);
-    }
-  }, 100);
-  
-  // Track focus events
-  const trackFocus = (e: Event) => {
-    const target = e.target as HTMLElement;
-    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
-      updateUserActivity({
-        activeField: target.id
-      });
-    }
-  };
-  
-  // Track blur events
-  const trackBlur = debounce(() => {
-    if (!document.activeElement || 
-        (document.activeElement.tagName !== 'INPUT' && 
-         document.activeElement.tagName !== 'TEXTAREA')) {
-      markUserStoppedTyping();
-    }
-  }, 500);
-  
-  // Track general activity
-  const trackActivity = debounce(() => {
-    updateUserActivity({});
-  }, 1000);
-  
+  if (typeof document === 'undefined') {
+    return;
+  }
+
+  if (trackingInitialized) {
+    return;
+  }
+
   // Add listeners
   document.addEventListener('input', trackInput);
   document.addEventListener('focus', trackFocus, true);
   document.addEventListener('blur', trackBlur, true);
   document.addEventListener('click', trackActivity);
   document.addEventListener('keydown', trackActivity);
-  
-  // Track form changes
-  document.addEventListener('change', (e) => {
-    const target = e.target as HTMLElement;
-    if (target && target.closest('form')) {
-      markUnsavedChanges(true);
-    }
-  });
-  
-  // Clear unsaved changes on form submit
-  document.addEventListener('submit', () => {
-    markUnsavedChanges(false);
-  });
+  document.addEventListener('change', trackFormChange);
+  document.addEventListener('submit', handleSubmit);
+
+  if (!activityIntervalId) {
+    activityIntervalId = setInterval(saveActivityState, 10000);
+  }
+
+  if (typeof window !== 'undefined' && !beforeUnloadRegistered) {
+    window.addEventListener('beforeunload', saveActivityState);
+    beforeUnloadRegistered = true;
+  }
+
+  trackingInitialized = true;
 }
 
 // ==========================================
@@ -231,23 +248,35 @@ export function restoreActivityState(): void {
 // INITIALIZATION
 // ==========================================
 
-// Auto-initialize on module load
-let activityIntervalId: ReturnType<typeof setInterval> | null = null;
-
 if (typeof window !== 'undefined') {
   initActivityTracking();
   restoreActivityState();
-
-  // Save state periodically
-  activityIntervalId = setInterval(saveActivityState, 10000);
-
-  // Save state before unload
-  window.addEventListener('beforeunload', saveActivityState);
 }
 
 export function cleanupActivityTracking(): void {
+  if (trackingInitialized) {
+    document.removeEventListener('input', trackInput);
+    document.removeEventListener('focus', trackFocus, true);
+    document.removeEventListener('blur', trackBlur, true);
+    document.removeEventListener('click', trackActivity);
+    document.removeEventListener('keydown', trackActivity);
+    document.removeEventListener('change', trackFormChange);
+    document.removeEventListener('submit', handleSubmit);
+    trackingInitialized = false;
+  }
+
   if (activityIntervalId) {
     clearInterval(activityIntervalId);
     activityIntervalId = null;
+  }
+
+  if (activityTimer !== null) {
+    clearTimeout(activityTimer);
+    activityTimer = null;
+  }
+
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('beforeunload', saveActivityState);
+    beforeUnloadRegistered = false;
   }
 }

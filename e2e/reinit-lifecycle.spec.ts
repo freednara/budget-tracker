@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { cleanAppState, waitForAppReady } from './test-helpers.js';
+import { cleanAppState, waitForInteractiveAppReady } from './test-helpers.js';
 
 async function reinitializeApp(page: import('@playwright/test').Page): Promise<void> {
   await page.evaluate(async () => {
@@ -18,7 +18,7 @@ test.describe('Re-init lifecycle', () => {
 
   test('cleanup and re-init keep filters and emoji picker single-fire', async ({ page }) => {
     await reinitializeApp(page);
-    await waitForAppReady(page);
+    await waitForInteractiveAppReady(page);
 
     await page.locator('#tab-transactions-btn').click();
     await expect(page.locator('#tab-transactions')).toBeVisible({ timeout: 10000 });

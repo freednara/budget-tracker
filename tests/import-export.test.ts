@@ -80,9 +80,12 @@ import {
   sanitizeImportedTransactions,
   buildCsvContent,
   buildExportData,
+  buildImportState,
   findContentDuplicates as findContentDuplicatesImportExport,
   MAX_IMPORT_TRANSACTIONS,
+  tryAtomicWrite,
 } from '../js/modules/features/import-export/import-export.js';
+import { safeStorage } from '../js/modules/core/safe-storage.js';
 
 import {
   findContentDuplicates,
@@ -233,6 +236,54 @@ describe('sanitizeImportedTransactions', () => {
     expect(result).toHaveLength(2);
     expect(result[0].type).toBe('expense');
     expect(result[1].type).toBe('income');
+  });
+});
+
+describe('tryAtomicWrite', () => {
+  beforeEach(() => {
+    vi.mocked(safeStorage.getItem).mockReset();
+    vi.mocked(safeStorage.setJSON).mockReset();
+    vi.mocked(safeStorage.setItem).mockReset();
+    vi.mocked(safeStorage.removeItem).mockReset();
+    vi.mocked(safeStorage.getItem).mockReturnValue(null);
+    vi.mocked(safeStorage.setJSON).mockReturnValue(true);
+    vi.mocked(safeStorage.setItem).mockReturnValue(true);
+  });
+
+  it('uses safeStorage for rollback writes when a later write fails', async () => {
+    vi.mocked(safeStorage.getItem)
+      .mockReturnValueOnce('{"old":1}')
+      .mockReturnValueOnce('{"old":2}');
+
+    vi.mocked(safeStorage.setJSON)
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+
+    const result = await tryAtomicWrite([
+      { key: 'first', value: { next: 1 } },
+      { key: 'second', value: { next: 2 } }
+    ]);
+
+    expect(result).toBe(false);
+    expect(safeStorage.setItem).toHaveBeenCalledWith('first', '{"old":1}');
+    expect(safeStorage.setItem).toHaveBeenCalledWith('second', '{"old":2}');
+  });
+});
+
+describe('buildImportState', () => {
+  it('rejects oversized raw import payloads before processing', () => {
+    const importData = {
+      transactions: Array.from({ length: MAX_IMPORT_TRANSACTIONS + 1 }, () => ({
+        type: 'expense',
+        amount: 1,
+        date: '2024-01-01',
+        category: 'food',
+      })),
+    };
+
+    expect(() => buildImportState(importData, 'overwrite', [])).toThrow(
+      `Import exceeds maximum allowed transactions (${MAX_IMPORT_TRANSACTIONS})`
+    );
   });
 });
 

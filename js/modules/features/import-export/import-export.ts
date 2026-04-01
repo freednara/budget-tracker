@@ -26,7 +26,8 @@ import type {
   RolloverSettings,
   FilterPreset,
   TxTemplate,
-  LegacySavingsGoal
+  LegacySavingsGoal,
+  InsightPersonality
 } from '../../../types/index.js';
 
 // ==========================================
@@ -106,6 +107,13 @@ interface ExportData {
 export const MAX_IMPORT_SIZE = 5 * 1024 * 1024; // 5MB
 export const MAX_IMPORT_TRANSACTIONS = 10000;
 const MAX_ID_LENGTH = 128;
+const SUPPORTED_INSIGHT_PERSONALITIES = new Set<InsightPersonality>([
+  'serious',
+  'friendly',
+  'roast',
+  'casual',
+  'motivating'
+]);
 
 // ==========================================
 // INTERNAL HELPERS
@@ -121,6 +129,13 @@ function sanitizeId(id: unknown): string {
     return '';
   }
   return cleaned;
+}
+
+function normalizeInsightPersonality(value: unknown): InsightPersonality {
+  if (typeof value === 'string' && SUPPORTED_INSIGHT_PERSONALITIES.has(value as InsightPersonality)) {
+    return value as InsightPersonality;
+  }
+  return 'serious';
 }
 
 // ==========================================
@@ -258,7 +273,7 @@ export function findContentDuplicates(
  */
 export async function tryAtomicWrite(writes: AtomicWriteEntry[]): Promise<boolean> {
   // Use Web Locks API for true cross-tab atomicity during import
-  if ('locks' in navigator) {
+  if (typeof navigator.locks?.request === 'function') {
     return await navigator.locks.request(
       'budget_tracker_import_lock',
       { mode: 'exclusive', ifAvailable: false },
@@ -289,7 +304,7 @@ function performAtomicWrite(writes: AtomicWriteEntry[]): boolean {
       backups.forEach(({ key: k, raw }) => {
         try {
           if (raw === null) safeStorage.removeItem(k);
-          else localStorage.setItem(k, raw); // Still use raw set for restore
+          else if (!safeStorage.setItem(k, raw)) rollbackFailed = true;
         } catch (e) {
           if (import.meta.env.DEV) console.error('Rollback failed for key:', k, e);
           rollbackFailed = true;
@@ -319,9 +334,11 @@ export function buildImportState(
   existingTx: Transaction[] = []
 ): ImportStateResult {
   const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const importedTxCount = Array.isArray(d.transactions) ? d.transactions.length : 0;
+  const finalTxCount = existingTx.length;
 
-  // Safety check: Prevent massive transaction imports from crashing the browser
-  if (existingTx.length > MAX_IMPORT_TRANSACTIONS) {
+  // Safety check: reject both oversized payloads and oversized merged ledgers.
+  if (importedTxCount > MAX_IMPORT_TRANSACTIONS || finalTxCount > MAX_IMPORT_TRANSACTIONS) {
     throw new Error(`Import exceeds maximum allowed transactions (${MAX_IMPORT_TRANSACTIONS})`);
   }
 
@@ -395,6 +412,13 @@ export function buildImportState(
     }
     writes.push({ key: sk, value: newS[prop] });
   });
+
+  if ('insightPers' in newS) {
+    const normalizedInsightPersonality = normalizeInsightPersonality(newS.insightPers);
+    newS.insightPers = normalizedInsightPersonality;
+    const idx = writes.findIndex((write) => write.key === SK.INSIGHT_PERS);
+    if (idx >= 0) writes[idx].value = normalizedInsightPersonality;
+  }
 
   // P6-H1 + P6-M1 + P9-M3: Sanitize savingsGoals keys, normalize numeric fields, default to 1
   if (isObj(newS.savingsGoals)) {

@@ -501,11 +501,14 @@ export const calendar = {
 };
 
 export const alerts = {
-  dismissAlert(alertText: string, monthKey?: string): void {
-    const cleanText = alertText.replace(/ \(\+\d+ more\)$/, '');
+  dismissAlert(alertId: string, monthKey?: string): void {
+    if (!alertId) return;
     const activeMonth = monthKey || signals.currentMonth.value;
+    const normalizedAlertId = alertId.startsWith(`${activeMonth}:`)
+      ? alertId
+      : `${activeMonth}:${alertId.replace(/ \(\+\d+ more\)$/, '')}`;
     const nextDismissed = new Set(signals.dismissedAlerts.value);
-    nextDismissed.add(`${activeMonth}:${cleanText}`);
+    nextDismissed.add(normalizedAlertId);
     signals.dismissedAlerts.value = nextDismissed;
   }
 };

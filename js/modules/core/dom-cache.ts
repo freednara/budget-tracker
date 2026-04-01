@@ -94,7 +94,8 @@ export class DOMCache {
     // Fast path for known static elements
     if (this.staticIds.has(id)) {
       const cached = this.staticCache.get(id);
-      if (cached) return cached as T;
+      if (cached?.isConnected) return cached as T;
+      if (cached) this.staticCache.delete(id);
 
       const element = document.getElementById(id);
       if (element) {
@@ -109,7 +110,8 @@ export class DOMCache {
 
     if (ref) {
       const element = ref.deref();
-      if (element) return element as T;
+      if (element?.isConnected) return element as T;
+      this.cache.delete(id);
     }
 
     // Not in cache or stale, query and store

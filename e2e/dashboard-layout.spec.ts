@@ -1,5 +1,5 @@
 import { test, expect, devices, type Page } from '@playwright/test';
-import { cleanAppState, loadSampleDataFromSettings } from './test-helpers.js';
+import { cleanAppState, loadSampleDataFromSettings, waitForAppPhase } from './test-helpers.js';
 
 async function enableStandaloneLikeMode(page: Page): Promise<void> {
   await page.addInitScript(() => {
@@ -128,6 +128,75 @@ async function expectPhoneCalendarStack(page: Page): Promise<void> {
   await expectNoHorizontalOverflow(page);
 }
 
+async function expectPhoneSupportCardsCompactRail(page: Page): Promise<void> {
+  const metrics = await page.locator('.hero-sidebar--compact').evaluate((rail) => {
+    const viewportWidth = document.documentElement.clientWidth;
+    const railRect = rail.getBoundingClientRect();
+    const cards = Array.from(rail.querySelectorAll<HTMLElement>('.dashboard-support-card'));
+
+    return {
+      viewportWidth,
+      rail: {
+        left: railRect.left,
+        right: railRect.right,
+        width: railRect.width,
+      },
+      cards: cards.map((card) => {
+        const rect = card.getBoundingClientRect();
+        const styles = window.getComputedStyle(card);
+        const metaNodes = Array.from(card.querySelectorAll<HTMLElement>('.dashboard-support-card__meta'));
+        return {
+          left: rect.left,
+          right: rect.right,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+          aspectRatio: styles.aspectRatio,
+          hiddenMetaCount: metaNodes.filter((node) => window.getComputedStyle(node).display === 'none').length,
+        };
+      }),
+    };
+  });
+
+  expect(metrics.cards).toHaveLength(3);
+  const baselineTop = metrics.cards[0]?.top ?? 0;
+  const baselineWidth = metrics.cards[0]?.width ?? 0;
+  const baselineHeight = metrics.cards[0]?.height ?? 0;
+
+  for (const card of metrics.cards) {
+    expect(Math.abs(card.top - baselineTop)).toBeLessThan(4);
+    expect(card.left).toBeGreaterThanOrEqual(metrics.rail.left - 1);
+    expect(card.right).toBeLessThanOrEqual(metrics.rail.right + 1);
+    expect(Math.abs(card.width - baselineWidth)).toBeLessThan(3);
+    expect(Math.abs(card.height - baselineHeight)).toBeLessThan(3);
+    expect(Math.abs(card.width - card.height)).toBeLessThan(4);
+    expect(card.aspectRatio).toBe('1 / 1');
+    expect(card.hiddenMetaCount).toBeGreaterThan(0);
+  }
+
+  expect(metrics.rail.right).toBeLessThanOrEqual(metrics.viewportWidth + 1);
+  await expectNoHorizontalOverflow(page);
+}
+
+async function prepareShellBudgetAlert(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    localStorage.setItem('budget_tracker_alert_prefs', JSON.stringify({
+      budgetThreshold: 0.01,
+      browserNotificationsEnabled: false,
+      lastNotifiedAlertKeys: [],
+    }));
+  });
+
+  await cleanAppState(page);
+  await loadSampleDataFromSettings(page);
+  await expect(page.locator('.transaction-row').first()).toBeVisible({ timeout: 15000 });
+  await expect(page.locator('#toast-container .toast')).toHaveCount(0, { timeout: 15000 });
+  await page.locator('#tab-dashboard-btn').click();
+  await expect(page.locator('#alert-banner .inline-alert-card')).toBeVisible({ timeout: 10000 });
+  await expect(page.locator('#dashboard-alerts .inline-alert-card')).toHaveCount(0);
+  await expect(page.locator('#budget-alerts .inline-alert-card')).toHaveCount(0);
+}
+
 async function swipeTransactionRow(page: Page, rowLocator: import('@playwright/test').Locator, direction: 'left' | 'right'): Promise<void> {
   await rowLocator.evaluate((row, swipeDirection) => {
     const target = (row.querySelector('.swipe-content') as HTMLElement | null) ?? (row as HTMLElement);
@@ -219,8 +288,54 @@ test.describe('Dashboard Layout', () => {
     await expect(page.locator('#analytics-calendar-section')).toHaveCount(0);
   });
 
+  test('uses section-scoped empty states instead of shell or onboarding messaging', async ({ page }) => {
+    await page.locator('#tab-dashboard-btn').click();
+
+    await expect(page.locator('#alert-banner')).toBeHidden();
+    await expect(page.locator('#budget-gauge-section')).toBeVisible();
+    await expect(page.locator('#budget-gauge-section')).toContainText('No budget set yet');
+    await expect(page.locator('#trend-chart-container')).toContainText('Add transactions to explain how income and spending are shaping the month.');
+    await expect(page.locator('#donut-chart-container')).toContainText('Add expense activity to see which categories are creating the most pressure.');
+
+    await page.locator('#tab-transactions-btn').click();
+    await expect(page.locator('#transactions-list')).toContainText('No transactions yet');
+    await expect(page.locator('#transactions-list')).toContainText('Add your first transaction to start tracking this month.');
+    await expect(page.locator('#transactions-list')).not.toContainText('Welcome to Harbor Ledger');
+    await page.locator('#transactions-list [data-action="add-transaction"]').click();
+    await expect(page.locator('#tab-transactions')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#amount')).toBeFocused({ timeout: 2000 });
+
+    await page.locator('#tab-calendar-btn').click();
+    await expect(page.locator('#spending-heatmap')).toContainText('No calendar activity yet');
+    await expect(page.locator('#cal-detail-panel')).toContainText('No day details yet');
+    await expect(page.locator('#cal-detail-panel')).not.toContainText('Select a day');
+    const expectedCalendarDate = await page.locator('#current-month-label').evaluate((label) => {
+      const monthLabel = label.textContent?.trim() || '';
+      const [monthName = '', year = ''] = monthLabel.split(/\s+/);
+      const monthByName: Record<string, string> = {
+        January: '01',
+        February: '02',
+        March: '03',
+        April: '04',
+        May: '05',
+        June: '06',
+        July: '07',
+        August: '08',
+        September: '09',
+        October: '10',
+        November: '11',
+        December: '12'
+      };
+      return `${year}-${monthByName[monthName] || '01'}-01`;
+    });
+    await page.locator('#spending-heatmap [data-action="add-transaction-for-date"]').click();
+    await expect(page.locator('#tab-transactions')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#date')).toHaveValue(expectedCalendarDate, { timeout: 5000 });
+  });
+
   test('keeps budget focused on planning, transactions on ledger work, and calendar on time-based planning', async ({ page }) => {
     await page.locator('#tab-budget-btn').click();
+    await waitForAppPhase(page, 'background');
     await expect(page.locator('#tab-budget')).toBeVisible({ timeout: 10000 });
     await expect(page.locator('#envelope-section')).toBeVisible();
     await expect(page.locator('#savings-goals-section')).toBeVisible();
@@ -241,8 +356,37 @@ test.describe('Dashboard Layout', () => {
     await expect(page.locator('#cal-detail-panel')).toBeVisible();
   });
 
+  test('keeps calendar day buttons tabbable before and after a selection', async ({ page }) => {
+    await loadSampleDataFromSettings(page);
+    await page.locator('#tab-calendar-btn').click();
+    await expect(page.locator('#tab-calendar')).toBeVisible({ timeout: 10000 });
+
+    const dayButtons = page.locator('.cal-day');
+    await expect(dayButtons.first()).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.cal-day.cal-selected')).toHaveCount(0);
+
+    const initialTabIndexes = await dayButtons.evaluateAll((buttons) =>
+      buttons.map((button) => (button as HTMLElement).tabIndex)
+    );
+    expect(initialTabIndexes.length).toBeGreaterThan(0);
+    expect(initialTabIndexes.every((tabIndex) => tabIndex === 0)).toBe(true);
+
+    await dayButtons.nth(10).click();
+
+    const selectedTabState = await dayButtons.evaluateAll((buttons) =>
+      buttons.map((button) => ({
+        tabIndex: (button as HTMLElement).tabIndex,
+        selected: button.classList.contains('cal-selected'),
+      }))
+    );
+    expect(selectedTabState.filter((button) => button.selected)).toHaveLength(1);
+    expect(selectedTabState.filter((button) => button.tabIndex === 0)).toHaveLength(1);
+    expect(selectedTabState.find((button) => button.selected)?.tabIndex).toBe(0);
+  });
+
   test('mounts the dashboard budget gauge on its real shell anchor', async ({ page }) => {
     await loadSampleDataFromSettings(page);
+    await waitForAppPhase(page, 'background');
 
     await page.locator('#tab-dashboard-btn').click();
     await expect(page.locator('#budget-gauge-section')).toBeVisible({ timeout: 10000 });
@@ -251,6 +395,69 @@ test.describe('Dashboard Layout', () => {
     await expect(page.locator('#budget-gauge-section').locator('button')).toHaveCount(0);
     await expect(page.locator('#income-badge')).toHaveText(/Healthy|Caution|New/);
     await expect(page.locator('#expense-badge')).toHaveText(/On Track|Caution|Over|New/);
+  });
+
+  test('renders and dismisses shell budget alerts from real app state', async ({ page }) => {
+    await prepareShellBudgetAlert(page);
+
+    const alertCard = page.locator('#alert-banner .inline-alert-card');
+    const dismissButton = alertCard.locator('.inline-alert-card__dismiss');
+    const alertId = await alertCard.getAttribute('data-alert-id');
+    const shellAlertHost = page.locator('#alert-banner');
+
+    await expect(alertCard).toBeVisible();
+    await expect(dismissButton).toHaveAttribute('aria-label', /Dismiss alert:/);
+    expect(alertId).not.toBeNull();
+
+    await dismissButton.click();
+    await page.waitForTimeout(250);
+
+    await expect(shellAlertHost.locator(`[data-alert-id="${alertId}"]`)).toHaveCount(0);
+    await expect(page.locator('#dashboard-alerts .inline-alert-card')).toHaveCount(0);
+    await expect(page.locator('#budget-alerts .inline-alert-card')).toHaveCount(0);
+  });
+
+  test('keeps dismissed budget alerts hidden as spending changes within the same month', async ({ page }) => {
+    await prepareShellBudgetAlert(page);
+
+    const alertCard = page.locator('#alert-banner .inline-alert-card');
+    const alertText = (await alertCard.locator('.inline-alert-card__text').textContent())?.trim() || '';
+    const alertId = await alertCard.getAttribute('data-alert-id');
+    const categoryName = alertText.match(/^\S+\s+(.+?):/)?.[1] || '';
+    expect(categoryName).not.toBe('');
+    expect(alertId).not.toBeNull();
+
+    await alertCard.locator('.inline-alert-card__dismiss').click();
+    await page.waitForTimeout(250);
+
+    await page.locator('#tab-transactions-btn').click();
+    await expect(page.locator('#tab-transactions')).toBeVisible({ timeout: 10000 });
+    await page.locator('#amount').fill('1.00');
+    const categoryChip = page.locator('.category-chip', { hasText: categoryName }).first();
+    await categoryChip.scrollIntoViewIfNeeded();
+    await categoryChip.evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    await page.locator('#submit-btn').click();
+    await expect(page.locator('#toast-container .toast').first()).toBeVisible({ timeout: 5000 });
+
+    await page.locator('#tab-dashboard-btn').click();
+    await page.waitForTimeout(400);
+    await expect(page.locator(`#alert-banner [data-alert-id="${alertId}"]`)).toHaveCount(0);
+  });
+
+  test('keeps the global budget alert visible outside dashboard-specific sections', async ({ page }) => {
+    await prepareShellBudgetAlert(page);
+
+    await page.locator('#tab-transactions-btn').click();
+    await expect(page.locator('#tab-transactions')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#alert-banner .inline-alert-card')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#dashboard-alerts .inline-alert-card')).toHaveCount(0);
+
+    await page.locator('#tab-calendar-btn').click();
+    await expect(page.locator('#tab-calendar')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#alert-banner .inline-alert-card')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#budget-alerts .inline-alert-card')).toHaveCount(0);
   });
 
   test('income, expense, and balance support cards drill into month-scoped ledger views', async ({ page }) => {
@@ -433,6 +640,40 @@ test.describe('Dashboard Layout Mobile', () => {
     await expect(page.locator('#tab-calendar')).toBeVisible({ timeout: 10000 });
     await expectPhoneCalendarStack(page);
   });
+
+  test('keeps income, expense, and balance cards on one compact square row on phone widths', async ({ page }) => {
+    await loadSampleDataFromSettings(page);
+    await page.locator('#tab-dashboard-btn').click();
+    await expect(page.locator('.hero-sidebar .dashboard-support-card')).toHaveCount(3);
+    await expectPhoneSupportCardsCompactRail(page);
+  });
+
+  test('uses icon-only main tabs on very small phones', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 667 });
+    await page.locator('#tab-dashboard-btn').click();
+
+    const metrics = await page.locator('.app-shell-tabs').evaluate((tabs) => {
+      const buttons = Array.from(tabs.querySelectorAll<HTMLButtonElement>('.main-tab'));
+      return buttons.map((button) => {
+        const label = button.querySelector<HTMLElement>('.main-tab__label');
+        const icon = button.querySelector<HTMLElement>('.main-tab__icon');
+        return {
+          ariaLabel: button.getAttribute('aria-label') || '',
+          height: button.getBoundingClientRect().height,
+          labelDisplay: label ? window.getComputedStyle(label).display : '',
+          iconDisplay: icon ? window.getComputedStyle(icon).display : '',
+        };
+      });
+    });
+
+    expect(metrics).toHaveLength(4);
+    for (const metric of metrics) {
+      expect(metric.ariaLabel).not.toBe('');
+      expect(metric.height).toBeGreaterThanOrEqual(44);
+      expect(metric.labelDisplay).toBe('none');
+      expect(metric.iconDisplay).not.toBe('none');
+    }
+  });
 });
 
 test.describe('Latest Mobile Layout Guards', () => {
@@ -443,27 +684,8 @@ test.describe('Latest Mobile Layout Guards', () => {
     const page = await context.newPage();
 
     try {
-      await cleanAppState(page);
-      await loadSampleDataFromSettings(page);
-
-      await page.evaluate(() => {
-        const banner = document.getElementById('alert-banner');
-        if (!banner || !banner.classList.contains('hidden')) {
-          return;
-        }
-
-        banner.classList.remove('hidden');
-        banner.innerHTML = `
-          <div class="w-full px-4 md:px-8 py-3 flex items-center justify-between gap-3">
-            <div class="flex items-center gap-3">
-              <span class="text-lg">⚠️</span>
-              <p id="alert-text" class="text-sm font-semibold text-warning">Budget alert preview</p>
-            </div>
-            <button id="dismiss-alert" class="touch-btn text-sm font-bold rounded text-warning" aria-label="Dismiss alert">✕</button>
-          </div>
-        `;
-      });
-      await expect(page.locator('#alert-banner')).toBeVisible({ timeout: 10000 });
+      await prepareShellBudgetAlert(page);
+      await expect(page.locator('#alert-banner .inline-alert-card')).toBeVisible({ timeout: 10000 });
       const shellAndAlertMetrics = await page.evaluate(() => {
         const shell = document.querySelector('.app-shell') as HTMLElement | null;
         const alert = document.getElementById('alert-banner') as HTMLElement | null;
@@ -474,17 +696,21 @@ test.describe('Latest Mobile Layout Guards', () => {
         const shellRect = shell.getBoundingClientRect();
         const alertRect = alert.getBoundingClientRect();
         return {
+          shellTop: shellRect.top,
           shellBottom: shellRect.bottom,
           alertTop: alertRect.top,
+          alertBottom: alertRect.bottom,
           alertRight: alertRect.right,
           viewportWidth: document.documentElement.clientWidth,
         };
       });
 
       expect(shellAndAlertMetrics).not.toBeNull();
-      expect((shellAndAlertMetrics?.alertTop ?? 0)).toBeGreaterThanOrEqual((shellAndAlertMetrics?.shellBottom ?? 0) - 1);
+      expect((shellAndAlertMetrics?.alertBottom ?? 0)).toBeGreaterThan((shellAndAlertMetrics?.shellTop ?? 0));
+      expect((shellAndAlertMetrics?.alertBottom ?? 0)).toBeGreaterThan((shellAndAlertMetrics?.alertTop ?? 0));
       expect((shellAndAlertMetrics?.alertRight ?? 0)).toBeLessThanOrEqual((shellAndAlertMetrics?.viewportWidth ?? 0) + 1);
       await expectNoHorizontalOverflow(page);
+      await expectPhoneSupportCardsCompactRail(page);
 
       const shellSelectors = ['#open-analytics', '#open-settings', '#prev-month', '#next-month'];
       for (const selector of shellSelectors) {
@@ -554,7 +780,7 @@ test.describe('Latest Mobile Layout Guards', () => {
     }
   });
 
-  test('reveals transaction actions from side swipes on latest iPhone Safari', async ({ browser, browserName }) => {
+  test('reveals left-swipe transaction actions on latest iPhone Safari', async ({ browser, browserName }) => {
     test.skip(browserName !== 'webkit');
 
     const context = await browser.newContext({ ...devices['iPhone 15 Pro'] });
@@ -595,17 +821,25 @@ test.describe('Latest Mobile Layout Guards', () => {
       await expect(firstRow).toHaveClass(/revealed-left/);
       await expect(firstRow.locator('.edit-swipe-btn')).toBeVisible();
       await expect(firstRow.locator('.delete-swipe-btn')).toBeVisible();
+      await expectNoHorizontalOverflow(page);
+    } finally {
+      await context.close();
+    }
+  });
 
-      await page.evaluate(() => {
-        document.querySelectorAll<HTMLElement>('.swipe-container').forEach((row) => {
-          row.classList.remove('revealed-left', 'revealed-right');
-          const content = row.querySelector<HTMLElement>('.swipe-content');
-          if (content) {
-            content.style.transform = '';
-          }
-        });
-      });
+  test('reveals right-swipe transaction actions on latest iPhone Safari', async ({ browser, browserName }) => {
+    test.skip(browserName !== 'webkit');
 
+    const context = await browser.newContext({ ...devices['iPhone 15 Pro'] });
+    const page = await context.newPage();
+
+    try {
+      await cleanAppState(page);
+      await loadSampleDataFromSettings(page);
+      await page.locator('#tab-transactions-btn').click();
+      await expect(page.locator('#transactions-list .swipe-container').first()).toBeVisible({ timeout: 10000 });
+
+      const firstRow = page.locator('#transactions-list .swipe-container').first();
       await swipeTransactionRow(page, firstRow, 'right');
       await expect(firstRow).toHaveClass(/revealed-right/);
       await expect(firstRow.locator('.reconcile-swipe-btn')).toBeVisible();

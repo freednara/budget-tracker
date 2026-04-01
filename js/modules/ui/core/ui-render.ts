@@ -203,7 +203,7 @@ export function updateTrendChart(): void {
   
   if (trendContainer) {
     if (signals.transactionCount.value === 0) {
-      render(html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">Add transactions to unlock your income and expense trend.</p>`, trendContainer);
+      render(html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">Add transactions to explain how income and spending are shaping the month.</p>`, trendContainer);
     } else if (trackedMonths.length < 2) {
       render(
         html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">
@@ -331,14 +331,16 @@ export function updateCategoryBreakdownChart(): void {
   
   if (donutContainer) {
     if (donutData.length === 0) {
-      render(html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">No expense categories yet for this month.</p>`, donutContainer);
+      render(html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">Add expense activity to see which categories are creating the most pressure.</p>`, donutContainer);
     } else {
       renderDonutChart('donut-chart-container', donutData, donutTrends);
     }
   }
   
   const breakdownBadge = DOM.get('category-breakdown-badge');
-  if (breakdownBadge) breakdownBadge.innerHTML = getMonthBadge(signals.currentMonth.value);
+  if (breakdownBadge) {
+    render(html`<span class="time-badge">${getMonthBadge(signals.currentMonth.value)}</span>`, breakdownBadge);
+  }
 }
 
 /**
@@ -367,7 +369,9 @@ export function updateBudgetVsActualChart(): void {
       ]);
       
       const bvaChartBadge = DOM.get('budget-actual-badge');
-      if (bvaChartBadge) bvaChartBadge.innerHTML = getMonthBadge(signals.currentMonth.value);
+      if (bvaChartBadge) {
+        render(html`<span class="time-badge">${getMonthBadge(signals.currentMonth.value)}</span>`, bvaChartBadge);
+      }
     } else { 
       bvaSec.classList.add('hidden'); 
     }

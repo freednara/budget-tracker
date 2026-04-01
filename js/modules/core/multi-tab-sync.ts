@@ -36,6 +36,7 @@ const debouncedSyncHandlers = new Map<string, Function>();
 const atomicBundleTimeout = 5000;
 const eventUnsubscribers: Array<() => void> = [];
 const broadcastUnsubscribers: Array<() => void> = [];
+let pendingConflictResolutionHandler: ((event: Event) => void) | null = null;
 
 const COUPLED_STATE_GROUPS = {
   FINANCIAL_CORE: [SK.TX, SK.SAVINGS, SK.ALLOC],
@@ -320,9 +321,17 @@ function showConflictModal(bundle: AtomicSyncBundle): void {
   if (localEl) localEl.textContent = `Your edits in: ${localInfo}`;
 
   // Listen for resolution event from modal-events.ts
-  const resolveHandler = (e: any) => {
-    const { action } = e.detail;
-    window.removeEventListener('sync-conflict-resolution', resolveHandler);
+  if (pendingConflictResolutionHandler) {
+    window.removeEventListener('sync-conflict-resolution', pendingConflictResolutionHandler);
+  }
+
+  pendingConflictResolutionHandler = (event: Event) => {
+    const customEvent = event as CustomEvent<{ action?: string }>;
+    const action = customEvent.detail?.action;
+    if (pendingConflictResolutionHandler) {
+      window.removeEventListener('sync-conflict-resolution', pendingConflictResolutionHandler);
+      pendingConflictResolutionHandler = null;
+    }
 
     if (action === 'accept') {
       handleAtomicSync(bundle);
@@ -336,7 +345,7 @@ function showConflictModal(bundle: AtomicSyncBundle): void {
     }
   };
 
-  window.addEventListener('sync-conflict-resolution', resolveHandler);
+  window.addEventListener('sync-conflict-resolution', pendingConflictResolutionHandler);
   openModal('sync-conflict-modal');
 }
 
@@ -427,6 +436,10 @@ let storageHandler: ((e: StorageEvent) => void) | null = null;
 let visibilityHandler: (() => void) | null = null;
 
 export function cleanup(): void {
+  if (pendingConflictResolutionHandler) {
+    window.removeEventListener('sync-conflict-resolution', pendingConflictResolutionHandler);
+    pendingConflictResolutionHandler = null;
+  }
   broadcastUnsubscribers.forEach((unsubscribe) => unsubscribe());
   broadcastUnsubscribers.length = 0;
   broadcastManager.dispose();

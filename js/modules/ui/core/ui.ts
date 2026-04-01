@@ -3,7 +3,6 @@
  * Core UI components: toasts, progress indicators, modals
  */
 
-import { esc } from '../../core/utils.js';
 import DOM from '../../core/dom-cache.js';
 
 // ==========================================
@@ -78,7 +77,16 @@ export function showToast(message: string, type: ToastType = 'success'): void {
   const toast = document.createElement('div');
   toast.className = 'toast px-4 py-3 rounded-lg shadow-lg flex items-center gap-2 pointer-events-auto transform transition-all duration-300 translate-y-4 opacity-0';
   toast.style.cssText = `background: ${bg}; color: white; min-width: 200px;`;
-  toast.innerHTML = `<span class="font-bold">${icon}</span><span class="text-sm font-semibold">${esc(message)}</span>`;
+
+  const iconEl = document.createElement('span');
+  iconEl.className = 'font-bold';
+  iconEl.textContent = icon;
+
+  const messageEl = document.createElement('span');
+  messageEl.className = 'text-sm font-semibold';
+  messageEl.textContent = message;
+
+  toast.append(iconEl, messageEl);
 
   container.appendChild(toast);
 
@@ -108,11 +116,20 @@ export function showUndoToast(
   toast.className = 'undo-toast px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 pointer-events-auto transform transition-all duration-300 translate-y-4 opacity-0';
   toast.style.cssText = 'background: var(--bg-card); color: var(--text-primary); min-width: 280px; border: 1px solid var(--border-input);';
 
-  toast.innerHTML = `
-    <span class="flex-1 text-sm font-semibold">${esc(message)}</span>
-    <button class="undo-btn px-3 py-1 rounded text-sm font-bold transition-colors" style="background: var(--color-accent); color: white;">Undo</button>
-    <div class="undo-timer-bar" style="position: absolute; bottom: 0; left: 0; right: 0; height: 3px; background: var(--color-accent); border-radius: 0 0 0.5rem 0.5rem; animation: undoTimer ${duration}ms linear forwards;"></div>
-  `;
+  const messageEl = document.createElement('span');
+  messageEl.className = 'flex-1 text-sm font-semibold';
+  messageEl.textContent = message;
+
+  const undoBtn = document.createElement('button');
+  undoBtn.className = 'undo-btn px-3 py-1 rounded text-sm font-bold transition-colors';
+  undoBtn.style.cssText = 'background: var(--color-accent); color: white;';
+  undoBtn.textContent = 'Undo';
+
+  const timerBar = document.createElement('div');
+  timerBar.className = 'undo-timer-bar';
+  timerBar.style.cssText = `position: absolute; bottom: 0; left: 0; right: 0; height: 3px; background: var(--color-accent); border-radius: 0 0 0.5rem 0.5rem; animation: undoTimer ${duration}ms linear forwards;`;
+
+  toast.append(messageEl, undoBtn, timerBar);
 
   container.appendChild(toast);
 
@@ -128,8 +145,7 @@ export function showUndoToast(
   };
 
   // Handle undo click
-  const undoBtn = toast.querySelector('.undo-btn');
-  undoBtn?.addEventListener('click', () => {
+  undoBtn.addEventListener('click', () => {
     if (onUndo) onUndo();
     dismiss();
   }, { once: true });
@@ -317,6 +333,9 @@ export function openModal(id: string): void {
       if (id === 'settings-modal') {
         const cancelBtn = DOM.get('cancel-settings') as HTMLElement | null;
         cancelBtn?.click();
+      } else if (id === 'sync-conflict-modal') {
+        const keepLocalBtn = DOM.get('sync-keep-local') as HTMLElement | null;
+        keepLocalBtn?.click();
       } else {
         closeModal(id);
       }

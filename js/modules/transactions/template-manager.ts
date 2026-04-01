@@ -24,6 +24,7 @@ import { asyncConfirm } from '../ui/components/async-modal.js';
 import { fmtCur, getTodayStr } from '../core/utils.js';
 import DOM from '../core/dom-cache.js';
 import { html, render } from '../core/lit-helpers.js';
+import { emptyState } from '../ui/core/empty-state.js';
 import { emit, Events } from '../core/event-bus.js';
 import type { TxTemplate, TransactionType } from '../../types/index.js';
 
@@ -62,6 +63,10 @@ let switchTabFn: SwitchTabCallback | null = null;
 let templateManagerInitialized = false;
 let templatesCollapsedOnPhone = false;
 let templatesMediaQuery: MediaQueryList | null = null;
+let templatesMediaQueryHandler: ((event: MediaQueryListEvent) => void) | null = null;
+let toggleTemplatesButton: HTMLButtonElement | null = null;
+let toggleTemplatesButtonHandler: (() => void) | null = null;
+const templateManagerEffectCleanups: Array<() => void> = [];
 
 function isPhoneTemplatesLayout(): boolean {
   return typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches;
@@ -297,14 +302,11 @@ export function renderTemplates(): void {
   updateTemplatesCollapseUi(templates.length);
 
   if (!templates.length) {
-    render(html`
-      <div class="template-empty-state">
-        <p class="template-empty-state__title">No templates yet</p>
-        <p class="template-empty-state__body">
-          Save a transaction pattern to reuse amount, category, and recurring details faster.
-        </p>
-      </div>
-    `, container);
+    render(emptyState(
+      '↻',
+      'No templates yet',
+      'Save a transaction pattern to reuse amount, category, and recurring details faster.'
+    ), container);
     return;
   }
 
@@ -407,67 +409,85 @@ export function initTemplateManager(): void {
     templatesCollapsedOnPhone = matches;
     renderTemplates();
   };
-  templatesMediaQuery.addEventListener('change', (event: MediaQueryListEvent) => {
+  templatesMediaQueryHandler = (event: MediaQueryListEvent) => {
     syncTemplatesForViewport(event.matches);
-  });
+  };
+  templatesMediaQuery.addEventListener('change', templatesMediaQueryHandler);
 
-  const toggleTemplatesButton = DOM.get('toggle-templates-mobile') as HTMLButtonElement | null;
-  toggleTemplatesButton?.addEventListener('click', () => {
+  toggleTemplatesButton = DOM.get('toggle-templates-mobile') as HTMLButtonElement | null;
+  toggleTemplatesButtonHandler = () => {
     if (!isPhoneTemplatesLayout()) return;
     templatesCollapsedOnPhone = !templatesCollapsedOnPhone;
     renderTemplates();
-  });
+  };
+  toggleTemplatesButton?.addEventListener('click', toggleTemplatesButtonHandler);
 
   // Set up signal effects to sync with DOM
-  effect(() => {
+  templateManagerEffectCleanups.push(effect(() => {
     const amountEl = DOM.get('amount') as HTMLInputElement | null;
     if (amountEl && amountEl.value !== formAmount.value) {
       amountEl.value = formAmount.value;
     }
-  });
+  }));
 
-  effect(() => {
+  templateManagerEffectCleanups.push(effect(() => {
     const descEl = DOM.get('description') as HTMLInputElement | null;
     if (descEl && descEl.value !== formDescription.value) {
       descEl.value = formDescription.value;
     }
-  });
+  }));
 
-  effect(() => {
+  templateManagerEffectCleanups.push(effect(() => {
     const dateEl = DOM.get('date') as HTMLInputElement | null;
     if (dateEl && dateEl.value !== formDate.value) {
       dateEl.value = formDate.value;
     }
-  });
+  }));
 
-  effect(() => {
+  templateManagerEffectCleanups.push(effect(() => {
     const tagsEl = DOM.get('tags') as HTMLInputElement | null;
     if (tagsEl && tagsEl.value !== formTags.value) {
       tagsEl.value = formTags.value;
     }
-  });
+  }));
 
-  effect(() => {
+  templateManagerEffectCleanups.push(effect(() => {
     const notesEl = DOM.get('tx-notes') as HTMLTextAreaElement | null;
     if (notesEl && notesEl.value !== formNotes.value) {
       notesEl.value = formNotes.value;
     }
-  });
+  }));
 
-  effect(() => {
+  templateManagerEffectCleanups.push(effect(() => {
     const recurringSection = DOM.get('recurring-section');
     if (recurringSection) {
       recurringSection.classList.toggle('hidden', !formRecurring.value);
     }
-  });
+  }));
 
-  effect(() => {
+  templateManagerEffectCleanups.push(effect(() => {
     const detailsEl = DOM.get('transaction-details') as HTMLDetailsElement | null;
     if (!detailsEl) return;
 
     const shouldOpen = formRecurring.value || !!formTags.value || !!formNotes.value || signals.isEditing.value;
     detailsEl.open = shouldOpen;
-  });
+  }));
+}
+
+export function cleanupTemplateManager(): void {
+  templateManagerEffectCleanups.splice(0, templateManagerEffectCleanups.length).forEach((cleanup) => cleanup());
+  if (templatesMediaQuery && templatesMediaQueryHandler) {
+    templatesMediaQuery.removeEventListener('change', templatesMediaQueryHandler);
+  }
+  templatesMediaQueryHandler = null;
+  templatesMediaQuery = null;
+
+  if (toggleTemplatesButton && toggleTemplatesButtonHandler) {
+    toggleTemplatesButton.removeEventListener('click', toggleTemplatesButtonHandler);
+  }
+  toggleTemplatesButton = null;
+  toggleTemplatesButtonHandler = null;
+  templateManagerInitialized = false;
 }
 
 // ==========================================
@@ -483,6 +503,7 @@ export default {
   setTemplateRenderCategoriesFn,
   setTemplateSwitchTabFn,
   initTemplateManager,
+  cleanupTemplateManager,
   syncFormWithSignals,
   readFormIntoSignals,
   // Export form signals for external access

@@ -510,7 +510,7 @@ function populateBudgetVsActualSection(): void {
 
   const badge = DOM.get('budget-actual-badge');
   if (badge) {
-    badge.innerHTML = `<span class="time-badge">${currentMonth}</span>`;
+    render(html`<span class="time-badge">${currentMonth}</span>`, badge);
   }
 }
 

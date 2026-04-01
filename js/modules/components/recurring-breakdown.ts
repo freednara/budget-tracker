@@ -2,7 +2,7 @@
 
 import { computed, effect } from '@preact/signals-core';
 import * as signals from '../core/signals.js';
-import { html, render, unsafeHTML } from '../core/lit-helpers.js';
+import { html, render } from '../core/lit-helpers.js';
 import { fmtCur, toCents, toDollars } from '../core/utils.js';
 import { getMonthBadge } from '../core/utils-dom.js';
 import { isTrackedExpenseTransaction } from '../core/transaction-classification.js';
@@ -55,7 +55,7 @@ export function mountRecurringBreakdown(): () => void {
     const data = recurringBreakdownData.value;
 
     if (badgeEl) {
-      render(unsafeHTML(getMonthBadge(signals.currentMonth.value)), badgeEl);
+      render(html`<span class="time-badge">${getMonthBadge(signals.currentMonth.value)}</span>`, badgeEl);
     }
 
     if (data.total <= 0) {

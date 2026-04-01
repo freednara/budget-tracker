@@ -322,7 +322,7 @@ export interface SectionsConfig {
 // INSIGHT PERSONALITY
 // ==========================================
 
-export type InsightPersonality = 'serious' | 'casual' | 'motivating';
+export type InsightPersonality = 'serious' | 'friendly' | 'roast' | 'casual' | 'motivating';
 
 // ==========================================
 // MAIN TAB
@@ -929,6 +929,7 @@ export interface TimingConfig {
 export interface EmptyStateAction {
   id: string;
   label: string;
+  date?: string;
 }
 
 export type CurrencyFormatter = (value: number) => string;

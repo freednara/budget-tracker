@@ -77,8 +77,11 @@ describe('state action contract', () => {
   });
 
   it('dismisses alerts through the alert action contract', () => {
-    alerts.dismissAlert('Overspent food', '2026-03');
-    expect(Array.from(signals.dismissedAlerts.value)).toEqual(['2026-03:Overspent food']);
+    alerts.dismissAlert('2026-03:food:budget-threshold', '2026-03');
+    alerts.dismissAlert('🍔 Food: 80% spent', '2026-03');
+    expect(Array.from(signals.dismissedAlerts.value)).toEqual([
+      '2026-03:food:budget-threshold',
+      '2026-03:🍔 Food: 80% spent'
+    ]);
   });
 });
-

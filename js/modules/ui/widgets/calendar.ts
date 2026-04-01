@@ -17,6 +17,7 @@ import DOM from '../../core/dom-cache.js';
 import { html, render, repeat, classMap } from '../../core/lit-helpers.js';
 import { effect, computed } from '@preact/signals-core';
 import { getDefaultContainer, Services } from '../../core/di-container.js';
+import { emptyState } from '../core/empty-state.js';
 import type { Transaction } from '../../../types/index.js';
 
 // ==========================================
@@ -44,6 +45,20 @@ interface CalendarDayCell {
   isToday: boolean;
   isSelected: boolean;
   bills: BillInfo[];
+}
+
+export function getEmptyCalendarActionDate(monthKey: string, selectedDay: number | null): string {
+  if (selectedDay === null || !Number.isInteger(selectedDay) || selectedDay < 1) {
+    return `${monthKey}-01`;
+  }
+
+  const viewDate = parseMonthKey(monthKey);
+  const daysInMonth = new Date(viewDate.getFullYear(), viewDate.getMonth() + 1, 0).getDate();
+  if (selectedDay > daysInMonth) {
+    return `${monthKey}-01`;
+  }
+
+  return `${monthKey}-${String(selectedDay).padStart(2, '0')}`;
 }
 
 // ==========================================
@@ -143,7 +158,7 @@ export function mountCalendar(): () => void {
 
   const monthCleanup = effect(() => {
     const { mk, txs, bills, isEmpty } = monthData.value;
-    const selectedDay = signals.selectedCalendarDay.peek();
+    const selectedDay = signals.selectedCalendarDay.value;
 
     if (badgeContainer) {
       const [y, m] = mk.split('-');
@@ -152,12 +167,18 @@ export function mountCalendar(): () => void {
     }
 
     if (isEmpty) {
-      render(html`<div class="p-4 rounded-lg text-center text-xs" style="background: var(--bg-input); color: var(--text-tertiary);">No calendar activity for this month yet.</div>`, container);
+      const defaultDate = getEmptyCalendarActionDate(mk, selectedDay);
+      render(emptyState(
+        '↻',
+        'No calendar activity yet',
+        'Add transactions or recurring bills to plan the month day by day.',
+        { id: 'add-transaction-for-date', label: 'Add Transaction', date: defaultDate }
+      ), container);
       if (detailContainer) {
         render(html`
           <div class="calendar-detail-empty">
-            <p class="calendar-detail-empty__title">No calendar activity yet</p>
-            <p class="calendar-detail-empty__body">Add transactions or recurring bills to plan the month day by day.</p>
+            <p class="calendar-detail-empty__title">No day details yet</p>
+            <p class="calendar-detail-empty__body">Add your first transaction or recurring bill to unlock the day-by-day detail panel for this month.</p>
           </div>
         `, detailContainer);
       }
@@ -217,7 +238,7 @@ function updateCalendarSelection(container: HTMLElement, selectedDay: number | n
     const day = Number(cell.dataset.day || 0);
     const isSelected = selectedDay !== null && day === selectedDay;
     cell.classList.toggle('cal-selected', isSelected);
-    cell.tabIndex = isSelected ? 0 : -1;
+    cell.tabIndex = selectedDay === null ? 0 : (isSelected ? 0 : -1);
   });
 }
 
@@ -276,12 +297,22 @@ function renderCalendarGrid(container: HTMLElement, mk: string, txs: Transaction
     const bg = cell.spend > 0
       ? `color-mix(in srgb, var(--color-expense) ${Math.round(intensity * 70 + 10)}%, transparent)`
       : (cell.income > 0 ? 'color-mix(in srgb, var(--color-income) 12%, transparent)' : 'transparent');
+    const ariaLabelParts = [
+      `Day ${cell.day}`,
+      cell.spend > 0 ? `${fmtShort(cell.spend)} spent` : '',
+      cell.income > 0 ? `${fmtShort(cell.income)} income` : '',
+      cell.bills.length > 0 ? `${cell.bills.length} bill${cell.bills.length === 1 ? '' : 's'}` : ''
+    ].filter(Boolean);
 
     return html`
-      <div class=${classMap({ 'cal-day': true, 'cal-today': cell.isToday, 'cal-selected': cell.isSelected })}
+      <button
+            type="button"
+            class=${classMap({ 'cal-day': true, 'cal-today': cell.isToday, 'cal-selected': cell.isSelected })}
             data-day="${cell.day}"
             style="background: ${bg}"
-            tabindex="${cell.isSelected ? '0' : '-1'}"
+            aria-label=${ariaLabelParts.join(', ')}
+            aria-current=${cell.isToday ? 'date' : 'false'}
+            aria-pressed=${cell.isSelected ? 'true' : 'false'}
             @click=${() => selectDay(cell.day)}>
         <span class="cal-day-num">${cell.day}</span>
 
@@ -294,7 +325,7 @@ function renderCalendarGrid(container: HTMLElement, mk: string, txs: Transaction
 
         ${cell.spend > 0 ? html`<span class="cal-day-amt text-expense">${fmtShort(cell.spend)}</span>` : ''}
         ${cell.income > 0 && cell.spend === 0 ? html`<span class="cal-day-amt text-income">+${fmtShort(cell.income)}</span>` : ''}
-      </div>
+      </button>
     `;
   };
 
@@ -385,7 +416,7 @@ function renderSummaryStrip(
       <p class="calendar-summary-card__value">${upcomingBills.length}</p>
       <p class="calendar-summary-card__meta">
         ${nextUpcomingBill
-          ? `Next due: ${nextUpcomingBill.description || nextUpcomingBill.categoryName} on ${new Date(nextUpcomingBill.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+          ? `Next due: ${nextUpcomingBill.description || nextUpcomingBill.categoryName} on ${parseLocalDate(nextUpcomingBill.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
           : 'No unpaid recurring bills left in this month.'}
       </p>
     </div>

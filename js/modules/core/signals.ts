@@ -945,7 +945,7 @@ export const splitStatus: ReadonlySignal<SplitStatus> = computed(() => {
  * Current budget alerts for the active month
  * Memoized: skips recomputation when inputs haven't materially changed
  */
-let _prevAlertInputs: { mk: string; allocKeys: string; expJson: string; threshold: number | null; dismissedSize: number } | null = null;
+let _prevAlertInputs: { mk: string; allocSignature: string; expJson: string; threshold: number | null; dismissedSignature: string } | null = null;
 let _prevAlertResult: string[] = [];
 let _prevAlertEntries: Array<{ key: string; text: string; categoryId: string; percentSpent: number }> = [];
 
@@ -958,15 +958,24 @@ export const activeAlertEntries: ReadonlySignal<Array<{ key: string; text: strin
 
   if (alertSettings.budgetThreshold === null) return [];
 
-  const allocKeys = Object.keys(alloc).join(',');
+  const allocSignature = Object.entries(alloc)
+    .sort(([leftCategoryId], [rightCategoryId]) => leftCategoryId.localeCompare(rightCategoryId))
+    .map(([categoryId, amount]) => `${categoryId}:${amount}`)
+    .join('|');
   const expJson = JSON.stringify(expByCat);
-  const inputs = { mk, allocKeys, expJson, threshold: alertSettings.budgetThreshold, dismissedSize: dismissed.size };
+  const inputs = {
+    mk,
+    allocSignature,
+    expJson,
+    threshold: alertSettings.budgetThreshold,
+    dismissedSignature: Array.from(dismissed).sort().join('|')
+  };
   if (_prevAlertInputs &&
       _prevAlertInputs.mk === inputs.mk &&
-      _prevAlertInputs.allocKeys === inputs.allocKeys &&
+      _prevAlertInputs.allocSignature === inputs.allocSignature &&
       _prevAlertInputs.expJson === inputs.expJson &&
       _prevAlertInputs.threshold === inputs.threshold &&
-      _prevAlertInputs.dismissedSize === inputs.dismissedSize) {
+      _prevAlertInputs.dismissedSignature === inputs.dismissedSignature) {
     return _prevAlertEntries;
   }
 
@@ -980,10 +989,12 @@ export const activeAlertEntries: ReadonlySignal<Array<{ key: string; text: strin
       const cat = getCatInfo('expense', catId);
       const percentSpent = Math.round(spent / amt * 100);
       const alertText = `${cat.emoji} ${cat.name}: ${percentSpent}% spent`;
+      const alertKey = `${mk}:${catId}:budget-threshold`;
+      const legacyAlertKey = `${mk}:${alertText}`;
 
-      if (!dismissed.has(`${mk}:${alertText}`)) {
+      if (!dismissed.has(alertKey) && !dismissed.has(legacyAlertKey)) {
         foundAlerts.push({
-          key: `${mk}:${catId}:budget-threshold`,
+          key: alertKey,
           text: alertText,
           categoryId: catId,
           percentSpent

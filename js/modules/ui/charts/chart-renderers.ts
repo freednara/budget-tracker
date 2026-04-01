@@ -269,7 +269,7 @@ export function renderDonutChart(containerId: string, data: DonutChartData[], tr
   
   const noDataTemplate = html`
     <p class="text-xs text-center py-8" style="color: var(--text-tertiary);">
-      No expense data yet
+      Add expense activity to show category pressure.
     </p>
   `;
   

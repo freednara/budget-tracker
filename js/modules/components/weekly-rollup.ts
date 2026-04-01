@@ -10,7 +10,7 @@
 
 import { effect, computed } from '@preact/signals-core';
 import * as signals from '../core/signals.js';
-import { html, render, unsafeHTML } from '../core/lit-helpers.js';
+import { html, render, unsafeSVG } from '../core/lit-helpers.js';
 import { 
   generateWeeklyData, 
   getMonthBadge, 
@@ -27,10 +27,8 @@ import DOM from '../core/dom-cache.js';
  * Computed weekly rollup data that auto-updates
  */
 const weeklyRollupData = computed(() => {
-  // Track via month + totals (not full array reference which causes cascade on every signal batch)
-  const _currentMonth = signals.currentMonth.value;
-  const _txLen = signals.transactions.value.length;
-  const _txHash = signals.currentMonthTotals.value.expenses;
+  const currentMonth = signals.currentMonth.value;
+  void signals.transactionsByMonth.value.get(currentMonth);
 
   return generateWeeklyData();
 });
@@ -53,7 +51,7 @@ function renderWeeklyChart(el: WeeklyRollupElement, weeks: WeekData[]): void {
   }
 
   if (weeks.length === 0) {
-    el.innerHTML = '<div class="text-center py-4" style="color: var(--text-tertiary);">No data for this month</div>';
+    render(html`<div class="text-center py-4" style="color: var(--text-tertiary);">No data for this month</div>`, el);
     return;
   }
 
@@ -64,7 +62,7 @@ function renderWeeklyChart(el: WeeklyRollupElement, weeks: WeekData[]): void {
   }, null as WeekData | null);
   const average = weeks.reduce((sum: number, week: WeekData) => sum + week.total, 0) / weeks.length;
 
-  el.innerHTML = `
+  render(html`
     <div class="budget-stat-grid">
       <div class="budget-stat-card">
         <p class="text-xs font-bold text-secondary mb-2">BIGGEST WEEK</p>
@@ -78,9 +76,9 @@ function renderWeeklyChart(el: WeeklyRollupElement, weeks: WeekData[]): void {
       </div>
     </div>
     <div class="budget-meter">
-      ${svg}
+      ${unsafeSVG(svg)}
     </div>
-  `;
+  `, el);
 
   // Set up interactive tooltips and filters, store cleanup
   interactivityCleanup = setupInteractivity(el) || null;
@@ -117,6 +115,9 @@ function generateWeeklySVG(weeks: WeekData[]): { svg: string; setupInteractivity
     
     const weekColor = week.total > maxSpend * 0.8 ? 'var(--color-expense)' :
                       week.total > maxSpend * 0.6 ? 'var(--color-warning)' : 'var(--color-income)';
+    const totalLabel = week.total.toFixed(2);
+    const txCountLabel = `${week.txCount} transaction${week.txCount === 1 ? '' : 's'}`;
+    const ariaLabel = `Filter to week ${i + 1}, ${txCountLabel}, total $${totalLabel}`;
     
     svg += `<rect x="${x}" y="${y}" width="${barWidth}" height="${barH}" fill="${weekColor}" rx="2"/>`;
     
@@ -130,18 +131,21 @@ function generateWeeklySVG(weeks: WeekData[]): { svg: string; setupInteractivity
             data-start="${week.start}" 
             data-end="${week.end}" 
             data-total="${week.total}" 
-            data-count="${week.txCount}"/>`;
+            data-count="${week.txCount}"
+            role="button"
+            tabindex="0"
+            focusable="true"
+            aria-label="${ariaLabel}"/>`;
   });
   
   svg += `</svg>`;
   
   // Setup interactivity function - returns cleanup function to remove listeners
   const setupInteractivity = (element: HTMLElement): (() => void) => {
-    const listeners: Array<{ el: Element; handler: (e: Event) => void }> = [];
+    const listeners: Array<{ el: Element; type: string; handler: (e: Event) => void }> = [];
 
     element.querySelectorAll('.wr-hover').forEach(rect => {
-      const handler = (e: Event) => {
-        const target = e.target as HTMLElement;
+      const dispatchWeeklyFilter = (target: HTMLElement): void => {
         const week = target.getAttribute('data-week');
         const start = target.getAttribute('data-start');
         const end = target.getAttribute('data-end');
@@ -152,12 +156,26 @@ function generateWeeklySVG(weeks: WeekData[]): { svg: string; setupInteractivity
         });
         document.dispatchEvent(event);
       };
-      rect.addEventListener('click', handler);
-      listeners.push({ el: rect, handler });
+
+      const clickHandler = (event: Event): void => {
+        dispatchWeeklyFilter(event.currentTarget as HTMLElement);
+      };
+
+      const keydownHandler = (event: Event): void => {
+        const keyboardEvent = event as KeyboardEvent;
+        if (keyboardEvent.key !== 'Enter' && keyboardEvent.key !== ' ') return;
+        keyboardEvent.preventDefault();
+        dispatchWeeklyFilter(keyboardEvent.currentTarget as HTMLElement);
+      };
+
+      rect.addEventListener('click', clickHandler);
+      rect.addEventListener('keydown', keydownHandler);
+      listeners.push({ el: rect, type: 'click', handler: clickHandler });
+      listeners.push({ el: rect, type: 'keydown', handler: keydownHandler });
     });
 
     return () => {
-      listeners.forEach(({ el, handler }) => el.removeEventListener('click', handler));
+      listeners.forEach(({ el, type, handler }) => el.removeEventListener(type, handler));
     };
   };
   
@@ -200,7 +218,7 @@ export function mountWeeklyRollup(): () => void {
     badgeCleanup = effect(() => {
       const data = weeklyRollupData.value;
       if (data.hasData) {
-        render(unsafeHTML(getMonthBadge(signals.currentMonth.value)), badgeEl);
+        render(html`<span class="time-badge">${getMonthBadge(signals.currentMonth.value)}</span>`, badgeEl);
       }
     });
   }

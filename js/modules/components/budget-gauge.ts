@@ -12,10 +12,10 @@
 import { effect, computed } from '@preact/signals-core';
 import * as signals from '../core/signals.js';
 import { html, svg, render } from '../core/lit-helpers.js';
-import { fmtCur, toCents, toDollars } from '../core/utils.js';
-import { calculateMonthRollovers } from '../features/financial/rollover.js';
+import { fmtCur } from '../core/utils.js';
+import { calculateEffectiveMonthBudgetTotal } from '../core/effective-budget.js';
 import DOM from '../core/dom-cache.js';
-import { describeArc } from '../orchestration/dashboard-svg-helpers.js';
+import { describeArc } from '../core/dashboard-svg-helpers.js';
 
 // ==========================================
 // COMPUTED SIGNALS
@@ -37,26 +37,18 @@ interface GaugeData {
 }
 
 const gaugeData = computed((): GaugeData => {
-  // Use effective budget (allocation + rollover) via single calculateMonthRollovers call
   const mk = signals.currentMonth.value;
-  const alloc = signals.monthlyAlloc.value[mk] || {};
-  const rolloverEnabled = signals.rolloverSettings.value.enabled;
-  const rollovers = rolloverEnabled ? calculateMonthRollovers(mk) : {};
-  let totalBudgetCents = 0;
-  for (const [catId, amt] of Object.entries(alloc)) {
-    totalBudgetCents += toCents(amt) + (rolloverEnabled ? toCents(rollovers[catId] || 0) : 0);
-  }
-  const totalBudget = toDollars(totalBudgetCents);
+  const totalBudget = calculateEffectiveMonthBudgetTotal(mk);
   const totalExpenses = signals.currentMonthTotals.value.expenses;
 
   if (totalBudget === 0) {
     return {
       hasBudget: false,
-      shouldShow: false,
+      shouldShow: true,
       usedPercent: 0,
       displayPercent: 0,
-      gaugeColor: 'var(--color-income)',
-      statusText: 'No Budget',
+      gaugeColor: 'var(--color-accent)',
+      statusText: 'New',
       totalExpenses: 0,
       totalBudget: 0,
       note: 'Set category budgets to start tracking pressure against plan.'
@@ -83,7 +75,7 @@ const gaugeData = computed((): GaugeData => {
 
   return {
     hasBudget: true,
-    shouldShow: totalExpenses > 0,
+    shouldShow: true,
     usedPercent,
     displayPercent,
     gaugeColor,
@@ -125,11 +117,24 @@ export function mountBudgetGauge(): () => void {
     const data = gaugeData.value;
 
     // Toggle section visibility based on budget existence
-    if (!data.hasBudget || !data.shouldShow) {
+    if (!data.shouldShow) {
       section.classList.add('hidden');
       return;
     }
     section.classList.remove('hidden');
+
+    if (!data.hasBudget) {
+      render(html`
+        <div class="budget-health-empty">
+          <div class="budget-health-empty__summary">
+            <span class="budget-health-status" style=${`--budget-health-tone: ${data.gaugeColor};`}>${data.statusText}</span>
+            <p class="budget-health-amount">No budget set yet</p>
+            <p class="budget-health-note">${data.note}</p>
+          </div>
+        </div>
+      `, container);
+      return;
+    }
 
     // Calculate fill arc
     const fillAngle = startAngle - (startAngle - endAngle) * (data.displayPercent / 100);

@@ -120,6 +120,8 @@ function setupKeyboardShortcuts(): void {
         if (active) {
           if (active.id === 'settings-modal') {
             DOM.get('cancel-settings')?.click();
+          } else if (active.id === 'sync-conflict-modal') {
+            DOM.get('sync-keep-local')?.click();
           } else {
             closeModal(active.id);
           }
