@@ -105,9 +105,9 @@ describe('lsGet / lsSet', () => {
 
 describe('Storage keys', () => {
   it('uses consistent key names', () => {
-    expect(SK.TX).toContain('budget_tracker');
-    expect(SK.SAVINGS).toContain('budget_tracker');
-    expect(SK.ALLOC).toContain('budget_tracker');
+    expect(SK.TX).toContain('harbor');
+    expect(SK.SAVINGS).toContain('harbor');
+    expect(SK.ALLOC).toContain('harbor');
   });
 
   it('has unique keys', () => {
@@ -215,8 +215,8 @@ describe('Transaction structure', () => {
 
     const retrieved = lsGet(SK.TX, []) as Array<{ amount: number; __backendId: string }>;
     expect(retrieved.length).toBe(1);
-    expect(retrieved[0].amount).toBe(100);
-    expect(retrieved[0].__backendId).toBe(tx.__backendId);
+    expect(retrieved[0]?.amount).toBe(100);
+    expect(retrieved[0]?.__backendId).toBe(tx.__backendId);
   });
 });
 
@@ -238,8 +238,8 @@ describe('Budget allocation structure', () => {
     lsSet(SK.ALLOC, alloc);
     const retrieved = lsGet(SK.ALLOC, {}) as Record<string, Record<string, number>>;
 
-    expect(retrieved['2024-06'].food).toBe(500);
-    expect(retrieved['2024-07'].food).toBe(550);
+    expect(retrieved['2024-06']?.food).toBe(500);
+    expect(retrieved['2024-07']?.food).toBe(550);
   });
 
   it('handles empty allocations', () => {
@@ -277,8 +277,8 @@ describe('Savings goals structure', () => {
     const retrieved = lsGet(SK.SAVINGS, {}) as Record<string, { name: string; target_amount: number; saved_amount: number; deadline: string }>;
 
     expect(Object.keys(retrieved).length).toBe(2);
-    expect(retrieved['sg_1'].name).toBe('Emergency Fund');
-    expect(retrieved['sg_1'].saved_amount).toBe(2500);
+    expect(retrieved['sg_1']?.name).toBe('Emergency Fund');
+    expect(retrieved['sg_1']?.saved_amount).toBe(2500);
   });
 
   it('calculates progress percentage correctly', () => {

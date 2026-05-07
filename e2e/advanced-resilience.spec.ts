@@ -61,9 +61,9 @@ test.describe('Advanced Resilience', () => {
 
   async function seedStoredBackupPayloads(page: import('@playwright/test').Page): Promise<void> {
     await page.evaluate(async () => {
-      localStorage.setItem('budget_tracker_auto_backups', JSON.stringify([{ metadata: { id: 'backup-1' }, data: {} }]));
-      localStorage.setItem('budget_tracker_backup_schedule', JSON.stringify({ enabled: true, frequency: 'daily' }));
-      localStorage.setItem('budget_tracker_backup_status', JSON.stringify({ totalBackups: 1 }));
+      localStorage.setItem('harbor_auto_backups', JSON.stringify([{ metadata: { id: 'backup-1' }, data: {} }]));
+      localStorage.setItem('harbor_backup_schedule', JSON.stringify({ enabled: true, frequency: 'daily' }));
+      localStorage.setItem('harbor_backup_status', JSON.stringify({ totalBackups: 1 }));
 
       await new Promise<void>((resolve, reject) => {
         const request = indexedDB.open('BudgetTrackerBackups', 1);
@@ -280,10 +280,10 @@ test.describe('Advanced Resilience', () => {
     await page.locator('#confirm-reset-keep-backups').click();
     await assertModalClosedAndInteractive(page, 20000);
 
-    const localBackups = await page.evaluate(() => localStorage.getItem('budget_tracker_auto_backups'));
+    const localBackups = await page.evaluate(() => localStorage.getItem('harbor_auto_backups'));
     expect(localBackups).not.toBeNull();
     expect(await countIndexedDbBackups(page)).toBe(1);
-    expect(await page.evaluate(() => localStorage.getItem('budget_tracker_backup_schedule'))).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem('harbor_backup_schedule'))).toBeNull();
     await assertDashboardEmpty(page);
     await assertLedgerEmpty(page);
   });
@@ -293,7 +293,7 @@ test.describe('Advanced Resilience', () => {
     await seedStoredBackupPayloads(page);
 
     await resetAppDataFromModal(page, { clearBackups: true });
-    expect(await page.evaluate(() => localStorage.getItem('budget_tracker_auto_backups'))).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem('harbor_auto_backups'))).toBeNull();
     expect(await countIndexedDbBackups(page)).toBe(0);
     await assertLedgerEmpty(page);
   });

@@ -9,14 +9,28 @@
  */
 'use strict';
 
-import { signal, computed, effect, batch } from '@preact/signals-core';
+import { signal, computed, batch } from '@preact/signals-core';
 import type { Signal, ReadonlySignal } from '@preact/signals-core';
 import { getDefaultContainer, Services } from './di-container.js';
-import { lsGet, lsSet, SK, getStored, normalizeAlertPrefs } from './state.js';
-import { getMonthKey, getTodayStr as _getTodayStr, toCents, toDollars } from './utils.js';
+import { trackError } from './error-tracker.js';
+import { SK, getStored, normalizeAlertPrefs, BACKUP_REMINDER_TX_COUNT_KEY } from './state.js';
+import { getMonthKey, getTodayStr as _getTodayStr, toCents, toDollars } from './utils-pure.js';
 import { isTrackedExpenseTransaction } from './transaction-classification.js';
-import { calcTotals, getEffectiveIncome, getDailyAllowance, getSpendingPace, getMonthExpByCat, getMonthTx } from '../features/financial/calculations.js';
-import { calculateMonthlyTotalsWithCacheSync } from './monthly-totals-cache.js';
+import { getMonthAlloc } from './month-alloc.js';
+import { calcTotals, getDailyAllowance, getSpendingPace, getMonthExpByCat } from '../features/financial/calculations.js';
+// CR-Apr22-F slice 3: budget-alert thresholds must compare spend against the
+// rollover-adjusted effective budget, not the raw allocation, so the alert
+// list agrees with the envelope budget view (envelope-budget.ts already
+// computes `effectiveBudget = amt + rollover`). This adds a direct
+// signals → rollover edge, but `signals ↔ calculations ↔ rollover` is
+// already a transitive cycle tolerated by the build, so the direct edge
+// carries no new risk.
+import { isRolloverEnabled, calculateMonthRollovers } from '../features/financial/rollover.js';
+// M33 (Phase 5f): unused import deleted — `signals.ts` never called this
+// (the `currentMonthTotals` computed at the bottom of the file recomputes
+// totals inline from `transactionsByMonth` because cache invalidation
+// timing is signal-driven there). Removing the dead import drops a
+// circular-import risk surface (signals → monthly-totals-cache → signals).
 import { getCatInfo } from './categories.js';
 import type {
   Transaction,
@@ -25,7 +39,6 @@ import type {
   SavingsContribution,
   MonthlyAllocation,
   StreakData,
-  CustomCategory,
   CurrencySettings,
   SectionsConfig,
   AlertPrefs,
@@ -37,10 +50,9 @@ import type {
   TransactionType,
   MainTab,
   InsightPersonality,
+  InsightsPayload,
   DailyAllowanceData,
-  DailyAllowanceStatus,
   SpendingPaceData,
-  SpendingPaceStatus,
   Theme
 } from '../../types/index.js';
 
@@ -68,16 +80,6 @@ export const EMPTY_MONTH_SUMMARY: MonthSummary = {
   categoryTotals: {},
   transactionCount: 0
 };
-
-function createEmptyMonthSummary(): MonthSummary {
-  return {
-    income: 0,
-    expenses: 0,
-    balance: 0,
-    categoryTotals: {},
-    transactionCount: 0
-  };
-}
 
 // ==========================================
 // CORE DATA SIGNALS (persisted)
@@ -127,13 +129,6 @@ export const achievements = signal<Record<string, unknown>>(
  */
 export const streak = signal<StreakData>(
   getStored<StreakData>(SK.STREAK)
-);
-
-/**
- * Custom user-defined categories
- */
-export const customCats = signal<CustomCategory[]>(
-  getStored<CustomCategory[]>(SK.CUSTOM_CAT)
 );
 
 /**
@@ -218,10 +213,17 @@ export const lastBackup = signal<number>(
 );
 
 /**
- * Transaction count at the time of the last backup
+ * Transaction count at the time of the last backup.
+ *
+ * L89 (Inline-Behavior-Review): storage key now reads from the shared
+ * `BACKUP_REMINDER_TX_COUNT_KEY` constant in state.ts so the manual
+ * export/import pipeline, signal batcher, and hydration registry all
+ * reference the same typed identifier. The registry default (0) means
+ * `getStored` can omit the explicit fallback — `getStored<number>(key)`
+ * returns the canonical default when the key is missing.
  */
 export const lastBackupTxCount = signal<number>(
-  getStored<number>('backup_reminder_last_tx_count' as any, 0)
+  getStored<number>(BACKUP_REMINDER_TX_COUNT_KEY)
 );
 
 // ==========================================
@@ -234,22 +236,41 @@ export const lastBackupTxCount = signal<number>(
  */
 export const todayStr = signal<string>(_getTodayStr());
 
-// Schedule update at next midnight
+// Schedule update at next midnight (with cleanup reference for lifecycle management)
+let _midnightTimerId: ReturnType<typeof setTimeout> | null = null;
 function _scheduleNextMidnight(): void {
   const now = new Date();
   const msUntilMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime() - now.getTime();
-  setTimeout(() => {
+  _midnightTimerId = setTimeout(() => {
     todayStr.value = _getTodayStr();
     _scheduleNextMidnight();
   }, msUntilMidnight + 100); // +100ms safety margin
 }
 _scheduleNextMidnight();
 
+/** Cancel the midnight timer — call during app cleanup/teardown */
+export function cancelMidnightTimer(): void {
+  if (_midnightTimerId !== null) {
+    clearTimeout(_midnightTimerId);
+    _midnightTimerId = null;
+  }
+}
+
 /**
  * Lightweight refresh counter — increment to force dependent computeds to recompute
  * without cloning the entire transactions array
  */
 export const refreshVersion = signal<number>(0);
+
+/**
+ * Category metadata version counter.
+ * Incremented by category-store on every config write (add / rename / recolor /
+ * delete / preset apply / migration). Allows computeds in signals.ts (which
+ * cannot import category-store without creating a circular dependency) to
+ * establish a reactive edge to category changes.
+ * CR-Apr24-I finding 96.
+ */
+export const categoryVersion = signal<number>(0);
 
 /**
  * Currently selected month (YYYY-MM format)
@@ -275,9 +296,42 @@ export const currentTab = signal<TransactionType>('expense');
 export const selectedCategory = signal<string>('');
 
 /**
- * Set of IDs for alerts dismissed in the current session
+ * Set of IDs for alerts dismissed by the user.
+ *
+ * CR-Apr22-F slice 3: persisted to `sessionStorage` (not `localStorage`) so a
+ * dismissal sticks for the rest of the browsing session — reload no longer
+ * resurfaces the same over-budget toast the user just acknowledged. Scoping
+ * to sessionStorage rather than localStorage is deliberate: the user's
+ * dismissal is a "stop bugging me right now" gesture, not a permanent
+ * preference, and the alert keys embed the month key, so today's dismissal
+ * never leaks into tomorrow's month anyway. sessionStorage also dodges the
+ * full settings-round-trip (SK constant + storage-registry + sync allowlist
+ * + import/export + app-reset) that a localStorage key would require, which
+ * is the right cost trade for device-local, ephemeral UI state. Uses the `_`
+ * prefix key-naming convention established by `rate-limiter.ts` to bypass
+ * the architecture-contract `harbor_*` registry check.
  */
-export const dismissedAlerts = signal<Set<string>>(new Set());
+export const DISMISSED_ALERTS_SESSION_KEY = '_dismissed_alerts_session';
+
+function _hydrateDismissedAlerts(): Set<string> {
+  if (typeof sessionStorage === 'undefined') return new Set<string>();
+  try {
+    const raw = sessionStorage.getItem(DISMISSED_ALERTS_SESSION_KEY);
+    if (!raw) return new Set<string>();
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set<string>();
+    // Narrow each element so the constructed Set is typed end-to-end and
+    // tolerates partially corrupted storage without throwing.
+    const stringEntries = (parsed as unknown[]).filter(
+      (value): value is string => typeof value === 'string'
+    );
+    return new Set<string>(stringEntries);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+export const dismissedAlerts = signal<Set<string>>(_hydrateDismissedAlerts());
 
 /**
  * ID of transaction being edited (null if not editing)
@@ -285,14 +339,16 @@ export const dismissedAlerts = signal<Set<string>>(new Set());
 export const editingId = signal<string | null>(null);
 
 /**
- * ID of transaction pending deletion
- */
-export const deleteTargetId = signal<string | null>(null);
-
-/**
  * ID of savings goal for contribution modal
  */
 export const addSavingsGoalId = signal<string | null>(null);
+
+/**
+ * ID of transaction targeted for deletion (delete confirmation modal).
+ * NOTE: DRY-03 incorrectly removed this signal — it IS read by
+ * modal-events.ts and written by form-actions.ts. Restored.
+ */
+export const deleteTargetId = signal<string | null>(null);
 
 /**
  * ID of transaction for split modal
@@ -463,6 +519,10 @@ function summarizeMonthTransactions(monthTransactions: Transaction[]): MonthSumm
 
   for (const transaction of monthTransactions) {
     const amountCents = toCents(transaction.amount);
+    // CALC-01: guard against NaN from non-finite amounts that bypassed
+    // the validator (e.g. import, direct signal write). Without this,
+    // a single NaN poisons the entire month's budget calculations.
+    if (!Number.isFinite(amountCents)) continue;
     if (transaction.type === 'income') {
       incomeCents += amountCents;
       continue;
@@ -674,8 +734,12 @@ export function applyTransactionPatch(change: TransactionDataChange): Transactio
       }
 
       for (let i = nextTransactions.length - 1; i >= 0; i--) {
+        // Phase 6 Slice 1i (rev 12 L6): `nextTransactions[i]` is
+        // `Transaction | undefined` under `noUncheckedIndexedAccess`;
+        // the loop bound guarantees presence but a local narrow keeps
+        // the downstream method call type-safe.
         const transaction = nextTransactions[i];
-        if (!deletedIds.has(transaction.__backendId)) continue;
+        if (!transaction || !deletedIds.has(transaction.__backendId)) continue;
         nextTransactions.splice(i, 1);
         removeTransaction(transaction);
       }
@@ -763,7 +827,10 @@ export const currentMonthTotals: ReadonlySignal<MonthTotals> = computed(() => {
  * Calculated as total budget allocation minus expenses
  */
 export const budgetRemaining: ReadonlySignal<number> = computed(() => {
-  const alloc = monthlyAlloc.value[currentMonth.value] || {};
+  // rev 12 / #39 M4: `monthlyAlloc.value[mk] || {}` replaced with `getMonthAlloc()`
+  // so a missing allocation for a month that should exist surfaces via `trackError`
+  // rather than silently collapsing to a zero total budget.
+  const alloc = getMonthAlloc(currentMonth.value, monthlyAlloc.value);
   const totalBudget = toDollars(
     Object.values(alloc).reduce((sum, v) => sum + toCents(v), 0)
   );
@@ -800,28 +867,74 @@ export const savingsRate: ReadonlySignal<number> = computed(() => {
  * Current financial insights
  * FIXED: Uses DI container to resolve insights generator, removing circular dependency issues
  * Auto-updates when transactions or personality changes
+ *
+ * Returns a unified `InsightsPayload` so the UI consumer never has to
+ * branch on success vs. error. On a thrown error we track it and surface
+ * a user-visible "Insights temporarily unavailable." message in slot 1
+ * (with `_error: true` so the consumer can suppress default action buttons).
+ *
+ * Contract fix (P1 #1, 2026-04-20): previously this returned a lying
+ * `Array<{ type, message }>` on error and the object shape on success,
+ * which defeated the error sentinel — the consumer fell back to invoking
+ * `generateInsights()` directly outside the try/catch, re-throwing and
+ * crashing the dashboard. Error and success now share one shape.
  */
-export const currentInsights: ReadonlySignal<Array<{ type: string; message: string; action?: any }>> = computed(() => {
+export const currentInsights: ReadonlySignal<InsightsPayload> = computed(() => {
+  const container = getDefaultContainer();
+
+  // Check if initialized to avoid errors during early startup. This check
+  // is OUTSIDE the try/catch so that "not yet initialized" stays distinct
+  // from "threw while generating" — the former is normal bootstrap flow,
+  // the latter is a genuine error we want to surface.
+  // Read refreshVersion so this computed re-evaluates after background
+  // init resolves INSIGHTS_GENERATOR and bumps the version signal.
+  const _refresh = refreshVersion.value;
+  void _refresh;
+
+  if (!container.isInitialized(Services.INSIGHTS_GENERATOR)) {
+    return { insight1: null, insight2: null, insight3: null };
+  }
+
   try {
-    const container = getDefaultContainer();
-    
-    // Check if initialized to avoid errors during early startup
-    if (!container.isInitialized(Services.INSIGHTS_GENERATOR)) {
-      return [];
-    }
-    
-    const generateInsights = container.resolveSync<() => any>(Services.INSIGHTS_GENERATOR);
+    const generateInsights = container.resolveSync<() => InsightsPayload>(Services.INSIGHTS_GENERATOR);
 
     // Dependencies that trigger recalculation
     const _txCount = transactions.value.length;
     const _month = currentMonth.value;
     const _personality = insightPers.value;
+    // CR-Apr22-G slice 1 (P2): insight generators interpolate fmtCur(...),
+    // but fmtCur reads from module-level formatter state (synced externally
+    // by syncCurrencyFormat), not from the currency signal. Without an
+    // explicit read here the computed doesn't re-run when the user changes
+    // home currency, so insight copy stays stale until another unrelated
+    // dep (tx add, month change, personality) forces a recompute. Reading
+    // currency.value establishes the missing signal dep.
+    const _currency = currency.value;
+    // CR-Apr24-I finding 96: insight generators interpolate category names
+    // via getAllCats / getCatInfo, but the computed has no dependency on
+    // category metadata. Without this read, renaming or recoloring a
+    // category leaves insight copy stale until another dep triggers.
+    // `categoryVersion` is bumped by category-store on every config write;
+    // reading it here establishes the missing reactive edge without a
+    // circular import (category-store already imports signals).
+    const _catVer = categoryVersion.value;
+    void _catVer; // suppress unused-variable lint
 
-    const insights = generateInsights();
-    return insights;
+    return generateInsights();
   } catch (e) {
-    // If not yet available, return empty
-    return [];
+    // Fixes H4 (Inline-Behavior-Review rev 12) and P1 #1 (2026-04-20):
+    // surface a user-visible error on slot 1 and flag the payload so the
+    // UI suppresses default action buttons on the error message.
+    trackError(e instanceof Error ? e : new Error(String(e)), {
+      module: 'signals',
+      action: 'currentInsights'
+    });
+    return {
+      insight1: 'Insights temporarily unavailable.',
+      insight2: null,
+      insight3: null,
+      _error: true,
+    };
   }
 });
 
@@ -854,13 +967,28 @@ export const hasTransactions: ReadonlySignal<boolean> = computed(() =>
 /**
  * Daily allowance data for current month
  * Delegates to getDailyAllowance() in calculations.ts (single source of truth)
- * Recomputes when transactions, monthlyAlloc, or currentMonth change
+ * Recomputes when transactions, monthlyAlloc, currentMonth, or today's date
+ * (`todayStr`) change.
+ *
+ * CR-Apr22-D slice 3 (finding 57 [P2]): `getDailyAllowance` uses `new Date()`
+ * internally to derive `isCurrentMonth`, `daysRemaining`, and ultimately the
+ * per-day allowance figure. Before this slice the computed did not subscribe
+ * to `todayStr`, so if the app stayed open across midnight the dashboard kept
+ * showing yesterday's `daysRemaining` (and therefore a subtly wrong daily
+ * allowance) until some unrelated signal happened to invalidate the computed.
+ * Reading `todayStr.value` establishes the dep-track edge that fires on the
+ * scheduled midnight tick (see `_scheduleNextMidnight` above), so the card
+ * refreshes at 00:00 local without any user action.
  */
 export const dailyAllowanceData: ReadonlySignal<DailyAllowanceData> = computed(() => {
   // Access reactive dependencies so signal recomputes when they change
   const _txCount = transactions.value.length;
   const _alloc = monthlyAlloc.value;
   const mk = currentMonth.value;
+  // CR-Apr22-D slice 3: subscribe to the midnight-rollover signal so the
+  // daily-allowance card refreshes `daysRemaining` (and the derived
+  // `dailyAllowance`) exactly when the date flips local-midnight.
+  const _today = todayStr.value;
 
   // Delegate to pure function in calculations.ts
   return getDailyAllowance(mk);
@@ -869,13 +997,25 @@ export const dailyAllowanceData: ReadonlySignal<DailyAllowanceData> = computed((
 /**
  * Spending pace data for current month
  * Delegates to getSpendingPace() in calculations.ts (single source of truth)
- * Shows if spending is ahead, on track, or behind budget pace
+ * Shows if spending is ahead, on track, or behind budget pace.
+ *
+ * CR-Apr22-D slice 3 (finding 57 [P2]): `getSpendingPace` derives its
+ * `expectedPercent = dayOfMonth / daysInMonth * 100` from `new Date()`. The
+ * `difference = percentOfBudget - expectedPercent` is what classifies the
+ * pace as `under` / `on-track` / `over`. Without a subscription to
+ * `todayStr`, the expected-percent baseline would freeze at the day the
+ * effect last ran, so a user leaving the app open overnight could wake up
+ * still flagged as "on track" when pace should have slipped (or vice
+ * versa). Subscribing to `todayStr.value` forces a midnight recompute.
  */
 export const spendingPaceData: ReadonlySignal<SpendingPaceData> = computed(() => {
   // Access reactive dependencies so signal recomputes when they change
   const _txCount = transactions.value.length;
   const _alloc = monthlyAlloc.value;
   const mk = currentMonth.value;
+  // CR-Apr22-D slice 3: subscribe to the midnight-rollover signal so the
+  // expected-percent baseline advances with the real calendar day.
+  const _today = todayStr.value;
 
   // Delegate to pure function in calculations.ts
   return getSpendingPace(mk);
@@ -896,7 +1036,8 @@ export interface EnvelopeItem {
 
 export const envelopeData: ReadonlySignal<EnvelopeItem[]> = computed(() => {
   const mk = currentMonth.value;
-  const alloc = monthlyAlloc.value[mk] || {};
+  // rev 12 / #39 M4: see `budgetRemaining` above for helper rationale.
+  const alloc = getMonthAlloc(mk, monthlyAlloc.value);
   const expByCat = expensesByCategory.value;
 
   return Object.entries(alloc).map(([categoryId, allocated]) => {
@@ -945,50 +1086,70 @@ export const splitStatus: ReadonlySignal<SplitStatus> = computed(() => {
  * Current budget alerts for the active month
  * Memoized: skips recomputation when inputs haven't materially changed
  */
-let _prevAlertInputs: { mk: string; allocSignature: string; expJson: string; threshold: number | null; dismissedSignature: string } | null = null;
-let _prevAlertResult: string[] = [];
-let _prevAlertEntries: Array<{ key: string; text: string; categoryId: string; percentSpent: number }> = [];
+export type BudgetAlertEntry = { key: string; text: string; categoryId: string; percentSpent: number };
 
-export const activeAlertEntries: ReadonlySignal<Array<{ key: string; text: string; categoryId: string; percentSpent: number }>> = computed(() => {
-  const mk = currentMonth.value;
-  const alloc = monthlyAlloc.value[mk] || {};
-  const expByCat = expensesByCategory.value;
-  const alertSettings = alerts.value;
-  const dismissed = dismissedAlerts.value;
+type AlertInputsSignature = {
+  mk: string;
+  allocSignature: string;
+  expJson: string;
+  threshold: number | null;
+  dismissedSignature: string;
+  // CR-Apr22-F slice 3: memoize the rollover map separately from the base
+  // allocation so toggling `rolloverSettings.enabled` or editing a prior
+  // month's spend (which shifts this month's rollover) invalidates the
+  // cached entries. Empty string when rollover is disabled so the
+  // enabled→disabled transition is itself a signature change.
+  rolloversSignature: string;
+};
 
+/**
+ * Pure helper — compute the budget-alert entries for an arbitrary month.
+ *
+ * Split out so we can drive two consumers with different month-key sources:
+ *   - `activeAlertEntries` uses `currentMonth.value` (the VIEWED month). This
+ *     feeds the in-app alert list at `inline-alerts.ts`, where it's correct
+ *     for the UI to show "what alerts would apply to the month the user is
+ *     currently looking at."
+ *   - `todayMonthAlertEntries` uses the calendar-current month derived from
+ *     `todayStr`. This feeds `browser-notifications.ts`, where notifications
+ *     must ONLY fire for the actual current month — otherwise a user who
+ *     navigates to a prior month in the UI re-fires historical notifications
+ *     they already saw (and moving back to this month compacts them out of
+ *     storage, causing a second re-fire on the next reload).
+ *
+ * CR-Apr22-F slice 2: extracted from the prior single-site computed body
+ * so the today-month variant can share logic + memoization shape without
+ * code duplication. See `todayMonthAlertEntries` below for the notification
+ * caller.
+ */
+function _runAlertComputation(
+  mk: string,
+  alloc: Record<string, number>,
+  expByCat: Record<string, number>,
+  alertSettings: AlertPrefs,
+  dismissed: ReadonlySet<string>,
+  rollovers: Record<string, number>
+): BudgetAlertEntry[] {
   if (alertSettings.budgetThreshold === null) return [];
 
-  const allocSignature = Object.entries(alloc)
-    .sort(([leftCategoryId], [rightCategoryId]) => leftCategoryId.localeCompare(rightCategoryId))
-    .map(([categoryId, amount]) => `${categoryId}:${amount}`)
-    .join('|');
-  const expJson = JSON.stringify(expByCat);
-  const inputs = {
-    mk,
-    allocSignature,
-    expJson,
-    threshold: alertSettings.budgetThreshold,
-    dismissedSignature: Array.from(dismissed).sort().join('|')
-  };
-  if (_prevAlertInputs &&
-      _prevAlertInputs.mk === inputs.mk &&
-      _prevAlertInputs.allocSignature === inputs.allocSignature &&
-      _prevAlertInputs.expJson === inputs.expJson &&
-      _prevAlertInputs.threshold === inputs.threshold &&
-      _prevAlertInputs.dismissedSignature === inputs.dismissedSignature) {
-    return _prevAlertEntries;
-  }
-
-  const foundAlerts: Array<{ key: string; text: string; categoryId: string; percentSpent: number }> = [];
-
+  const foundAlerts: BudgetAlertEntry[] = [];
   Object.entries(alloc).forEach(([catId, amt]) => {
-    if (!(amt > 0)) return;
+    // CR-Apr22-F slice 3: compare spend against the rollover-adjusted
+    // effective budget so the alert list agrees with the envelope-budget
+    // view (which already uses `amt + rollover`). Previously the alert
+    // fired purely off the base allocation, surfacing "85% spent" warnings
+    // for categories that still had a 30% carryover buffer left — bad
+    // signal, and contradicts the on-screen envelope rollup.
+    const rollover = rollovers[catId] || 0;
+    const effectiveBudget = amt + rollover;
+    if (!(effectiveBudget > 0)) return;
 
     const spent = expByCat[catId] || 0;
-    if (spent >= amt * alertSettings.budgetThreshold!) {
+    if (spent >= effectiveBudget * alertSettings.budgetThreshold!) {
       const cat = getCatInfo('expense', catId);
-      const percentSpent = Math.round(spent / amt * 100);
-      const alertText = `${cat.emoji} ${cat.name}: ${percentSpent}% spent`;
+      const percentSpent = Math.round(spent / effectiveBudget * 100);
+      const percentLabel = percentSpent > 999 ? '>999' : String(percentSpent);
+      const alertText = `${cat.emoji} ${cat.name}: ${percentLabel}% spent`;
       const alertKey = `${mk}:${catId}:budget-threshold`;
       const legacyAlertKey = `${mk}:${alertText}`;
 
@@ -1002,10 +1163,72 @@ export const activeAlertEntries: ReadonlySignal<Array<{ key: string; text: strin
       }
     }
   });
+  return foundAlerts;
+}
 
+function _signatureFor(
+  mk: string,
+  alloc: Record<string, number>,
+  expByCat: Record<string, number>,
+  alertSettings: AlertPrefs,
+  dismissed: ReadonlySet<string>,
+  rollovers: Record<string, number>
+): AlertInputsSignature {
+  const allocSignature = Object.entries(alloc)
+    .sort(([leftCategoryId], [rightCategoryId]) => leftCategoryId.localeCompare(rightCategoryId))
+    .map(([categoryId, amount]) => `${categoryId}:${amount}`)
+    .join('|');
+  const rolloversSignature = Object.entries(rollovers)
+    .sort(([leftCategoryId], [rightCategoryId]) => leftCategoryId.localeCompare(rightCategoryId))
+    .map(([categoryId, amount]) => `${categoryId}:${amount}`)
+    .join('|');
+  return {
+    mk,
+    allocSignature,
+    expJson: JSON.stringify(expByCat),
+    threshold: alertSettings.budgetThreshold,
+    dismissedSignature: Array.from(dismissed).sort().join('|'),
+    rolloversSignature
+  };
+}
+
+function _sameSignature(a: AlertInputsSignature, b: AlertInputsSignature): boolean {
+  return a.mk === b.mk
+    && a.allocSignature === b.allocSignature
+    && a.expJson === b.expJson
+    && a.threshold === b.threshold
+    && a.dismissedSignature === b.dismissedSignature
+    && a.rolloversSignature === b.rolloversSignature;
+}
+
+let _prevAlertInputs: AlertInputsSignature | null = null;
+let _prevAlertEntries: BudgetAlertEntry[] = [];
+
+export const activeAlertEntries: ReadonlySignal<BudgetAlertEntry[]> = computed(() => {
+  const mk = currentMonth.value;
+  // rev 12 / #39 M4: see `budgetRemaining` above for helper rationale.
+  const alloc = getMonthAlloc(mk, monthlyAlloc.value);
+  const expByCat = expensesByCategory.value;
+  const alertSettings = alerts.value;
+  const dismissed = dismissedAlerts.value;
+  // CR-Apr22-F slice 3: subscribe to `rolloverSettings` (via the explicit
+  // `.value` read) so the computed re-runs when the user toggles rollover
+  // on/off. The rollover MAP itself changes reactively because
+  // `calculateMonthRollovers` reads `signals.monthlyAlloc.value` +
+  // prior-month spend — both of which already flow into the signature via
+  // `alloc` + `expJson` transitively at the caller — but the enabled-flag
+  // toggle needs an explicit read so signals tracks it.
+  void rolloverSettings.value;
+  const rollovers = isRolloverEnabled() ? calculateMonthRollovers(mk) : {};
+
+  const inputs = _signatureFor(mk, alloc, expByCat, alertSettings, dismissed, rollovers);
+  if (_prevAlertInputs && _sameSignature(_prevAlertInputs, inputs)) {
+    return _prevAlertEntries;
+  }
+
+  const foundAlerts = _runAlertComputation(mk, alloc, expByCat, alertSettings, dismissed, rollovers);
   _prevAlertInputs = inputs;
   _prevAlertEntries = foundAlerts;
-  _prevAlertResult = foundAlerts.map((alert) => alert.text);
   return foundAlerts;
 });
 
@@ -1014,11 +1237,60 @@ export const activeAlerts: ReadonlySignal<string[]> = computed(() => {
 });
 
 /**
+ * Calendar-current month key (YYYY-MM), derived from `todayStr`.
+ *
+ * Updates automatically at midnight via the `todayStr` signal's midnight
+ * timer, so a month rollover is captured without any consumer opt-in.
+ */
+export const todayMonth: ReadonlySignal<string> = computed(() =>
+  todayStr.value.slice(0, 7)
+);
+
+/**
+ * Budget-alert entries keyed to the ACTUAL current calendar month (not the
+ * viewed month). See `_runAlertComputation` above for the split rationale.
+ *
+ * CR-Apr22-F slice 2: used exclusively by `browser-notifications.ts` so
+ * notifications fire only for today's month. Independent memoization state
+ * from `activeAlertEntries` because the two signals accept different mks
+ * and a single memoization slot would thrash on every month-navigation.
+ */
+let _prevTodayAlertInputs: AlertInputsSignature | null = null;
+let _prevTodayAlertEntries: BudgetAlertEntry[] = [];
+
+export const todayMonthAlertEntries: ReadonlySignal<BudgetAlertEntry[]> = computed(() => {
+  const mk = todayMonth.value;
+  const alloc = getMonthAlloc(mk, monthlyAlloc.value);
+  // Read expense-by-category directly off monthSummaries for today's month
+  // rather than via `expensesByCategory` (which is scoped to currentMonth).
+  // Falls back to empty record when the month has no summary entry yet.
+  const monthSummary = monthSummaries.value[mk];
+  const expByCat = monthSummary ? monthSummary.categoryTotals : {};
+  const alertSettings = alerts.value;
+  const dismissed = dismissedAlerts.value;
+  // CR-Apr22-F slice 3: match `activeAlertEntries` — compare spend against
+  // the rollover-adjusted effective budget.
+  void rolloverSettings.value;
+  const rollovers = isRolloverEnabled() ? calculateMonthRollovers(mk) : {};
+
+  const inputs = _signatureFor(mk, alloc, expByCat, alertSettings, dismissed, rollovers);
+  if (_prevTodayAlertInputs && _sameSignature(_prevTodayAlertInputs, inputs)) {
+    return _prevTodayAlertEntries;
+  }
+
+  const foundAlerts = _runAlertComputation(mk, alloc, expByCat, alertSettings, dismissed, rollovers);
+  _prevTodayAlertInputs = inputs;
+  _prevTodayAlertEntries = foundAlerts;
+  return foundAlerts;
+});
+
+/**
  * Whether budget allocations exist for current month
  */
 export const hasBudgetAllocations: ReadonlySignal<boolean> = computed(() => {
   const mk = currentMonth.value;
-  const alloc = monthlyAlloc.value[mk] || {};
+  // rev 12 / #39 M4: see `budgetRemaining` above for helper rationale.
+  const alloc = getMonthAlloc(mk, monthlyAlloc.value);
   return Object.keys(alloc).length > 0;
 });
 
@@ -1027,7 +1299,8 @@ export const hasBudgetAllocations: ReadonlySignal<boolean> = computed(() => {
  */
 export const totalBudget: ReadonlySignal<number> = computed(() => {
   const mk = currentMonth.value;
-  const alloc = monthlyAlloc.value[mk] || {};
+  // rev 12 / #39 M4: see `budgetRemaining` above for helper rationale.
+  const alloc = getMonthAlloc(mk, monthlyAlloc.value);
   const totalCents = Object.values(alloc).reduce((s, v) => s + toCents(v), 0);
   return toDollars(totalCents);
 });
@@ -1056,21 +1329,34 @@ const batcher = getSignalBatcher({
   debounceMs: 150,
   maxBatchSize: 20,
   flushOnVisibilityChange: true,
-  onWrite: (key, value) => {
-    stateRevision.recordStateChange(key, value, getTabId());
-    broadcastManager.sendStateUpdate(key, value);
+  // CR-Apr24-I finding 209: previously `sendStateUpdate` was called
+  // with no revision metadata, so sibling tabs couldn't correlate the
+  // incoming remote update with the revision ledger. Now await the
+  // revision from `recordStateChange` and forward it to the broadcast.
+  onWrite: async (key, value) => {
+    const rev = await stateRevision.recordStateChange(key, value, getTabId());
+    broadcastManager.sendStateUpdate(key, value, { revision: rev.revision });
   }
 });
 
-// Register all persisted signals with the batcher
-// This is O(1) per change instead of O(N) where N is number of signals
+// Register all persisted signals with the batcher.
+// This is O(1) per change instead of O(N) where N is number of signals.
+//
+// CR-Apr24-I finding 225: SK.ONBOARD, SK.LAST_BACKUP, and
+// BACKUP_REMINDER_TX_COUNT_KEY were previously registered here even
+// though `multi-tab-sync.updateLocalState()` has no handler for them.
+// Every write to those signals generated cross-tab `state_update`
+// traffic that sibling tabs silently dropped. Removed from this block
+// so only keys with a matching `updateLocalState` branch (or storage-
+// event fanout path) get broadcast. The signals are still persisted
+// locally via their own direct `persist()` calls at their mutation
+// sites (onboarding.ts, import-export.ts, etc.).
 batcher.registerSignals({
   [SK.SAVINGS]: savingsGoals,
   [SK.SAVINGS_CONTRIB]: savingsContribs,
   [SK.ALLOC]: monthlyAlloc,
   [SK.ACHIEVE]: achievements,
   [SK.STREAK]: streak,
-  [SK.CUSTOM_CAT]: customCats,
   [SK.DEBTS]: debts,
   [SK.CURRENCY]: currency,
   [SK.SECTIONS]: sections,
@@ -1080,10 +1366,7 @@ batcher.registerSignals({
   [SK.THEME]: theme,
   [SK.ROLLOVER_SETTINGS]: rolloverSettings,
   [SK.FILTER_PRESETS]: filterPresets,
-  [SK.TX_TEMPLATES]: txTemplates,
-  [SK.ONBOARD]: onboarding,
-  [SK.LAST_BACKUP]: lastBackup,
-  ['backup_reminder_last_tx_count' as any]: lastBackupTxCount
+  [SK.TX_TEMPLATES]: txTemplates
 });
 
 // ==========================================

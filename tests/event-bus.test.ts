@@ -101,6 +101,7 @@ describe('event bus lifecycle cleanup', () => {
 
     expect(queries[0]?.addEventListener).toHaveBeenCalledTimes(1);
     expect(queries[0]?.removeEventListener).toHaveBeenCalledTimes(1);
-    expect(queries[1]?.removeEventListener).toBeUndefined();
+    expect(queries[1]?.addEventListener).toHaveBeenCalledTimes(1);
+    expect(queries[1]?.removeEventListener).toHaveBeenCalledTimes(1);
   });
 });

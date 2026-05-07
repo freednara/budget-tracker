@@ -7,6 +7,20 @@ on:
     branches: [main]
 
 jobs:
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
   # Type checking and unit tests
   test:
     runs-on: ubuntu-latest
@@ -27,6 +41,14 @@ jobs:
 
       - name: Type check
         run: npm run typecheck
+
+      # Phase 6 Slice 1b (L5 #181): fail CI on any ESLint error from the
+      # no-escape-hatch ruleset (no-explicit-any warn, no-unsafe-assignment
+      # warn, no-floating-promises/no-misused-promises/consistent-type-
+      # assertions/no-empty/ban-ts-comment error). Warnings still pass so
+      # the current `any` surface can drain without blocking merges.
+      - name: Lint
+        run: npm run lint
 
       - name: Run unit tests with coverage
         run: npm run test:coverage
@@ -62,7 +84,7 @@ jobs:
         run: npm ci
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps
 
       - name: Run E2E tests
         run: npm run test:e2e

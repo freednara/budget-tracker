@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { setThemeMock, syncStateApplyKeyUpdateMock, lsGetMock, shouldShowPinLockMock, showPinLockMock } = vi.hoisted(() => ({
+const { setThemeMock, syncStateApplyKeyUpdateMock, lsGetMock, shouldShowPinLockMock, showPinLockMock, trackErrorMock } = vi.hoisted(() => ({
   setThemeMock: vi.fn(),
   syncStateApplyKeyUpdateMock: vi.fn(),
   lsGetMock: vi.fn((_key: string, fallback: unknown) => fallback),
   shouldShowPinLockMock: vi.fn(() => false),
   showPinLockMock: vi.fn(),
+  trackErrorMock: vi.fn(),
 }));
 
 vi.mock('../js/modules/core/state-actions.js', () => ({
@@ -35,7 +36,12 @@ vi.mock('../js/modules/ui/widgets/pin-ui-handlers.js', () => ({
   showPinLock: showPinLockMock,
 }));
 
+vi.mock('../js/modules/core/error-tracker.js', () => ({
+  trackError: trackErrorMock,
+}));
+
 import { SK } from '../js/modules/core/state.js';
+import * as signals from '../js/modules/core/signals.js';
 import { cleanupStorageEvents, initStorageEvents } from '../js/modules/ui/interactions/storage-events.js';
 
 describe('storage-events lifecycle', () => {
@@ -47,6 +53,7 @@ describe('storage-events lifecycle', () => {
     shouldShowPinLockMock.mockReset();
     shouldShowPinLockMock.mockReturnValue(false);
     showPinLockMock.mockReset();
+    trackErrorMock.mockReset();
     cleanupStorageEvents();
   });
 
@@ -67,6 +74,12 @@ describe('storage-events lifecycle', () => {
       renderTemplates: vi.fn(),
     };
 
+    // rev 12 L35: SK.THEME now routes through syncState.applyKeyUpdate,
+    // which reads the current value via lsGet and propagates via the
+    // hydration registry (normalizeTheme validator). The storage handler
+    // no longer calls setTheme() directly.
+    lsGetMock.mockReturnValue('light');
+
     initStorageEvents(callbacks);
     initStorageEvents(callbacks);
 
@@ -75,8 +88,8 @@ describe('storage-events lifecycle', () => {
       newValue: '"light"',
     }));
 
-    expect(setThemeMock).toHaveBeenCalledTimes(1);
-    expect(setThemeMock).toHaveBeenCalledWith('light');
+    expect(syncStateApplyKeyUpdateMock).toHaveBeenCalledTimes(1);
+    expect(syncStateApplyKeyUpdateMock).toHaveBeenCalledWith(SK.THEME, 'light');
 
     cleanupStorageEvents();
 
@@ -85,7 +98,8 @@ describe('storage-events lifecycle', () => {
       newValue: '"dark"',
     }));
 
-    expect(setThemeMock).toHaveBeenCalledTimes(1);
+    // After cleanup, no further dispatches should occur.
+    expect(syncStateApplyKeyUpdateMock).toHaveBeenCalledTimes(1);
   });
 
   it('normalizes supported insight personalities from storage events', () => {
@@ -112,5 +126,40 @@ describe('storage-events lifecycle', () => {
 
     expect(syncStateApplyKeyUpdateMock).toHaveBeenCalledWith(SK.INSIGHT_PERS, 'friendly');
     expect(callbacks.updateInsights).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores malformed onboarding and filter-expanded payloads from storage events', () => {
+    const callbacks = {
+      refreshAll: vi.fn(),
+      updateSummary: vi.fn(),
+      renderSavingsGoals: vi.fn(),
+      checkAlerts: vi.fn(),
+      updateInsights: vi.fn(),
+      renderBadges: vi.fn(),
+      renderStreak: vi.fn(),
+      renderFilterPresets: vi.fn(),
+      renderTemplates: vi.fn(),
+    };
+
+    signals.onboarding.value = { active: true, step: 2, completed: false };
+    signals.filtersExpanded.value = true;
+
+    initStorageEvents(callbacks);
+
+    lsGetMock.mockReturnValueOnce({ active: 'yes', step: '2', completed: false });
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: SK.ONBOARD,
+      newValue: '{"active":"yes","step":"2","completed":false}',
+    }));
+
+    lsGetMock.mockReturnValueOnce('open');
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: SK.FILTER_EXPANDED,
+      newValue: '"open"',
+    }));
+
+    expect(signals.onboarding.value).toEqual({ active: true, step: 2, completed: false });
+    expect(signals.filtersExpanded.value).toBe(true);
+    expect(trackErrorMock).toHaveBeenCalledTimes(2);
   });
 });

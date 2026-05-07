@@ -36,8 +36,8 @@ This project and everyone participating in it is governed by our Code of Conduct
 1. **Fork the Repository**
    ```bash
    # Click the 'Fork' button on GitHub, then:
-   git clone https://github.com/YOUR_USERNAME/budget-tracker.git
-   cd budget-tracker
+   git clone https://github.com/YOUR_USERNAME/harbor-ledger.git
+   cd harbor-ledger
    ```
 
 2. **Install Dependencies**
@@ -400,7 +400,7 @@ describe('Module Name', () => {
 
 **DO NOT** open a public issue for security vulnerabilities. Instead:
 
-1. Email: security@budgettracker.app
+1. Email: security@harborledger.app
 2. Include: Description, steps to reproduce, impact
 3. Wait for response (within 48 hours)
 
@@ -416,10 +416,10 @@ describe('Module Name', () => {
 
 ### Documentation
 
-- [Architecture Guide](ARCHITECTURE.md)
-- [API Reference](API.md)
-- [Testing Guide](TESTING.md)
-- [Deployment Guide](DEPLOYMENT.md)
+- [Project Summary](PROJECT_SUMMARY.md)
+- [Technical Review](TECHNICAL_REVIEW.md)
+- [Feature Inventory](FEATURE_INVENTORY.md)
+- [DI Migration Guide](DI_MIGRATION_GUIDE.md)
 
 ### Learning Resources
 
@@ -440,9 +440,7 @@ describe('Module Name', () => {
 ### Communication Channels
 
 - **GitHub Discussions**: Questions and ideas
-- **Discord**: Real-time chat (coming soon)
-- **Twitter**: [@budgettracker](https://twitter.com/budgettracker)
-- **Blog**: [blog.budgettracker.app](https://blog.budgettracker.app)
+- **Blog**: [blog.harborledger.app](https://blog.harborledger.app)
 
 ### Recognition
 
@@ -482,6 +480,6 @@ Every contribution helps make Harbor Ledger better for everyone. Whether it's fi
 
 ---
 
-*Questions?* Open a [discussion](https://github.com/yourusername/budget-tracker/discussions) or reach out on [Discord](#).
+*Questions?* Open a [discussion](https://github.com/FrankReed/harbor-ledger/discussions).
 
 *Last Updated: March 11, 2026*

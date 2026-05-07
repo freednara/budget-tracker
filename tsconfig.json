@@ -2,17 +2,42 @@
   "compilerOptions": {
     "target": "ESNext",
     "module": "ESNext",
+    // Use "bundler" resolution — lets Vite handle .js extension mapping for .ts files
     "moduleResolution": "bundler",
     "strict": true,
+    // Type-check only; Vite handles actual compilation
     "noEmit": true,
+    // Skip type-checking node_modules — significant speed improvement
     "skipLibCheck": true,
     "esModuleInterop": true,
+    // Allow importing .js files (needed for legacy modules and Vite compatibility)
     "allowJs": true,
+    // Don't type-check .js files — only .ts files are fully typed
     "checkJs": false,
+    // Required for Vite — each file is transpiled independently
     "isolatedModules": true,
     "resolveJsonModule": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "removeComments": true
+    "removeComments": true,
+    // Phase 6 Slice 1h (rev 12 L6): two additional strictness flags,
+    // each landed as its own sub-pass with `tsc --noEmit` between
+    // passes so any new diagnostic surface is attributed cleanly.
+    // Both sub-passes shipped at 0 new diagnostics.
+    //
+    // Phase 6 Slice 1j (rev 12 L6): `exactOptionalPropertyTypes`
+    // landed with 42 diagnostics closed via interface widening or
+    // conditional-spread construction (zero `!` assertions). See L6
+    // STATUS block in `Inline-Behavior-Review.md` for per-family
+    // widening list and rationale.
+    //
+    // Phase 6 Slice 1i (rev 12 L6): `noUncheckedIndexedAccess`
+    // landed — `arr[i]` now returns `T | undefined` instead of `T`.
+    // All new diagnostics closed with real null-guards, length
+    // checks, or `for...of` iteration rewrites — no `!` assertions.
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true
   },
   "include": [
     "js/**/*",

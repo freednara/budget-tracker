@@ -10,7 +10,7 @@
 
 import { effect, computed } from '@preact/signals-core';
 import * as signals from '../core/signals.js';
-import { fmtCur } from '../core/utils.js';
+import { fmtCur } from '../core/utils-pure.js';
 import DOM from '../core/dom-cache.js';
 import { getTotalDebtSummary } from '../features/financial/debt-planner.js';
 
@@ -45,6 +45,7 @@ export function mountDebtSummary(): () => void {
   }
 
   const cleanup = effect(() => {
+    const _cur = signals.currency.value;  // subscribe to currency changes
     const summary = debtSummary.value;
 
     if (totalDebtEl) {

@@ -233,26 +233,12 @@ describe('calculateGoalForecast', () => {
     expect(forecast.dailyRate).toBeCloseTo(10, 2);
   });
 
-  it('handles LegacySavingsGoal shape (target_amount / saved_amount)', () => {
-    mockSavingsContribs.value = [
-      makeContrib('legacy-1', 200, '2025-02-01'),
-      makeContrib('legacy-1', 200, '2025-02-11'),
-    ];
-    // Legacy shape uses target_amount / saved_amount
-    const legacyGoal = {
-      id: 'legacy-1',
-      name: 'Legacy Goal',
-      target_amount: 2000,
-      saved_amount: 400,
-      deadline: undefined,
-    };
-
-    const result = calculateGoalForecast(legacyGoal as any);
-
-    expect(result).not.toBeNull();
-    const forecast = result as GoalForecastInProgress;
-    // $400 over 10 days = $40/day, remaining = 2000-400 = 1600, daysToComplete = 40
-    expect(forecast.dailyRate).toBeCloseTo(40, 2);
-    expect(forecast.daysToComplete).toBe(40);
-  });
+  // H7 (Inline-Behavior-Review rev 12): the legacy-shape compatibility test
+  // was removed. After H7, every entry point (state-hydration, import-export)
+  // funnels savings-goal records through `normalizeSavingsGoalsRecord` in
+  // state.ts, so the in-memory signal is always canonical
+  // `Record<string, SavingsGoal>` modern shape. `calculateGoalForecast`
+  // therefore never sees `target_amount`/`saved_amount` at runtime, and the
+  // function signature was tightened to `GoalWithId` accordingly.
+  // See state.ts `normalizeSavingsGoal` for the shape coercion.
 });

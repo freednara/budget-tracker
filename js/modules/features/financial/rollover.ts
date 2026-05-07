@@ -11,9 +11,11 @@
 
 import { SK, lsGet, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
+import { getMonthAlloc } from '../../core/month-alloc.js';
 import { settings } from '../../core/state-actions.js';
-import { getPrevMonthKey, toCents, toDollars, getMonthKey } from '../../core/utils.js';
-import { calculateMonthlyTotalsWithCacheSync } from '../../core/monthly-totals-cache.js';
+import { getPrevMonthKey, toCents, toDollars } from '../../core/utils-pure.js';
+// M33 (Phase 5f): `...Sync` suffix dropped — monthly-totals-cache is now sync-only.
+import { calculateMonthlyTotalsWithCache } from '../../core/monthly-totals-cache.js';
 import { on, emit, createListenerGroup, destroyListenerGroup } from '../../core/event-bus.js';
 import { FeatureEvents, type FeatureResponse } from '../../core/feature-event-interface.js';
 import type {
@@ -72,6 +74,8 @@ export function isCategoryRolloverEnabled(categoryId: string): boolean {
 export function setRolloverEnabled(enabled: boolean): void {
   settings.setRolloverSettings({ enabled: enabled === true });
   persist(SK.ROLLOVER_SETTINGS, signals.rolloverSettings.value);
+  // Invalidate cache when rollover enabling status changes
+  invalidateRolloverCache();
 }
 
 /**
@@ -81,6 +85,8 @@ export function setRolloverMode(mode: RolloverMode): void {
   if (mode !== 'all' && mode !== 'selected') return;
   settings.setRolloverSettings({ mode });
   persist(SK.ROLLOVER_SETTINGS, signals.rolloverSettings.value);
+  // Invalidate cache when rollover mode changes
+  invalidateRolloverCache();
 }
 
 /**
@@ -91,6 +97,8 @@ export function setRolloverCategories(categoryIds: string[]): void {
     categories: Array.isArray(categoryIds) ? categoryIds : []
   });
   persist(SK.ROLLOVER_SETTINGS, signals.rolloverSettings.value);
+  // Invalidate cache when selected categories change
+  invalidateRolloverCache();
 }
 
 /**
@@ -108,16 +116,52 @@ export function setCategoryRollover(categoryId: string, enabled: boolean): void 
 
   settings.setRolloverSettings({ categories: Array.from(categories) });
   persist(SK.ROLLOVER_SETTINGS, signals.rolloverSettings.value);
+  // Invalidate cache when category rollover settings change
+  invalidateRolloverCache();
 }
 
 /**
- * Set maximum rollover amount per category
+ * Set maximum rollover amount per category.
+ *
+ * Phase 5g-3 Slice 3 (Inline-Behavior-Review rev 12, L23): explicit
+ * non-finite rejection replaced the prior `parseFloat(String(max)) || 0`
+ * pattern. The old form masked every unparseable input (NaN,
+ * whitespace-only strings, `undefined` coerced via `String()`) to
+ * `0` — and in the rollover domain `maxRollover = 0` means "no
+ * surplus ever carries forward," functionally identical to
+ * disabling rollover without the user realizing. A user typing a
+ * typo'd cap would see no error, then months later notice their
+ * underspend never rolled over.
+ *
+ * Behavior:
+ *   - `null` / `undefined`             → clear the cap (unlimited rollover).
+ *   - finite number                    → clamped at `>= 0`.
+ *   - NaN / Infinity / non-number type → DEV warn and **return without
+ *     mutating state**, preserving the prior cap. The caller / UI
+ *     layer owns the user-visible validation toast — silently
+ *     accepting then coercing is the failure mode L23 flagged.
+ *
+ * Same family as M15 (`localeService.parseNumber`) and M9
+ * (`template-manager.saveAsTemplate`); the broader masking-default
+ * sweep (including `debt-planner.ts:153,182` for interest rate and
+ * `dueDay`) is tracked under action-plan item #37.
  */
 export function setMaxRollover(max: number | null | undefined): void {
-  settings.setRolloverSettings({
-    maxRollover: max === null || max === undefined ? null : Math.max(0, parseFloat(String(max)) || 0)
-  });
+  let normalized: number | null;
+  if (max === null || max === undefined) {
+    normalized = null;
+  } else if (typeof max !== 'number' || !isFinite(max)) {
+    if (import.meta.env.DEV) {
+      console.warn('setMaxRollover: non-finite value rejected, preserving prior cap', max);
+    }
+    return;
+  } else {
+    normalized = Math.max(0, max);
+  }
+  settings.setRolloverSettings({ maxRollover: normalized });
   persist(SK.ROLLOVER_SETTINGS, signals.rolloverSettings.value);
+  // Invalidate cache when max rollover cap changes
+  invalidateRolloverCache();
 }
 
 /**
@@ -127,6 +171,8 @@ export function setNegativeHandling(handling: NegativeHandling): void {
   if (!['zero', 'carry', 'ignore'].includes(handling)) return;
   settings.setRolloverSettings({ negativeHandling: handling });
   persist(SK.ROLLOVER_SETTINGS, signals.rolloverSettings.value);
+  // Invalidate cache when negative handling behavior changes
+  invalidateRolloverCache();
 }
 
 /**
@@ -141,51 +187,91 @@ export function getRolloverSettings(): RolloverSettings {
 // ==========================================
 
 /**
+ * Module-level cache for rollover calculations
+ * Key format: `${categoryId}_${monthKey}`
+ * Stores computed rollover amounts in cents for precision
+ */
+const rolloverCache = new Map<string, number>();
+
+/**
+ * Invalidate the entire rollover cache
+ * Called when transactions, allocations, or settings change
+ */
+export function invalidateRolloverCache(): void {
+  rolloverCache.clear();
+}
+
+/**
  * Calculate rollover amount from previous month for a category
  * Uses cents-based math to avoid floating-point errors
- * FIXED: Now accumulates across multiple months using cached totals for efficiency
+ * OPTIMIZED: Implements two-tier caching strategy:
+ *   1. Module-level memoization of (categoryId, monthKey) -> rollover amount
+ *   2. Incremental accumulation: if cache has month M-1, start from there instead of month 0
  *
  * @returns Rollover amount in dollars (positive = surplus, negative = overspent)
  */
 export function calculateRollover(categoryId: string, monthKey: string): number {
   if (!isCategoryRolloverEnabled(categoryId)) return 0;
 
+  // Check module-level cache first
+  const cacheKey = `${categoryId}_${monthKey}`;
+  if (rolloverCache.has(cacheKey)) {
+    return toDollars(rolloverCache.get(cacheKey)!);
+  }
+
   const settings = getRolloverSettings();
-  
+
   // Find all relevant months chronologically
   const allMonthsWithAlloc = Object.keys(signals.monthlyAlloc.value).sort();
-  const startMonth = allMonthsWithAlloc.find(mk => 
+  const startMonth = allMonthsWithAlloc.find(mk =>
     signals.monthlyAlloc.value[mk]?.[categoryId] !== undefined
   );
-  
+
   if (!startMonth || startMonth >= monthKey) return 0;
 
   let accumulatedCents = 0;
-  
+  let startAccumFrom = startMonth;
+
+  // Optimization: if we have the value for the previous month cached,
+  // start accumulation from the current month instead of scanning from the start
+  const prevMonthKey = getPrevMonthKey(monthKey);
+  const prevCacheKey = `${categoryId}_${prevMonthKey}`;
+  if (rolloverCache.has(prevCacheKey)) {
+    accumulatedCents = rolloverCache.get(prevCacheKey)!;
+    startAccumFrom = monthKey; // Only accumulate this month's delta
+  }
+
   for (const mk of allMonthsWithAlloc) {
-    if (mk < startMonth) continue;
+    if (mk < startAccumFrom) continue;
     if (mk >= monthKey) break;
 
     const monthAlloc = signals.monthlyAlloc.value[mk]?.[categoryId] || 0;
     const allocCents = toCents(monthAlloc);
-    
-    // OPTIMIZED: Use cached totals instead of manual calculation
-    const totals = calculateMonthlyTotalsWithCacheSync(mk);
+
+    // Use cached totals instead of manual calculation
+    const totals = calculateMonthlyTotalsWithCache(mk);
     const monthSpentCents = toCents((totals.categoryTotals || {})[categoryId] || 0);
-    
+
     accumulatedCents += (allocCents - monthSpentCents);
-    
-    // Handle negative balances based on settings  
+
+    // Handle negative balances based on settings
     if (accumulatedCents < 0 && settings.negativeHandling === 'zero') {
       accumulatedCents = 0;
     }
   }
 
-  // Apply max rollover cap
-  if (settings.maxRollover !== null && settings.maxRollover !== undefined) {
+  // ROLL-01: Apply max rollover cap to POSITIVE surplus only.
+  // Negative balances (overspending) should carry forward in full so
+  // `negativeHandling` alone controls their fate. Symmetric clamping
+  // silently forgave overspending beyond the cap, which breaks the
+  // user's "I overspent $X" mental model.
+  if (settings.maxRollover !== null && settings.maxRollover !== undefined && accumulatedCents > 0) {
     const maxCents = toCents(settings.maxRollover);
-    accumulatedCents = Math.max(-maxCents, Math.min(accumulatedCents, maxCents));
+    accumulatedCents = Math.min(accumulatedCents, maxCents);
   }
+
+  // Store in cache before returning
+  rolloverCache.set(cacheKey, accumulatedCents);
 
   return toDollars(accumulatedCents);
 }
@@ -208,9 +294,23 @@ export function getEffectiveBudget(categoryId: string, monthKey: string): number
  */
 export function calculateMonthRollovers(monthKey: string): Record<string, number> {
   const rollovers: Record<string, number> = {};
-  const alloc = signals.monthlyAlloc.value[monthKey] || {};
+  // Rev 12 / #39 M4 (Inline-Behavior-Review): getMonthAlloc replaces the
+  // legacy `signals.monthlyAlloc.value[mk] || {}` pattern — emits a
+  // once-per-session trackError on a genuine miss (map non-empty but the
+  // requested month is missing), which is the data-loss signal the review
+  // targets. Empty allocMap (new user / pre-hydration / post-reset) stays
+  // silent. Shape is identical on the hit path.
+  const alloc = getMonthAlloc(monthKey, signals.monthlyAlloc.value);
 
-  // Also check previous month's allocations in case user had budget there
+  // Also check previous month's allocations in case user had budget there.
+  // Rev 12 / #39 M4: deliberately keeps the raw `|| {}` pattern here — a
+  // missing previous-month allocation is an EXPECTED case (user started
+  // budgeting this month and has no historical allocation for the prior
+  // month), not a data-loss signal. Routing through getMonthAlloc would
+  // generate false-positive trackError fires because the allocMap is
+  // non-empty (monthKey IS set), so the helper's empty-map suppression
+  // wouldn't catch this site. This comment preserves the rationale for
+  // future grep hits so the intent is not lost.
   const prevMonthKey = getPrevMonthKey(monthKey);
   const prevAlloc = signals.monthlyAlloc.value[prevMonthKey] || {};
 
@@ -283,7 +383,7 @@ export function cleanupRollover(): void {
 
 /**
  * Initialize rollover module
- * Loads settings from localStorage
+ * Loads settings from localStorage and sets up cache invalidation on data changes
  */
 export function initRollover(): void {
   cleanupRollover();
@@ -309,6 +409,18 @@ export function initRollover(): void {
     if (settings.categories) setRolloverCategories(settings.categories);
     if (settings.maxRollover !== undefined) setMaxRollover(settings.maxRollover);
     if (settings.negativeHandling) setNegativeHandling(settings.negativeHandling);
+  }, { groupId: rolloverListenerGroupId });
+
+  // Cache invalidation: when budget allocations change, clear the rollover cache
+  // since rollover amounts depend on monthly allocations and spending
+  on('budget:updated', () => {
+    invalidateRolloverCache();
+  }, { groupId: rolloverListenerGroupId });
+
+  // Cache invalidation: when transactions change, clear the rollover cache
+  // since rollover amounts depend on spending totals
+  on('transactions:changed', () => {
+    invalidateRolloverCache();
   }, { groupId: rolloverListenerGroupId });
 }
 
@@ -378,15 +490,12 @@ export function calculateRolloverPure(
     }
   }
 
-  // Apply max cap
-  if (state.rolloverSettings.maxRollover !== null && state.rolloverSettings.maxRollover !== undefined) {
+  // ROLL-01: Apply max rollover cap to POSITIVE surplus only.
+  // Negative balances (overspending) carry forward in full so
+  // `negativeHandling` alone controls their fate.
+  if (state.rolloverSettings.maxRollover !== null && state.rolloverSettings.maxRollover !== undefined && unspentCents > 0) {
     const maxCents = toCents(state.rolloverSettings.maxRollover);
-    if (unspentCents > 0) {
-      return toDollars(Math.min(unspentCents, maxCents));
-    }
-    if (unspentCents < 0) {
-      return toDollars(Math.max(unspentCents, -maxCents));
-    }
+    return toDollars(Math.min(unspentCents, maxCents));
   }
 
   return toDollars(unspentCents);

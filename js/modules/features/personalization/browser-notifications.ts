@@ -41,9 +41,21 @@ export function clearStoredBudgetAlertNotifications(): void {
 
 export function initBrowserBudgetNotifications(): () => void {
   return effect(() => {
-    const monthKey = signals.currentMonth.value;
+    // CR-Apr22-F slice 2: key off the ACTUAL calendar month (via `todayMonth`,
+    // derived from `todayStr` so it rolls over at midnight), NOT the viewed
+    // month `currentMonth`. Otherwise navigating to a past month in the UI
+    // retroactively fires notifications for that month's over-budget
+    // categories (which the user already saw when it was current), AND the
+    // compaction pass below drops the real current-month keys from storage,
+    // causing the same real-month notifications to re-fire on the next
+    // reload once the user navigates back. Alerts in the in-app list still
+    // follow the viewed month via `activeAlertEntries` — that's the correct
+    // UI semantics. Push notifications are a different contract: they
+    // represent "attention needed NOW," which is always about today's
+    // calendar month.
+    const monthKey = signals.todayMonth.value;
     const alertPrefs = normalizeAlertPrefs(signals.alerts.value);
-    const activeAlerts = signals.activeAlertEntries.value;
+    const activeAlerts = signals.todayMonthAlertEntries.value;
     const currentKeys = new Set<string>(activeAlerts.map((alert) => alert.key));
     const compactedKeys = keepCurrentMonthKeys(alertPrefs.lastNotifiedAlertKeys, monthKey);
 
@@ -67,25 +79,52 @@ export function initBrowserBudgetNotifications(): () => void {
       return;
     }
 
-    newAlerts.forEach((alert) => {
+    // Round 7 fix: If more than 3 alerts are pending, batch them into a single summary notification
+    // instead of firing multiple notifications which can overwhelm the user
+    if (newAlerts.length > 3) {
       try {
-        const notification = new Notification('Budget alert', {
-          body: alert.text,
-          tag: alert.key
+        const notification = new Notification('Budget alerts', {
+          body: `You have ${newAlerts.length} budget alerts. Check the app for details.`,
+          tag: 'budget_alerts_summary'
         });
         notification.onclick = () => {
           window.focus();
           notification.close();
         };
-        notifiedKeys.add(alert.key);
+        // Mark all as notified via a single summary tag
+        newAlerts.forEach((alert) => notifiedKeys.add(alert.key));
       } catch {
         // Ignore notification failures and continue with in-app alerts.
       }
-    });
+    } else {
+      newAlerts.forEach((alert) => {
+        try {
+          const notification = new Notification('Budget alert', {
+            body: alert.text,
+            tag: alert.key
+          });
+          notification.onclick = () => {
+            window.focus();
+            notification.close();
+          };
+          notifiedKeys.add(alert.key);
+        } catch {
+          // Ignore notification failures and continue with in-app alerts.
+        }
+      });
+    }
 
     previousAlertKeys = currentKeys;
     const nextKeys = Array.from(notifiedKeys);
-    if (nextKeys.length !== alertPrefs.lastNotifiedAlertKeys.length) {
+    // Set-equality (not length-equality) so a same-count swap \u2014 e.g. category A
+    // drops out and category B drops in at a month boundary \u2014 still persists the
+    // change. The length-only gate previously let the swap re-fire the same
+    // notification on every reload until the count happened to differ. Fixes M24
+    // (Inline-Behavior-Review rev 12).
+    const sameSet =
+      nextKeys.length === alertPrefs.lastNotifiedAlertKeys.length &&
+      new Set(nextKeys).size === new Set([...nextKeys, ...alertPrefs.lastNotifiedAlertKeys]).size;
+    if (!sameSet) {
       saveAlertPrefs(normalizeAlertPrefs({ ...alertPrefs, lastNotifiedAlertKeys: nextKeys }));
     }
   });

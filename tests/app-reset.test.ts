@@ -2,10 +2,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as signals from '../js/modules/core/signals.js';
 import { SK } from '../js/modules/core/state.js';
 
-const { clearAllStorageMock, clearAllBackupsMock, resetRuntimeStateMock } = vi.hoisted(() => ({
+const {
+  clearAllStorageMock,
+  clearAllBackupsMock,
+  resetRuntimeStateMock,
+  mockedUserCategoryConfig
+} = vi.hoisted(() => ({
   clearAllStorageMock: vi.fn(async () => true),
   clearAllBackupsMock: vi.fn(async () => true),
-  resetRuntimeStateMock: vi.fn()
+  resetRuntimeStateMock: vi.fn(),
+  mockedUserCategoryConfig: {
+    value: { presetId: 'personal', version: 1, expense: [] as unknown[], income: [] as unknown[] } as unknown
+  }
 }));
 
 vi.mock('../js/modules/data/storage-manager.js', () => ({
@@ -22,6 +30,14 @@ vi.mock('../js/modules/data/data-manager.js', () => ({
   dataSdk: {
     resetRuntimeState: resetRuntimeStateMock
   }
+}));
+
+vi.mock('../js/modules/core/category-store.js', () => ({
+  userCategoryConfig: mockedUserCategoryConfig,
+  expenseCategories: { value: [] },
+  incomeCategories: { value: [] },
+  indexedUserCategories: { value: new Map() },
+  initCategoryStore: vi.fn(() => false)
 }));
 
 import { resetAppData } from '../js/modules/orchestration/app-reset.js';
@@ -49,7 +65,12 @@ describe('resetAppData', () => {
     signals.savingsContribs.value = [{ id: 'contrib1', goalId: 'goal1', amount: 50, date: '2026-03-20' } as any];
     signals.monthlyAlloc.value = { '2026-03': { food: 300 } as any };
     signals.debts.value = [{ id: 'debt1', name: 'Debt', balance: 400, interestRate: 9.9, minimumPayment: 25 } as any];
-    signals.customCats.value = [{ id: 'custom', name: 'Custom', emoji: '✨', color: '#fff', type: 'expense' } as any];
+    mockedUserCategoryConfig.value = {
+      presetId: 'custom',
+      version: 1,
+      expense: [{ id: 'food', name: 'Food', emoji: '🍔', color: '#ef4444', type: 'expense', order: 0 }],
+      income: []
+    } as any;
     signals.filterPresets.value = [{ id: 'preset1', name: 'Preset', filters: signals.filters.value } as any];
     signals.txTemplates.value = [{ id: 'tpl1', name: 'Tpl', type: 'expense', category: 'food', amount: 10, description: 'Tpl', tags: '', notes: '' } as any];
     signals.currency.value = { home: 'EUR', symbol: '€' };
@@ -71,7 +92,7 @@ describe('resetAppData', () => {
     signals.addSavingsGoalId.value = 'goal1';
     signals.splitTxId.value = 'tx_1';
     signals.splitRows.value = [{ id: 'row1', categoryId: 'food', amount: 42 }];
-    signals.pendingEditTx.value = signals.transactions.value[0];
+    signals.pendingEditTx.value = signals.transactions.value[0] ?? null;
     signals.isEditing.value = true;
     signals.formTitle.value = 'Edit';
     signals.submitButtonText.value = 'Save';
@@ -93,15 +114,14 @@ describe('resetAppData', () => {
     };
 
     localStorage.setItem(SK.RECURRING, JSON.stringify({ recurring1: { id: 'recurring1' } }));
-    localStorage.setItem('budget_tracker_auto_backups', JSON.stringify([{ id: 'backup-1' }]));
-    localStorage.setItem('budget_tracker_backup_schedule', JSON.stringify({ enabled: true }));
-    localStorage.setItem('budget_tracker_backup_status', JSON.stringify({ totalBackups: 1 }));
-    localStorage.setItem('budget_tracker_backup_legacy_1', JSON.stringify({ id: 'legacy' }));
+    localStorage.setItem('harbor_auto_backups', JSON.stringify([{ id: 'backup-1' }]));
+    localStorage.setItem('harbor_backup_schedule', JSON.stringify({ enabled: true }));
+    localStorage.setItem('harbor_backup_status', JSON.stringify({ totalBackups: 1 }));
+    localStorage.setItem('harbor_backup_legacy_1', JSON.stringify({ id: 'legacy' }));
     localStorage.setItem(SK.THEME, JSON.stringify('light'));
     localStorage.setItem(SK.PIN, JSON.stringify('hashed-pin'));
     localStorage.setItem('backup_reminder_last_tx_count', JSON.stringify(9));
-    localStorage.setItem('monthly_totals_cache_2026-03', JSON.stringify({ expenses: 42 }));
-    localStorage.setItem('budget_tracker_sync_123', JSON.stringify({ type: 'update' }));
+    localStorage.setItem('harbor_sync_123', JSON.stringify({ type: 'update' }));
   });
 
   it('resets the app to first-use defaults while preserving backup payloads', async () => {
@@ -116,7 +136,7 @@ describe('resetAppData', () => {
     expect(signals.savingsGoals.value).toEqual({});
     expect(signals.monthlyAlloc.value).toEqual({});
     expect(signals.debts.value).toEqual([]);
-    expect(signals.customCats.value).toEqual([]);
+    expect(mockedUserCategoryConfig.value).toBeNull();
     expect(signals.filterPresets.value).toEqual([]);
     expect(signals.txTemplates.value).toEqual([]);
     expect(signals.currency.value).toEqual({ home: 'USD', symbol: '$' });
@@ -133,12 +153,17 @@ describe('resetAppData', () => {
     expect(signals.formTitle.value).toBe('➕ Add Transaction');
     expect(signals.submitButtonText.value).toBe('ADD TRANSACTION');
     expect(localStorage.getItem(SK.RECURRING)).toBeNull();
-    expect(localStorage.getItem('budget_tracker_auto_backups')).not.toBeNull();
-    expect(localStorage.getItem('budget_tracker_backup_legacy_1')).not.toBeNull();
-    expect(localStorage.getItem('budget_tracker_backup_schedule')).toBeNull();
-    expect(localStorage.getItem('budget_tracker_backup_status')).toBeNull();
-    expect(localStorage.getItem('monthly_totals_cache_2026-03')).toBeNull();
-    expect(localStorage.getItem('budget_tracker_sync_123')).toBeNull();
+    expect(localStorage.getItem('harbor_auto_backups')).not.toBeNull();
+    expect(localStorage.getItem('harbor_backup_legacy_1')).not.toBeNull();
+    expect(localStorage.getItem('harbor_backup_schedule')).toBeNull();
+    expect(localStorage.getItem('harbor_backup_status')).toBeNull();
+    // rev 12 #13b (M35, Inline-Behavior-Review): the dead `monthly_totals_cache`
+    // prefix was dropped from the reset wipe list. The monthly-totals cache
+    // lives entirely in `memoryCache` (a JS Map in monthly-totals-cache.ts),
+    // so no localStorage key under that prefix is ever written in production
+    // — asserting it gets wiped was asserting a no-op against test fixture.
+    expect(localStorage.getItem('harbor_sync_123')).toBeNull();
+    // restoreMigrationMarkers writes to the PRESERVED legacy key names (ADR-001 §9.4)
     expect(localStorage.getItem('budget_tracker_idb_migration')).not.toBeNull();
     expect(localStorage.getItem('budget_tracker_migrated_to_idb')).not.toBeNull();
   });
@@ -150,22 +175,86 @@ describe('resetAppData', () => {
     expect(clearAllBackupsMock).toHaveBeenCalledTimes(1);
     expect(clearAllStorageMock).toHaveBeenCalledTimes(1);
     expect(resetRuntimeStateMock).toHaveBeenCalledTimes(1);
-    expect(localStorage.getItem('budget_tracker_auto_backups')).toBeNull();
-    expect(localStorage.getItem('budget_tracker_backup_legacy_1')).toBeNull();
-    expect(localStorage.getItem('budget_tracker_backup_schedule')).toBeNull();
-    expect(localStorage.getItem('budget_tracker_backup_status')).toBeNull();
+    expect(localStorage.getItem('harbor_auto_backups')).toBeNull();
+    expect(localStorage.getItem('harbor_backup_legacy_1')).toBeNull();
+    expect(localStorage.getItem('harbor_backup_schedule')).toBeNull();
+    expect(localStorage.getItem('harbor_backup_status')).toBeNull();
   });
 
-  it('fails before destructive clearing when backup cleanup fails', async () => {
+  it('aborts before touching backups when the main-ledger wipe fails (prior-batch P2)', async () => {
+    // Prior-batch P2 (inline review, 7l): resetAppData was reordered so the
+    // main ledger is wiped BEFORE backup storage. If `storageManager.clearAll()`
+    // fails, `clearBackupStorage` must never run — backups are the user's
+    // last recovery path, and destroying them on a failed reset is the
+    // specific state transition the reorder prevents.
+    clearAllStorageMock.mockResolvedValue(false);
+
+    const result = await resetAppData({ clearBackups: true });
+
+    expect(result).toEqual({ ok: false, clearBackups: true });
+    expect(clearAllStorageMock).toHaveBeenCalledTimes(1);
+    expect(clearAllBackupsMock).not.toHaveBeenCalled();
+    expect(resetRuntimeStateMock).not.toHaveBeenCalled();
+    expect(signals.transactions.value).toHaveLength(1);
+    expect(localStorage.getItem(SK.RECURRING)).not.toBeNull();
+    // Backups are still intact on disk.
+    expect(localStorage.getItem('harbor_auto_backups')).not.toBeNull();
+    expect(localStorage.getItem('harbor_backup_legacy_1')).not.toBeNull();
+    // Snapshot restore keeps user configuration keys aligned with the
+    // ledger that wasn't wiped.
+    expect(localStorage.getItem('harbor_backup_schedule')).toBe(JSON.stringify({ enabled: true }));
+  });
+
+  it('still reports failure when backup cleanup fails AFTER main ledger wipe succeeds', async () => {
+    // Second half of the prior-batch P2 contract: if the main-ledger wipe
+    // succeeds but backup cleanup later returns false, the reset still
+    // reports `{ok: false}` so the caller can surface the partial-success
+    // state to the user. Signals haven't been rehydrated to defaults (the
+    // steps past `clearBackupStorage` never ran), and localStorage snapshot
+    // restore keeps PIN/theme/currency consistent with the ledger.
+    clearAllStorageMock.mockResolvedValue(true);
     clearAllBackupsMock.mockResolvedValue(false);
 
     const result = await resetAppData({ clearBackups: true });
 
     expect(result).toEqual({ ok: false, clearBackups: true });
-    expect(clearAllStorageMock).not.toHaveBeenCalled();
+    expect(clearAllStorageMock).toHaveBeenCalledTimes(1);
+    expect(clearAllBackupsMock).toHaveBeenCalledTimes(1);
     expect(resetRuntimeStateMock).not.toHaveBeenCalled();
-    expect(signals.transactions.value).toHaveLength(1);
-    expect(localStorage.getItem(SK.RECURRING)).not.toBeNull();
-    expect(localStorage.getItem('budget_tracker_backup_schedule')).toBeNull();
+    // Snapshot restore salvaged the user's config keys.
+    expect(localStorage.getItem(SK.THEME)).toBe(JSON.stringify('light'));
+    expect(localStorage.getItem(SK.PIN)).toBe(JSON.stringify('hashed-pin'));
+  });
+
+  it('does not leak migration-marker keys when the reset fails before any destructive step', async () => {
+    // Rev 13 L70 regression guard: the prior code wrote
+    // `budget_tracker_idb_migration` + `budget_tracker_migrated_to_idb`
+    // inside `try` but BEFORE `clearBackupStorage`. When the backup-clear
+    // step returned false, the rollback path (`restoreLocalStorageSnapshot`)
+    // only re-set snapshotted entries — it had no way to remove keys
+    // added AFTER the snapshot, so the markers stayed on disk even though
+    // the reset reported `{ok: false}` and no destructive work had run.
+    // Fix: the pre-wipe `restoreMigrationMarkers()` call moved to
+    // immediately before `removeAppLocalStorageKeys`, so it only runs once
+    // main-IDB clearing has succeeded.
+    clearAllBackupsMock.mockResolvedValue(false);
+
+    const result = await resetAppData({ clearBackups: true });
+
+    expect(result.ok).toBe(false);
+    expect(localStorage.getItem('budget_tracker_idb_migration')).toBeNull();
+    expect(localStorage.getItem('budget_tracker_migrated_to_idb')).toBeNull();
+  });
+
+  it('does not leak migration-marker keys when storageManager.clearAll fails', async () => {
+    clearAllStorageMock.mockResolvedValue(false);
+
+    const result = await resetAppData({ clearBackups: true });
+
+    expect(result.ok).toBe(false);
+    // Main ledger failed to wipe; no localStorage key wipes have run yet,
+    // so markers must NOT have been written on this aborted path.
+    expect(localStorage.getItem('budget_tracker_idb_migration')).toBeNull();
+    expect(localStorage.getItem('budget_tracker_migrated_to_idb')).toBeNull();
   });
 });

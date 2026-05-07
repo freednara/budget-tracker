@@ -7,6 +7,8 @@
 'use strict';
 
 import { isTrackedExpenseTransaction } from '../core/transaction-classification.js';
+import { toCents, toDollars, parseAmount } from '../core/utils-pure.js';
+import { trackError } from '../core/error-tracker.js';
 import type {
   Transaction,
   TransactionFilters,
@@ -51,10 +53,15 @@ interface WorkerMessage {
 
 export interface WorkerDatasetDelta {
   type: 'add' | 'update' | 'delete' | 'batch-add' | 'batch-delete' | 'split';
-  item?: Transaction;
-  items?: Transaction[];
-  id?: string;
-  ids?: string[];
+  // Phase 6 Slice 1j (rev 12 L6): widened optional fields to allow
+  // explicit `undefined` under `exactOptionalPropertyTypes`, matching
+  // the shared `TransactionDataChange` contract so `app-init-di.ts`
+  // can forward a `change` directly without copying field-by-field.
+  item?: Transaction | undefined;
+  items?: Transaction[] | undefined;
+  id?: string | undefined;
+  ids?: string[] | undefined;
+  previousItem?: Transaction | undefined;
 }
 
 interface WorkerResponse {
@@ -64,11 +71,14 @@ interface WorkerResponse {
   error?: string;
 }
 
+// Phase 6 Slice 1j (rev 12 L6): `abortController` widened for
+// `exactOptionalPropertyTypes` — the constructor at line 261 passes the
+// parameter (typed `AbortController | undefined`) directly through.
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timeoutId: ReturnType<typeof setTimeout>;
-  abortController?: AbortController;
+  abortController?: AbortController | undefined;
 }
 
 interface WorkerStatus {
@@ -85,7 +95,6 @@ interface WorkerStatus {
 const WORKER_THRESHOLD = 1000; // FIXED: Lowered from 5000 to prevent mobile stuttering
 const REQUEST_TIMEOUT = 8000; // 8 second timeout for worker requests (faster fallback to sync)
 const MAX_PENDING_REQUESTS = 100; // Reject new requests if queue exceeds this size
-const ALWAYS_USE_WORKER_FOR = ['aggregate', 'yearStats', 'allTimeStats']; // Expensive operations
 
 // ==========================================
 // MODULE STATE
@@ -96,6 +105,16 @@ let workerInstance: Worker | null = null;
 let requestIdCounter = 0;
 const pendingRequests = new Map<number, PendingRequest>();
 let isDatasetInitialized = false;
+// Round 7 fix: Track dataset revision for delta sync validation
+let dataRevision = 0;
+
+// Round 7 fix: Reset requestIdCounter when it exceeds 1 million to prevent overflow
+function getNextRequestId(): number {
+  if (++requestIdCounter > 1_000_000) {
+    requestIdCounter = 1;
+  }
+  return requestIdCounter;
+}
 
 // ==========================================
 // WORKER SUPPORT
@@ -156,6 +175,17 @@ function getWorker(): Worker | null {
 
       workerInstance.onerror = (e: ErrorEvent) => {
         if (import.meta.env.DEV) console.error('Worker error:', e.message);
+        // Fixes H15 (Inline-Behavior-Review rev 12): previously this path
+        // was DEV-only logged while every pending request got rejected
+        // with a generic "Worker error" — prod had no telemetry when the
+        // worker thread died. Route through trackError so we can see how
+        // often and why this happens (quota, script error, OOM). The
+        // worker is still terminated + all pending rejected because
+        // onerror at the worker-scope is unrecoverable.
+        trackError(new Error(`Worker error: ${e.message}`), {
+          module: 'worker-manager',
+          action: 'workerInstance.onerror'
+        });
         // Reject all pending requests
         pendingRequests.forEach((pending) => {
           clearTimeout(pending.timeoutId);
@@ -218,7 +248,7 @@ function sendWorkerRequest<T>(
       return;
     }
 
-    const requestId = ++requestIdCounter;
+    const requestId = getNextRequestId();
 
     // Handle external cancellation
     if (abortController?.signal.aborted) {
@@ -228,8 +258,20 @@ function sendWorkerRequest<T>(
 
     const timeoutId = setTimeout(() => {
       pendingRequests.delete(requestId);
-      // Send abort message to worker so it can cancel in-progress work
-      try { worker.postMessage({ type: 'abort', requestId }); } catch (_) { /* worker may be terminated */ }
+      // Fixes H15 (Inline-Behavior-Review rev 12): the worker now has an
+      // explicit `'abort'` switch arm — previously this postMessage hit
+      // the default: branch and threw "Unknown message type: abort",
+      // firing onerror and poisoning every *other* in-flight request.
+      // Pass abortRequestId as payload so the worker knows which request
+      // to cancel (requestId on the envelope is this abort message's own
+      // correlation ID and unrelated to the in-flight op).
+      try {
+        worker.postMessage({
+          type: 'abort',
+          payload: { abortRequestId: requestId },
+          requestId
+        });
+      } catch (_) { /* worker may be terminated */ }
       reject(new Error('Worker request timeout'));
     }, REQUEST_TIMEOUT);
 
@@ -246,6 +288,18 @@ function sendWorkerRequest<T>(
     abortController?.signal.addEventListener('abort', () => {
       clearTimeout(timeoutId);
       pendingRequests.delete(requestId);
+      // Fixes H15 (Inline-Behavior-Review rev 12): the AbortController path
+      // previously only cleaned main-thread state — the worker kept
+      // computing and its eventual result was silently dropped, wasting the
+      // worker thread on abandoned work. Unify cancellation with the
+      // timeout path by telling the worker to cancel too.
+      try {
+        worker.postMessage({
+          type: 'abort',
+          payload: { abortRequestId: requestId },
+          requestId
+        });
+      } catch (_) { /* worker may be terminated */ }
       reject(new Error('Request aborted'));
     }, { once: true });
 
@@ -254,12 +308,32 @@ function sendWorkerRequest<T>(
 }
 
 /**
+ * Round 7 fix: Retry mechanism for crashed worker - attempt to reinitialize and resync
+ */
+async function retryWorkerAfterCrash(
+  originalTx: Transaction[],
+  retryPayload: unknown,
+  retryType: WorkerMessage['type'] | 'update'
+): Promise<unknown> {
+  if (!isWorkerSupported()) throw new Error('Worker not supported');
+
+  // Reset state so worker can be reinitialized
+  isDatasetInitialized = false;
+
+  // Reinitialize with fresh worker instance
+  await syncWorkerDataset(originalTx);
+
+  // Retry the original request
+  return sendWorkerRequest(retryType, retryPayload);
+}
+
+/**
  * Explicitly update the worker's in-memory dataset
  * This reduces data transfer for subsequent filter/aggregate calls
  */
 export async function syncWorkerDataset(
   transactions: Transaction[], 
-  categories?: Record<string, any>
+  categories?: Record<string, unknown>
 ): Promise<void> {
   if (!isWorkerSupported()) return;
   
@@ -279,7 +353,7 @@ export async function syncWorkerDataset(
  */
 export async function syncWorkerDatasetDelta(
   change: WorkerDatasetDelta,
-  categories?: Record<string, any>
+  categories?: Record<string, unknown>
 ): Promise<void> {
   if (!isWorkerSupported()) return;
   if (!isDatasetInitialized) {
@@ -311,9 +385,21 @@ export async function filterTransactionsAsync(
 ): Promise<FilterResult> {
   const { sortBy = 'date', sortDir = 'desc', page = 0, pageSize = 50 } = options;
 
+  // CR-Apr24-F finding 230: pre-parse amount-range strings locale-awarely
+  // on the main thread before forwarding to the worker. The worker runs
+  // without `window` so `parseAmount` falls back to raw `parseFloat`,
+  // which misparses locale-formatted amounts like "1.234,56".
+  const workerFilters = { ...filters };
+  if (workerFilters.minAmount !== undefined && workerFilters.minAmount !== '') {
+    workerFilters.minAmount = parseAmount(String(workerFilters.minAmount));
+  }
+  if (workerFilters.maxAmount !== undefined && workerFilters.maxAmount !== '') {
+    workerFilters.maxAmount = parseAmount(String(workerFilters.maxAmount));
+  }
+
   return sendWorkerRequest<FilterResult>('filter', {
     transactions, // Worker will use in-memory if null
-    filters,
+    filters: workerFilters,
     sortBy,
     sortDir,
     page,
@@ -346,7 +432,22 @@ export async function searchTransactionsAsync(
   limit: number = 50,
   abortController?: AbortController
 ): Promise<Transaction[]> {
-  return sendWorkerRequest<Transaction[]>('search', { transactions, query, limit }, abortController);
+  // CR-Apr24-F finding 240: the worker resolves the 'search' request with
+  // a paginated wrapper object ({ items, totalPages, ... }), not a raw
+  // Transaction[]. Extract .items so the public API contract holds.
+  interface PaginatedSearchResult {
+    items: Transaction[];
+    totalPages: number;
+    currentPage: number;
+    totalItems: number;
+    hasMore: boolean;
+  }
+  const result = await sendWorkerRequest<PaginatedSearchResult | Transaction[]>(
+    'search', { transactions, query, limit }, abortController
+  );
+  // Guard: if the worker ever returns a raw array (future change), handle both.
+  if (Array.isArray(result)) return result;
+  return (result as PaginatedSearchResult).items;
 }
 
 // ==========================================
@@ -365,7 +466,7 @@ export function filterTransactionsSync(
   const normalizedFilters = filters as TransactionFilters & { search?: string; tagsFilter?: string };
 
   // Apply filters
-  let filtered = transactions.filter(tx => {
+  const filtered = transactions.filter(tx => {
     const {
       monthKey,
       showAllMonths,
@@ -421,9 +522,15 @@ export function filterTransactionsSync(
     if (dateFrom && tx.date < dateFrom) return false;
     if (dateTo && tx.date > dateTo) return false;
 
-    // Amount range
-    if (minAmount !== undefined && minAmount !== '' && tx.amount < parseFloat(String(minAmount))) return false;
-    if (maxAmount !== undefined && maxAmount !== '' && tx.amount > parseFloat(String(maxAmount))) return false;
+    // Amount range — locale-aware parse (M9, Inline-Behavior-Review rev 12).
+    // Filter inputs come from the amount-range UI, which a non-en-US user
+    // types in their locale's format ("1.000,00"); raw `parseFloat` silently
+    // returned 1 for that input and filtered out every transaction ≥ 1.
+    // `parseAmount` routes through `localeService.parseCurrency` and returns
+    // 0 on NaN so an unparseable filter value is equivalent to "no bound"
+    // (same end-user observation as the prior empty-string branch).
+    if (minAmount !== undefined && minAmount !== '' && tx.amount < parseAmount(String(minAmount))) return false;
+    if (maxAmount !== undefined && maxAmount !== '' && tx.amount > parseAmount(String(maxAmount))) return false;
 
     // Recurring filter
     if (recurringOnly && !tx.recurring) return false;
@@ -460,29 +567,51 @@ export function filterTransactionsSync(
   });
 
   // Calculate aggregations
-  const aggregations = filtered.reduce<WorkerAggregations>((acc, tx) => {
-    const amt = parseFloat(String(tx.amount)) || 0;
+  // Fixes H12 (Inline-Behavior-Review rev 12): mirror the worker's cents-math
+  // invariant in this main-thread fallback. Previously the reducer summed
+  // floats directly, so datasets that crossed the 5k-tx worker threshold got
+  // integer cents (via the worker) while smaller datasets or worker-failure
+  // retries silently accumulated FP error. Accumulating in cents via toCents
+  // and exposing dollars via toDollars keeps both paths numerically identical.
+  const aggregationCents = filtered.reduce<{
+    totalIncomeCents: number;
+    totalExpensesCents: number;
+    incomeCount: number;
+    expenseCount: number;
+    categoryTotalsCents: Record<string, number>;
+  }>((acc, tx) => {
+    const amtCents = toCents(parseFloat(String(tx.amount)) || 0);
     if (tx.type === 'income') {
-      acc.totalIncome += amt;
+      acc.totalIncomeCents += amtCents;
       acc.incomeCount++;
     } else if (isTrackedExpenseTransaction(tx)) {
-      acc.totalExpenses += amt;
+      acc.totalExpensesCents += amtCents;
       acc.expenseCount++;
-      acc.categoryTotals[tx.category] = (acc.categoryTotals[tx.category] || 0) + amt;
+      acc.categoryTotalsCents[tx.category] = (acc.categoryTotalsCents[tx.category] || 0) + amtCents;
     }
     return acc;
   }, {
-    totalIncome: 0,
-    totalExpenses: 0,
+    totalIncomeCents: 0,
+    totalExpensesCents: 0,
     incomeCount: 0,
     expenseCount: 0,
-    categoryTotals: {},
-    balance: 0,
-    totalCount: 0
+    categoryTotalsCents: {}
   });
 
-  aggregations.balance = aggregations.totalIncome - aggregations.totalExpenses;
-  aggregations.totalCount = filtered.length;
+  const categoryTotals: Record<string, number> = {};
+  for (const [cat, cents] of Object.entries(aggregationCents.categoryTotalsCents)) {
+    categoryTotals[cat] = toDollars(cents);
+  }
+
+  const aggregations: WorkerAggregations = {
+    totalIncome: toDollars(aggregationCents.totalIncomeCents),
+    totalExpenses: toDollars(aggregationCents.totalExpensesCents),
+    incomeCount: aggregationCents.incomeCount,
+    expenseCount: aggregationCents.expenseCount,
+    categoryTotals,
+    balance: toDollars(aggregationCents.totalIncomeCents - aggregationCents.totalExpensesCents),
+    totalCount: filtered.length
+  };
 
   // Paginate
   const start = page * pageSize;

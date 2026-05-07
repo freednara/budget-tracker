@@ -4,11 +4,10 @@
  * Used by DataManager for atomic multi-step operations
  */
 
-import type { Transaction, OperationResult } from '../../types/index.js';
+import type { Transaction } from '../../types/index.js';
 import type { Operation } from './transaction-manager.js';
 import { DataManager } from './data-manager.js';
 import { emit, Events } from '../core/event-bus.js';
-import { toCents, toDollars } from '../core/utils.js';
 
 // ==========================================
 // TRANSACTION OPERATIONS
@@ -20,23 +19,35 @@ import { toCents, toDollars } from '../core/utils.js';
 export class CreateTransactionOperation implements Operation<Transaction> {
   name = 'CreateTransaction';
   private createdTransaction?: Transaction;
-  
+  // New-batch P2: track whether the create was a real persistence vs an
+  // idempotent hit. A hit means the row pre-dated this operation, so
+  // rolling back by deletion would destroy data we didn't create.
+  private wasFreshlyCreated = false;
+
   constructor(
     private dataManager: DataManager,
     private transactionData: Partial<Transaction>
   ) {}
-  
+
   async execute(): Promise<Transaction> {
     const result = await this.dataManager.create(this.transactionData);
     if (!result.isOk || !result.data) {
       throw new Error(result.error || 'Failed to create transaction');
     }
     this.createdTransaction = result.data;
+    // `alreadyExisted === true` ⇒ the row was already in the store when
+    // `dataManager.create()` ran and the call was a no-op. Leave
+    // `wasFreshlyCreated` false so `rollback()` is a no-op as well.
+    this.wasFreshlyCreated = result.alreadyExisted !== true;
     return this.createdTransaction;
   }
-  
+
   async rollback(): Promise<void> {
-    if (this.createdTransaction) {
+    // New-batch P2: skip rollback when the row was not freshly persisted
+    // by this operation. Previously `rollback()` always deleted the row
+    // whose `__backendId` matched, which silently destroyed pre-existing
+    // data on any outer-transaction abort.
+    if (this.createdTransaction && this.wasFreshlyCreated) {
       await this.dataManager.delete(this.createdTransaction);
       // Emit rollback event for UI updates
       emit(Events.TRANSACTION_DELETED, this.createdTransaction);
@@ -49,8 +60,10 @@ export class CreateTransactionOperation implements Operation<Transaction> {
  */
 export class UpdateTransactionOperation implements Operation<Transaction> {
   name = 'UpdateTransaction';
-  private originalTransaction?: Transaction;
-  private updatedTransaction?: Transaction;
+  // Phase 6 Slice 1j (rev 12 L6): widened for `exactOptionalPropertyTypes`
+  // — `dataManager.get()` returns `Transaction | undefined`.
+  private originalTransaction?: Transaction | undefined;
+  private updatedTransaction?: Transaction | undefined;
   
   constructor(
     private dataManager: DataManager,
@@ -92,7 +105,9 @@ export class UpdateTransactionOperation implements Operation<Transaction> {
  */
 export class DeleteTransactionOperation implements Operation<void> {
   name = 'DeleteTransaction';
-  private deletedTransaction?: Transaction;
+  // Phase 6 Slice 1j (rev 12 L6): widened for `exactOptionalPropertyTypes`
+  // — `dataManager.get()` returns `Transaction | undefined`.
+  private deletedTransaction?: Transaction | undefined;
   
   constructor(
     private dataManager: DataManager,
@@ -142,18 +157,26 @@ export class BulkCreateTransactionsOperation implements Operation<Transaction[]>
     if (!result.isOk || !result.data) {
       throw new Error(`Bulk create failed: ${result.error}`);
     }
+    // New-batch P2: `result.data` now reflects only the rows actually
+    // persisted by this call (drafts whose `__backendId` were not
+    // already present). Track that subset so `rollback()` never deletes
+    // a pre-existing row that was merely conflated by the idempotency
+    // guard. Previously `result.data` was the full drafted array and
+    // rollback happily deleted unrelated user data.
     this.createdTransactions = result.data;
     return this.createdTransactions;
   }
-  
+
   async rollback(): Promise<void> {
-    // Delete all created transactions in reverse order
+    // Delete only the transactions actually created by this operation.
+    // `createdTransactions` is already scoped to the persisted subset
+    // by `execute()` above.
     for (const tx of [...this.createdTransactions].reverse()) {
       if (tx.__backendId) {
         await this.dataManager.delete(tx);
       }
     }
-    
+
     // Emit batch rollback event using consistent naming
     if (this.createdTransactions.length > 0) {
       emit(Events.TRANSACTION_ROLLBACK_BATCH, this.createdTransactions);
@@ -209,7 +232,7 @@ export class BulkUpdateTransactionsOperation implements Operation<Transaction[]>
   
   async rollback(): Promise<void> {
     // Restore all original transactions
-    for (const [id, original] of this.originalTransactions) {
+    for (const [, original] of this.originalTransactions) {
       await this.dataManager.update(original);
     }
   }

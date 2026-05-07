@@ -21,12 +21,23 @@ interface AppRuntimeInfo {
   serviceWorkerControlled: boolean;
 }
 
+// Phase 6 cleanup (no-explicit-any sweep): the 22 `(window as any)` casts
+// in this file are now typed writes against the Window augmentation in
+// `js/types/globals.d.ts`. The additional entries needed here
+// (__APP_ERRORS__, __APP_INITIALIZED__, __APP_VERSION__, __APP_BUILD_TIME__,
+// __APP_RUNTIME_INFO__, __APP_TEST_API__) live alongside the existing
+// startup-progress contract in that file — see `AppRuntimeInfo` above for
+// the runtime-info payload shape and `HarborLedgerTestApi` (declared in
+// globals.d.ts) for the Playwright test handle.
+
+let performanceMonitoringCleanup: (() => void) | null = null;
+
 function setAppDataset(name: string, value: string): void {
   document.documentElement.dataset[name] = value;
 }
 
 function isStartupDebugEnabled(): boolean {
-  return import.meta.env.DEV && typeof window !== 'undefined' && (window as any).__APP_DEBUG_STARTUP__ === true;
+  return import.meta.env.DEV && typeof window !== 'undefined' && window.__APP_DEBUG_STARTUP__ === true;
 }
 
 function isStandaloneRuntime(): boolean {
@@ -44,9 +55,9 @@ function getRuntimeInfo(): AppRuntimeInfo {
 
 function publishRuntimeInfo(): void {
   const runtimeInfo = getRuntimeInfo();
-  (window as any).__APP_VERSION__ = runtimeInfo.version;
-  (window as any).__APP_BUILD_TIME__ = runtimeInfo.buildTime;
-  (window as any).__APP_RUNTIME_INFO__ = runtimeInfo;
+  window.__APP_VERSION__ = runtimeInfo.version;
+  window.__APP_BUILD_TIME__ = runtimeInfo.buildTime;
+  window.__APP_RUNTIME_INFO__ = runtimeInfo;
   setAppDataset('appVersion', runtimeInfo.version);
   setAppDataset('appRuntime', runtimeInfo.runtimeMode);
   setAppDataset('appSwControlled', runtimeInfo.serviceWorkerControlled ? 'true' : 'false');
@@ -118,11 +129,30 @@ async function activateWaitingServiceWorker(registration: ServiceWorkerRegistrat
 async function syncRuntimeVersion(): Promise<void> {
   publishRuntimeInfo();
 
-  const versionKey = 'budget_tracker_runtime_version';
-  const previousVersion = safeStorage.getItem(versionKey);
+  // The harbor_ rebrand renamed this key from budget_tracker_runtime_version.
+  // On the first launch after upgrade, the new key is absent but the legacy
+  // key still holds the previous version, so we fall back to it. Without this
+  // fallback, upgraded installs look like a fresh first-run and skip the
+  // previousVersion → cache-clear + SW-refresh branch below — the exact branch
+  // the rebrand relies on. After migration we drop the legacy key so it only
+  // runs once.
+  const versionKey = 'harbor_runtime_version';
+  const legacyVersionKey = 'budget_tracker_runtime_version';
+  const currentStored = safeStorage.getItem(versionKey);
+  const legacyStored = safeStorage.getItem(legacyVersionKey);
+  const previousVersion = currentStored !== null ? currentStored : legacyStored;
   const currentVersion = __APP_VERSION__;
 
+  // Clear the legacy key as soon as we've observed it — one-shot migration.
+  if (legacyStored !== null) {
+    safeStorage.removeItem(legacyVersionKey);
+  }
+
   if (previousVersion === currentVersion) {
+    // Still persist to the new key in case we only had the legacy copy.
+    if (currentStored !== currentVersion) {
+      safeStorage.setItem(versionKey, currentVersion);
+    }
     return;
   }
 
@@ -169,14 +199,14 @@ async function main(): Promise<void> {
       return;
     }
 
-    (window as any).__APP_ERRORS__ = null;
-    (window as any).__APP_STARTUP_PROGRESS__ = null;
-    (window as any).__APP_SHELL_READY__ = false;
-    (window as any).__APP_INTERACTIVE_READY__ = false;
-    (window as any).__APP_BACKGROUND_READY__ = false;
-    (window as any).__APP_BACKGROUND_FAILED__ = false;
-    (window as any).__APP_INITIALIZED__ = false;
-    (window as any).__APP_TEST_API__ = null;
+    window.__APP_ERRORS__ = null;
+    window.__APP_STARTUP_PROGRESS__ = null;
+    window.__APP_SHELL_READY__ = false;
+    window.__APP_INTERACTIVE_READY__ = false;
+    window.__APP_BACKGROUND_READY__ = false;
+    window.__APP_BACKGROUND_FAILED__ = false;
+    window.__APP_INITIALIZED__ = false;
+    window.__APP_TEST_API__ = null;
     setAppDataset('appError', 'false');
     setAppDataset('appShellReady', 'false');
     setAppDataset('appInitialized', 'false');
@@ -200,17 +230,23 @@ async function main(): Promise<void> {
     const initTime = perfMonitor.measure('app.init', 'app.init.start');
     if (isStartupDebugEnabled()) console.log(`Budget Tracker initialized in ${initTime.toFixed(2)}ms`);
 
-    // Show success message
-    showToast('Harbor Ledger ready', 'success');
+    // Show success message only on first visit (skip on subsequent page loads)
+    if (!sessionStorage.getItem('_hl_shown_ready')) {
+      showToast('Harbor Ledger ready', 'success');
+      try { sessionStorage.setItem('_hl_shown_ready', '1'); } catch { /* ignore */ }
+    }
 
     // Signal that blocking startup is complete and the interactive app is ready.
-    (window as any).__APP_INITIALIZED__ = true;
+    window.__APP_INITIALIZED__ = true;
     setAppDataset('appInitialized', 'true');
     publishRuntimeInfo();
 
-    if ((window as any).__PW_TEST__ === true) {
-      (window as any).__APP_TEST_API__ = {
-        switchMainTab,
+    if (window.__PW_TEST__ === true) {
+      window.__APP_TEST_API__ = {
+        // Widen the MainTab-typed signature to `(tab: string) => void` for
+        // Playwright consumers. switchMainTab validates the tab name at
+        // runtime, so this is safe.
+        switchMainTab: (tab: string) => switchMainTab(tab as never),
       };
     }
 
@@ -222,13 +258,13 @@ async function main(): Promise<void> {
 
   } catch (error) {
     if (import.meta.env.DEV) console.error('Failed to initialize application:', error);
-    (window as any).__APP_ERRORS__ = error instanceof Error ? error.message : String(error);
-    (window as any).__APP_STARTUP_PROGRESS__ = 'initialize:error';
-    (window as any).__APP_SHELL_READY__ = false;
-    (window as any).__APP_INTERACTIVE_READY__ = false;
-    (window as any).__APP_BACKGROUND_READY__ = false;
-    (window as any).__APP_BACKGROUND_FAILED__ = false;
-    (window as any).__APP_INITIALIZED__ = false;
+    window.__APP_ERRORS__ = error instanceof Error ? error.message : String(error);
+    window.__APP_STARTUP_PROGRESS__ = 'initialize:error';
+    window.__APP_SHELL_READY__ = false;
+    window.__APP_INTERACTIVE_READY__ = false;
+    window.__APP_BACKGROUND_READY__ = false;
+    window.__APP_BACKGROUND_FAILED__ = false;
+    window.__APP_INITIALIZED__ = false;
     setAppDataset('appError', 'true');
     setAppDataset('appShellReady', 'false');
     setAppDataset('appInitialized', 'false');
@@ -260,8 +296,11 @@ function setupErrorHandling(): void {
   // Handle unhandled errors
   window.addEventListener('error', (event) => {
     if (import.meta.env.DEV) console.error('Unhandled error:', event.error);
+    // ErrorEvent.error is typed `any` in lib.dom — narrow via instanceof so
+    // we don't propagate the `any` into recordMetric's tag map.
+    const errorMessage = event.error instanceof Error ? event.error.message : event.message;
     perfMonitor.recordMetric('app.error.unhandled', 1, 'count', {
-      message: event.error?.message || event.message,
+      message: errorMessage,
       filename: event.filename,
       line: event.lineno?.toString(),
       column: event.colno?.toString()
@@ -271,8 +310,10 @@ function setupErrorHandling(): void {
   // Handle unhandled promise rejections
   window.addEventListener('unhandledrejection', (event) => {
     if (import.meta.env.DEV) console.error('Unhandled promise rejection:', event.reason);
+    // PromiseRejectionEvent.reason is typed `any`; narrow defensively.
+    const reasonText = event.reason instanceof Error ? event.reason.message : String(event.reason);
     perfMonitor.recordMetric('app.error.promise', 1, 'count', {
-      reason: event.reason?.message || String(event.reason)
+      reason: reasonText
     });
   });
 }
@@ -285,8 +326,10 @@ function setupErrorHandling(): void {
  * Setup performance monitoring and reporting
  */
 function setupPerformanceMonitoring(): void {
+  performanceMonitoringCleanup?.();
+
   // Monitor page visibility
-  document.addEventListener('visibilitychange', () => {
+  const visibilityHandler = (): void => {
     if (document.hidden) {
       perfMonitor.recordMetric('app.visibility.hidden', 1, 'count');
       // Only record metric when hidden — do NOT call cleanupApp()
@@ -294,12 +337,13 @@ function setupPerformanceMonitoring(): void {
     } else {
       perfMonitor.recordMetric('app.visibility.visible', 1, 'count');
     }
-  });
+  };
+  document.addEventListener('visibilitychange', visibilityHandler);
 
   // Memory monitoring handled by perfMonitor.startMemoryMonitoring() internally
 
   // Log performance report before unload
-  window.addEventListener('beforeunload', () => {
+  const beforeUnloadHandler = (): void => {
     // Log final performance report
     if (import.meta.env.DEV) {
       perfMonitor.logReport();
@@ -307,11 +351,16 @@ function setupPerformanceMonitoring(): void {
     
     // Cleanup application
     cleanupApp();
-  });
+  };
+  window.addEventListener('beforeunload', beforeUnloadHandler);
 
   // Long task monitoring is registered centrally by performance-integration.ts
   // during development. Keep app-level monitoring focused on lifecycle events
   // so dev logs do not duplicate every long task warning.
+  performanceMonitoringCleanup = () => {
+    document.removeEventListener('visibilitychange', visibilityHandler);
+    window.removeEventListener('beforeunload', beforeUnloadHandler);
+  };
 }
 
 // ==========================================
@@ -366,12 +415,17 @@ if (document.readyState === 'loading') {
 
 // In dev mode, unregister any stale service workers that cause request interception noise
 if (import.meta.env.DEV && 'serviceWorker' in navigator) {
-  navigator.serviceWorker.getRegistrations().then(registrations => {
-    for (const reg of registrations) {
-      reg.unregister();
-      if (import.meta.env.DEV) console.log('Dev mode: unregistered stale service worker');
+  void (async () => {
+    try {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      for (const reg of registrations) {
+        await reg.unregister();
+        if (import.meta.env.DEV) console.log('Dev mode: unregistered stale service worker');
+      }
+    } catch (err) {
+      console.error('Dev mode: failed to unregister stale service workers', err);
     }
-  });
+  })();
 }
 
 // Set up service worker update listener after app loads
@@ -387,6 +441,8 @@ window.addEventListener('load', () => {
 if (import.meta.hot) {
   import.meta.hot.accept(() => {
     console.log('HMR: Module updated, reloading...');
+    performanceMonitoringCleanup?.();
+    performanceMonitoringCleanup = null;
     cleanupApp();
     window.location.reload();
   });

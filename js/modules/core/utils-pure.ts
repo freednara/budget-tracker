@@ -9,6 +9,7 @@
 
 import type { Transaction, CurrencySettings } from '../../types/index.js';
 import { localeService } from './locale-service.js';
+import { isTrackedExpenseTransaction } from './transaction-classification.js';
 
 // ==========================================
 // CURRENCY MAPPING
@@ -18,34 +19,127 @@ import { localeService } from './locale-service.js';
  * Canonical currency symbol map (single source of truth).
  * Update ONLY this map when adding currencies.
  */
+// CR-Apr24-I findings 373/374: parity with locale-service
+// getAvailableCurrencies() — every code the Settings dropdown offers
+// must have a symbol entry here so fmtCur / fmtShort never fall back
+// to the raw ISO code.
 export const CURRENCY_MAP: Record<string, string> = {
   USD: '$', EUR: '€', GBP: '£', JPY: '¥', CAD: 'C$', AUD: 'A$',
   CHF: 'Fr', CNY: '¥', INR: '₹', MXN: 'Mex$', BRL: 'R$', KRW: '₩',
   SEK: 'kr', NOK: 'kr', DKK: 'kr', PLN: 'zł', THB: '฿', IDR: 'Rp',
   HUF: 'Ft', CZK: 'Kč', ILS: '₪', CLP: '$', PHP: '₱', AED: 'د.إ',
-  COP: '$', SAR: '﷼', MYR: 'RM', ZAR: 'R'
+  COP: '$', SAR: '﷼', MYR: 'RM', ZAR: 'R',
+  NZD: '$', SGD: '$', RUB: '₽', HKD: '$', TRY: '₺',
+  EGP: '£', RON: 'lei', NGN: '₦', ARS: '$', UAH: '₴',
+  VND: '₫', PKR: '₨', BDT: '৳'
 };
 
 // ==========================================
 // CURRENCY FORMATTING
 // ==========================================
 
-interface StateWithCurrency {
-  currency?: CurrencySettings;
+/**
+ * Decimal places per currency code. Unlisted codes default to 2.
+ */
+export const CURRENCY_DECIMALS: Record<string, number> = {
+  JPY: 0, KRW: 0, VND: 0, HUF: 0, CLP: 0, IDR: 0
+};
+
+/** Cached state for the reactive currency formatter. */
+let _fmtCode = 'USD';
+let _fmtSymbol = '$';
+let _fmtDecimals = 2;
+let _fmtIntl: Intl.NumberFormat | null = null;
+// CR-Apr24-I finding 82: detect whether the locale places the currency
+// symbol after the number (e.g. "1 234 €" for fr-FR) so `fmtShort` can
+// mirror the same placement instead of always hardcoding symbol-first.
+let _fmtSymbolAfter = false;
+
+/**
+ * Synchronise the currency formatter with the current CurrencySettings.
+ * Call this once at app start and whenever the user changes currency.
+ * Avoids a circular import: signals → utils-pure is already taken,
+ * so data-actions (which owns setCurrencySettings) pushes changes here.
+ */
+export function syncCurrencyFormat(settings: CurrencySettings): void {
+  if (settings.home === _fmtCode && settings.symbol === _fmtSymbol) return;
+  _fmtCode = settings.home;
+  _fmtSymbol = settings.symbol;
+  _fmtDecimals = CURRENCY_DECIMALS[_fmtCode] ?? 2;
+  _fmtIntl = null; // recreated lazily on next fmtCur call
+
+  // Finding 82: probe Intl to determine symbol placement for the
+  // user's locale + currency combination.
+  try {
+    const probe = new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: _fmtCode
+    });
+    const parts = probe.formatToParts(1);
+    const currIdx = parts.findIndex(p => p.type === 'currency');
+    const intIdx = parts.findIndex(p => p.type === 'integer');
+    _fmtSymbolAfter = currIdx > intIdx;
+  } catch {
+    _fmtSymbolAfter = false;
+  }
+}
+
+function getCurrencyFormatter(): Intl.NumberFormat {
+  if (!_fmtIntl) {
+    // CR-Apr24-I finding 81: use `style: 'currency'` so Intl handles symbol
+    // placement per locale (e.g. "1.234,56 €" for de-DE) instead of hardcoding
+    // symbol-before-number for every locale.
+    _fmtIntl = new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: _fmtCode,
+      minimumFractionDigits: _fmtDecimals,
+      maximumFractionDigits: _fmtDecimals,
+      useGrouping: true
+    });
+  }
+  return _fmtIntl;
 }
 
 /**
- * Format amount as currency string using locale-aware formatting
+ * Format an amount as a currency string.
+ * Reactive to the user's chosen currency when syncCurrencyFormat has been called.
+ * Uses Intl.NumberFormat with `style: 'currency'` for locale-aware symbol
+ * placement, grouping, and decimals. CR-Apr24-I finding 81.
  */
-export function fmtCur(amount: number, currency?: string, S?: StateWithCurrency): string {
-  // Use locale service if available
-  if (typeof window !== 'undefined' && localeService) {
-    return localeService.formatCurrency(amount);
+export function fmtCur(amount: number): string {
+  if (typeof amount !== 'number' || isNaN(amount)) {
+    return getCurrencyFormatter().format(0);
   }
-  
-  // Fallback for testing/server environments
-  const sym = currency ? (CURRENCY_MAP[currency] || '') : S?.currency?.symbol || '$';
-  return `${sym}${Number(amount).toFixed(2)}`;
+  return getCurrencyFormatter().format(amount);
+}
+
+/**
+ * Short currency formatter for compact labels (chart axes, week badges, etc.).
+ *
+ * Collapses values ≥1,000 into a `1.5k` / `12k` form using the user's current
+ * currency symbol. Lives in `utils-pure` (not the chart layer) so components
+ * and widgets can depend on it without crossing the components → ui
+ * architecture boundary enforced by `architecture-contract.test.ts`.
+ */
+export function fmtShort(v: number): string {
+  const sign = v < 0 ? '-' : '';
+  const abs = Math.abs(v);
+  // CR-Apr24-I finding 354: round BEFORE the k-threshold check so 999.5
+  // becomes $1.0k instead of $1000.
+  const rounded = Math.round(abs * 100) / 100; // 2-decimal precision
+
+  let numStr: string;
+  if (rounded >= 1000) numStr = (rounded / 1000).toFixed(rounded >= 10000 ? 0 : 1) + 'k';
+  // CR-Apr24-I finding 353: preserve one decimal for sub-unit amounts
+  // instead of rounding 0.5 → $1 or 0.4 → $0.
+  else if (rounded % 1 === 0) numStr = String(rounded);
+  else numStr = rounded.toFixed(2);
+
+  // CR-Apr24-I finding 82: respect locale-aware symbol placement
+  // instead of always hardcoding symbol-before-number.
+  return _fmtSymbolAfter
+    ? sign + numStr + _fmtSymbol
+    : sign + _fmtSymbol + numStr;
 }
 
 // ==========================================
@@ -58,8 +152,21 @@ export function fmtCur(amount: number, currency?: string, S?: StateWithCurrency)
  */
 export function parseLocalDate(dateStr: string | Date): Date {
   if (dateStr instanceof Date) return dateStr;
+  // CR-Apr24-I findings 365/366/367: detect partial YYYY-MM strings and
+  // normalise to YYYY-MM-01 so they take the local-date path instead of
+  // falling through to `new Date(str)` which parses as UTC midnight —
+  // negative-offset timezones (e.g. America/*) would shift to the prior
+  // month's last day.
+  if (typeof dateStr === 'string' && /^\d{4}-\d{2}$/.test(dateStr)) {
+    dateStr = dateStr + '-01';
+  }
   if (typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-    const [y, m, d] = dateStr.split('-').map(Number);
+    // Phase 6 Slice 1i (rev 12 L6): regex match guarantees three
+    // parts, but TS sees each index as `number | undefined` under
+    // `noUncheckedIndexedAccess`. Destructure with explicit numeric
+    // defaults (year 1970 / month 1 / day 1) so the shape stays
+    // `number` for the `new Date(y, m, d, ...)` call.
+    const [y = 1970, m = 1, d = 1] = dateStr.split('-').map(Number);
     // Use noon (12:00) to avoid DST transitions that occur at midnight/2am
     return new Date(y, m - 1, d, 12, 0, 0);
   }
@@ -79,27 +186,52 @@ export function getMonthKey(d: Date | string): string {
  * Parse month key to Date object
  */
 export function parseMonthKey(mk: string): Date {
-  // Input validation
+  // CR-Apr24-I findings 355/356: return Invalid Date instead of silently
+  // substituting the current date — callers that branch on isNaN() (e.g.
+  // getMonthKey, monthLabel) already handle invalid dates, and callers
+  // that don't will see an obvious "Invalid Date" rather than a plausible
+  // but wrong current-month value.
   if (!mk || typeof mk !== 'string') {
-    if (import.meta.env.DEV) console.warn('parseMonthKey: Invalid input, using current date');
-    return new Date();
+    if (import.meta.env.DEV) console.warn('parseMonthKey: Invalid input');
+    return new Date(NaN);
   }
 
   const parts = mk.split('-');
   if (parts.length !== 2) {
     if (import.meta.env.DEV) console.warn('parseMonthKey: Invalid format, expected YYYY-MM');
-    return new Date();
+    return new Date(NaN);
   }
 
-  const [y, m] = parts.map(Number);
+  // Phase 6 Slice 1i (rev 12 L6): length check above + defaults
+  // here keep y/m narrowed to `number` under
+  // `noUncheckedIndexedAccess`. NaN-check catches bogus parses
+  // regardless.
+  const [y = NaN, m = NaN] = parts.map(Number);
 
   // Validate year and month ranges
-  if (isNaN(y) || isNaN(m) || y < 1900 || y > 2100 || m < 1 || m > 12) {
+  if (isNaN(y) || isNaN(m) || y < 1900 || y > 2200 || m < 1 || m > 12) {
     if (import.meta.env.DEV) console.warn(`parseMonthKey: Invalid date values y=${y}, m=${m}`);
-    return new Date();
+    return new Date(NaN);
   }
 
   return new Date(y, m - 1, 1);
+}
+
+/**
+ * Lightweight month-key decomposition that avoids the cost of a full
+ * `Date` allocation. Returns `[year, month]` as numbers (month is 1-based).
+ *
+ * Callers that only need the numeric parts — navigation maths, filtering
+ * bounds, year extraction — should use this instead of `parseMonthKey`.
+ *
+ * ARCH-04: centralises the 23 inline `mk.split('-').map(Number)` patterns
+ * scattered across the codebase.
+ */
+export function monthKeyParts(mk: string): [year: number, month: number] {
+  const sep = mk.indexOf('-');
+  const y = Number(mk.slice(0, sep));
+  const m = Number(mk.slice(sep + 1));
+  return [y, m];
 }
 
 /**
@@ -137,18 +269,60 @@ export function getNextMonthKey(mk: string): string {
 }
 
 /**
- * Get today's date as string (YYYY-MM-DD)
+ * Number of full months between two month keys (`YYYY-MM`).
+ *
+ * Inclusive-of-start, exclusive-of-end — `monthsBetweenKeys('2024-01',
+ * '2024-01')` is `0`; `'2024-01'` → `'2024-12'` is `11`. To get the
+ * *count of months in a span* (i.e., "Jan through Dec = 12 months"),
+ * add `1` at the call site.
+ *
+ * 7a (Inline-Behavior-Review, Period/scope coherence): used by
+ * `getYearStats` and `getAllTimeStats` to compute an honest
+ * "tracked-span" denominator for the published monthly averages,
+ * replacing the legacy "active months only" pattern which silently
+ * dropped zero-activity months from the denominator and overstated
+ * averages for sparse histories.
+ *
+ * Returns `NaN` on unparseable input so callers can detect the failure
+ * and fall back explicitly rather than propagating `0` (which is a
+ * valid answer for `sameMonth → sameMonth`).
  */
-export function getTodayStr(): string {
-  const n = new Date();
-  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`;
+export function monthsBetweenKeys(startMk: string, endMk: string): number {
+  const [ys, ms] = monthKeyParts(startMk);
+  const [ye, me] = monthKeyParts(endMk);
+  if (Number.isNaN(ys) || Number.isNaN(ms) || Number.isNaN(ye) || Number.isNaN(me)) {
+    return NaN;
+  }
+  return (ye - ys) * 12 + (me - ms);
 }
 
 /**
- * Format date for input field (YYYY-MM-DD)
+ * Format a Date as a local YYYY-MM-DD string (no UTC conversion).
+ *
+ * This is the canonical date-string helper for the codebase. It's the
+ * shape every date-keyed signal (transactions, budgets, allocations,
+ * streaks) uses, and `parseLocalDate` is its round-trip inverse.
+ *
+ * The legacy `formatDateForInput` name is intentional — most callers
+ * are populating `<input type="date">` fields and the name documents
+ * intent at the call site. The streak-tracker, calendar, and any
+ * non-input caller can also use this helper directly.
  */
 export function formatDateForInput(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Get today's date as a local YYYY-MM-DD string.
+ *
+ * Phase 5g-3 Slice 3 (Inline-Behavior-Review rev 12, L22 part 2 bonus):
+ * routed through `formatDateForInput(new Date())` instead of inlining
+ * the same `${y}-${MM}-${DD}` composition. Prevents the padding /
+ * timezone behaviour from drifting between this helper and
+ * `formatDateForInput`.
+ */
+export function getTodayStr(): string {
+  return formatDateForInput(new Date());
 }
 
 // ==========================================
@@ -252,6 +426,34 @@ export function sumByType(txList: Transaction[], type: 'expense' | 'income'): nu
   return toDollars(cents);
 }
 
+/**
+ * Sum tracked expenses using integer cents math AND excluding savings
+ * transfers. This is the correct aggregation for every "total expenses"
+ * figure the user sees: dashboard, budgets, statements, insights.
+ *
+ * `sumByType(txs, 'expense')` over-reports because savings contributions are
+ * stored as expense transactions internally but are actually money moving
+ * between the user's own accounts, not money spent. Every user-facing
+ * expense total MUST route through this helper so the two aggregations
+ * cannot drift.
+ *
+ * Why a dedicated helper instead of inlining the filter at call sites:
+ *   1. Consistency — 15+ sites were historically inlining `filter + reduce`
+ *      with subtly different transfer-awareness (some correct, some not).
+ *   2. Cents math — every caller needs to convert to cents before summing
+ *      or they get floating-point drift (e.g. 0.1 + 0.2 = 0.30000000000000004).
+ *   3. Testability — one helper, one regression test, one place to audit.
+ *
+ * See ADR-001 §9.5 Step 6 for the backfill plan that migrates the rest of
+ * the call sites incrementally.
+ */
+export function sumTrackedExpenses(txList: Transaction[]): number {
+  const cents = txList
+    .filter(isTrackedExpenseTransaction)
+    .reduce((s, t) => s + toCents(t.amount), 0);
+  return toDollars(cents);
+}
+
 // ==========================================
 // MATH UTILITIES
 // ==========================================
@@ -277,7 +479,16 @@ export function clamp(value: number, min: number, max: number): number {
 
 /**
  * Debounce function execution
+ *
+ * Phase 6 cleanup (no-explicit-any sweep): the variadic generic constraint
+ * `(...args: any[]) => any` is the canonical pattern for utility wrappers
+ * (lodash, underscore, etc.) — switching to `unknown[]` would force every
+ * caller to accept `unknown`-typed parameters, breaking the natural
+ * `Parameters<T>` propagation. The two `any`s here are constraint-only
+ * and never produce a runtime value, so the unsafe-assignment risk that
+ * the rule guards against doesn't apply.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function debounce<T extends (...args: any[]) => any>(
   func: T,
   wait: number
@@ -319,6 +530,14 @@ export function generateId(): string {
 export function formatNumber(num: number, decimals?: number): string {
   // Use locale service if available
   if (typeof window !== 'undefined' && localeService) {
+    // CR-Apr24-I finding 361: honour the `decimals` parameter when
+    // the locale service is live instead of silently dropping it.
+    if (decimals !== undefined) {
+      return new Intl.NumberFormat(localeService.getLocale(), {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals
+      }).format(num);
+    }
     return localeService.formatNumber(num);
   }
   
@@ -428,46 +647,79 @@ export function esc(str: string): string {
     .replace(/=/g, '&#61;');
 }
 
+// Phase 5g-4 Slice 3 (Inline-Behavior-Review rev 12, L7): deleted the
+// `export function sanitize(html)` regex-based HTML sanitizer that
+// lived here. Rationale (closing the last thread of review action-plan
+// item #37):
+//   * Single production caller was `validator.sanitizeText`, which has
+//     been deleted in the same slice (redundant with validateText's
+//     own length + pattern + trim gates and with lit-html's render-time
+//     auto-escaping of interpolated values).
+//   * The function's own NOTE admitted "This is NOT a substitute for a
+//     full library like DOMPurify for complex HTML" — classic "safe
+//     facade" anti-pattern, with documented limits around DOM clobbering,
+//     mutation XSS, and namespace tricks.
+//   * utils-dom.ts `safeSetHTML` — the only other consumer — was
+//     deleted in Phase 5g-1 (rev 12, L7 first sweep). That change was
+//     the first direction-reversal; this one closes the residual.
+//   * The companion describe('sanitize', ...) block in
+//     tests/security.test.ts was removed in the same slice — those
+//     tests asserted behavior of a function we no longer ship.
+// If the application ever needs to render genuinely untrusted HTML
+// (nothing currently does — all user text flows through lit-html's
+// text interpolation, which auto-escapes), install DOMPurify rather
+// than resurrecting a regex sanitizer.
+
+
 /**
- * Basic sanitizer for user-provided HTML strings.
- * Removes most dangerous tags and attributes.
- * NOTE: This is NOT a substitute for a full library like DOMPurify for complex HTML.
+ * CR-Apr22-D slice 5 (finding 63, [P3]): compose a short, unambiguous
+ * chart-label for a category. Replaces the legacy pattern
+ * `info.emoji + ' ' + info.name.split(' ')[0]` used by the dashboard
+ * budget-vs-actual chart (`ui-render.ts:updateBudgetVsActualChart`) and
+ * the analytics budget-vs-actual chart (`analytics-ui.ts`), where
+ * taking only the first word collapsed pairs like
+ * "Car Insurance" / "Car Payment" / "Car Loan" into the single label
+ * "Car" — hiding per-category bars behind duplicate x-axis labels.
+ *
+ * This helper preserves the full category name when it fits within
+ * `maxNameChars` (default 14, which covers all default preset names
+ * and the vast majority of custom names), and otherwise truncates the
+ * name with a trailing ellipsis (U+2026) so the visible label is
+ * exactly `maxNameChars` characters and differs from other categories
+ * that diverge before the truncation point. The emoji is prepended
+ * with a single space separator; the total visible label length is
+ * `emoji-width + 1 + min(name.length, maxNameChars)`.
+ *
+ * Why a 14-char default: the dashboard bar chart rotates x-axis labels
+ * at -45° and uses the `fmtShort` value label above each bar; labels
+ * longer than ~14 chars begin to overlap adjacent groups when the
+ * chart hosts 6+ categories at the 500px width set in
+ * `renderBarChart`. 14 chars is the longest single "word + descriptor"
+ * that still fits ("Entertainment" is 13; "Car Insurance" is 13;
+ * "Home & Garden" is 13).
+ *
+ * @param info  Category info object with `emoji` (already-resolved) and
+ *              `name` fields. Matches the shape returned by
+ *              `getCatInfo(type, id)`.
+ * @param maxNameChars  Optional maximum visible length of the NAME
+ *              segment (NOT including the emoji or separator).
+ *              Clamped to >= 2 (so there's always at least one
+ *              original character before the ellipsis on truncation).
+ *              Defaults to 14.
  */
-export function sanitize(html: string): string {
-  if (!html || typeof html !== 'string') return '';
-
-  let clean = html;
-
-  // Multi-pass to handle nested tag tricks like <scr<script>ipt>
-  let prev = '';
-  while (prev !== clean) {
-    prev = clean;
-
-    // Remove script tags and their content
-    clean = clean.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, '');
-
-    // Remove dangerous tags: script, iframe, object, embed, link, meta, svg, math, base, form
-    clean = clean.replace(/<\/?(script|iframe|object|embed|link|meta|svg|math|base|form|style)\b[^>]*>/gim, '');
-  }
-
-  // Remove event handlers — both quoted and unquoted values (onmouseover=alert(1), onclick="...", etc.)
-  clean = clean.replace(/\bon\w+\s*=\s*(?:(['"])[^'"]*\1|[^\s>]+)/gim, '');
-
-  // Remove javascript:, vbscript:, and data: protocol URIs in any attribute
-  clean = clean.replace(/(href|src|action|formaction|xlink:href)\s*=\s*(['"]?)\s*(javascript|vbscript|data)\s*:[^'"\s>]*/gim, '$1=$2#');
-
-  // Remove style attributes (blocks CSS expression() attacks)
-  clean = clean.replace(/\bstyle\s*=\s*(['"])[^'"]*\1/gim, '');
-  clean = clean.replace(/\bstyle\s*=\s*[^\s>]+/gim, '');
-
-  return clean;
+export function formatCategoryChartLabel(
+  info: { emoji?: string; name?: string },
+  maxNameChars = 14
+): string {
+  const emoji = typeof info.emoji === 'string' ? info.emoji : '';
+  const name = typeof info.name === 'string' ? info.name : '';
+  const clampedMax = Math.max(2, maxNameChars);
+  const truncated =
+    name.length > clampedMax
+      ? name.slice(0, clampedMax - 1).trimEnd() + '…'
+      : name;
+  return emoji ? `${emoji} ${truncated}` : truncated;
 }
-
-/** @deprecated Use esc instead */
-export const escAttr = esc;
-
-/** @deprecated Use esc instead */
-export const escapeHtmlPure = esc;
 
 // ==========================================
 // MATH UTILITIES

@@ -21,6 +21,12 @@ interface TimingConfig {
   readonly SPLIT_RESET: number;
   readonly URL_REVOKE_DELAY: number;
   readonly MODAL_FOCUS_DELAY: number;
+  // DRY-01: Infrastructure timings previously hardcoded across modules
+  readonly OPERATION_TIMEOUT: number;
+  readonly LOCK_TIMEOUT: number;
+  readonly PERIODIC_CLEANUP_INTERVAL: number;
+  readonly REQUEST_TIMEOUT: number;
+  readonly SIGNAL_DEBOUNCE: number;
 }
 
 // ==========================================
@@ -41,6 +47,17 @@ interface SecurityConfig {
 interface AutoLockConfig {
   readonly TIMEOUT_MS: number;
   readonly ENABLED: boolean;
+  /**
+   * Grace period (ms) between `visibilitychange → hidden` and the auto-lock
+   * firing. Set to 0 to preserve legacy lock-on-hide behavior.
+   *
+   * Fixes M17 (Inline-Behavior-Review rev 12): prior code locked instantly
+   * on every alt-tab / browser-minimize, which made the app hostile during
+   * normal categorization work (flip to Mail to read a receipt → locked).
+   * The activity timer remains the real security guarantee; the visibility
+   * hook is a safety net with a user-friendly window.
+   */
+  readonly VISIBILITY_LOCK_DELAY_MS: number;
 }
 
 // ==========================================
@@ -209,7 +226,13 @@ export const CONFIG: AppConfig = {
     PIN_ERROR_DISPLAY: 2000,
     SPLIT_RESET: 2000,
     URL_REVOKE_DELAY: 1000,
-    MODAL_FOCUS_DELAY: 50
+    MODAL_FOCUS_DELAY: 50,
+    // DRY-01: Infrastructure timings — import from CONFIG instead of hardcoding
+    OPERATION_TIMEOUT: 10000,   // 10s — IDB transactions, mutex acquire, worker requests
+    LOCK_TIMEOUT: 30000,        // 30s — distributed lock / DI resolution ceiling
+    PERIODIC_CLEANUP_INTERVAL: 60000, // 1min — cache GC, event-bus cleanup, perf monitor
+    REQUEST_TIMEOUT: 8000,      // 8s — worker round-trip, IDB request deadline
+    SIGNAL_DEBOUNCE: 150        // 150ms — signal batcher, app-reset delay
   },
 
   // Security
@@ -268,7 +291,11 @@ export const CONFIG: AppConfig = {
   // Auto-lock on inactivity
   AUTO_LOCK: {
     TIMEOUT_MS: 300000, // 5 minutes
-    ENABLED: true
+    ENABLED: true,
+    // Fixes M17 (Inline-Behavior-Review rev 12): 30-second grace period
+    // on visibility-change locks. Banking-app convention; balances
+    // shoulder-surfing protection against normal alt-tab workflows.
+    VISIBILITY_LOCK_DELAY_MS: 30_000
   },
 
   // PIN rate limiting (brute-force protection)

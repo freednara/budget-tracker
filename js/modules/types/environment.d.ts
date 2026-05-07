@@ -11,6 +11,12 @@ declare global {
     }
   }
 
+  // NOTE: `interface Window { ... }` augmentation has been centralized in
+  // `js/types/globals.d.ts` (Phase 6 Slice 1a, Inline-Behavior-Review L1).
+  // Do not add Window properties here — add them to globals.d.ts so the
+  // startup-progress, debug-toggle, ready-state, deferred-error, test-mode,
+  // and integration-point surfaces have a single source of truth.
+
   interface ImportMeta {
     env: {
       MODE: 'development' | 'production';

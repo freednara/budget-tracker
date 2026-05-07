@@ -1,6 +1,16 @@
 /**
  * Security Tests
- * Tests XSS prevention (esc/sanitize) and PIN crypto functions
+ * Tests XSS prevention (esc) and PIN crypto functions.
+ *
+ * Phase 5g-4 Slice 3 (Inline-Behavior-Review rev 12, L7): the
+ * describe('sanitize', ...) block that lived in this file was removed
+ * alongside the deletion of the regex-based `sanitize()` in
+ * utils-pure.ts. The 11 assertions in that block tested behavior of a
+ * function the codebase no longer ships (single production caller
+ * `validator.sanitizeText` was also retired in the same slice). XSS
+ * defense at the view boundary is now owned by lit-html's render-time
+ * auto-escaping of interpolated values; `esc()` remains for the narrow
+ * cases that build strings outside a template tag.
  */
 import { describe, it, expect, vi } from 'vitest';
 
@@ -18,7 +28,7 @@ vi.mock('../js/modules/core/config.js', async () => {
   };
 });
 
-import { esc, sanitize } from '../js/modules/core/utils-pure.js';
+import { esc } from '../js/modules/core/utils-pure.js';
 import {
   generateRecoveryPhrase,
   validateRecoveryPhrase,
@@ -63,58 +73,16 @@ describe('esc (HTML escaping)', () => {
   });
 });
 
-describe('sanitize (HTML tag stripping)', () => {
-  it('should remove script tags and content', () => {
-    expect(sanitize('<script>alert(1)</script>')).not.toContain('script');
-    expect(sanitize('<script>alert(1)</script>')).not.toContain('alert');
-  });
-
-  it('should remove event handlers (quoted)', () => {
-    expect(sanitize('<div onmouseover="alert(1)">test</div>')).not.toContain('onmouseover');
-  });
-
-  it('should remove event handlers (unquoted)', () => {
-    expect(sanitize('<div onmouseover=alert(1)>test</div>')).not.toContain('onmouseover');
-  });
-
-  it('should remove nested tag tricks', () => {
-    // <scr<script>ipt> after inner removal should NOT leave <script>
-    const result = sanitize('<scr<script>ipt>alert(1)</scr<script>ipt>');
-    expect(result).not.toContain('<script');
-  });
-
-  it('should remove SVG tags', () => {
-    expect(sanitize('<svg onload=alert(1)>test</svg>')).not.toContain('svg');
-  });
-
-  it('should remove style attributes', () => {
-    expect(sanitize('<div style="background:url(javascript:alert(1))">test</div>')).not.toContain('style');
-  });
-
-  it('should remove javascript: protocol in href', () => {
-    const result = sanitize('<a href="javascript:alert(1)">click</a>');
-    expect(result).not.toContain('javascript:');
-  });
-
-  it('should remove data: protocol in src', () => {
-    const result = sanitize('<img src="data:text/html,<script>alert(1)</script>">');
-    expect(result).not.toContain('data:');
-  });
-
-  it('should remove iframe tags', () => {
-    expect(sanitize('<iframe src="evil.com"></iframe>')).not.toContain('iframe');
-  });
-
-  it('should preserve safe HTML', () => {
-    expect(sanitize('<b>bold</b> <em>italic</em>')).toContain('<b>bold</b>');
-    expect(sanitize('<b>bold</b> <em>italic</em>')).toContain('<em>italic</em>');
-  });
-
-  it('should return empty string for falsy input', () => {
-    expect(sanitize('')).toBe('');
-    expect(sanitize(null as any)).toBe('');
-  });
-});
+// Phase 5g-4 Slice 3 (Inline-Behavior-Review rev 12, L7): the
+// describe('sanitize (HTML tag stripping)', ...) block that lived here
+// was deleted alongside the regex-based `sanitize()` function in
+// utils-pure.ts. The 11 assertions all tested behavior of a function
+// the codebase no longer ships. See file-header comment for full
+// rationale; the short version is that lit-html's render-time
+// auto-escaping owns the view-boundary XSS defense, and the regex
+// sanitizer's documented limits (DOM clobbering, mutation XSS,
+// namespace tricks) made it a misleading "safe facade" rather than a
+// genuine defense layer worth maintaining.
 
 // ==========================================
 // PIN CRYPTO

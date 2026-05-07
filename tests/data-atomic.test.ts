@@ -82,7 +82,7 @@ import { DataManager } from '../js/modules/data/data-manager.js';
 import { lsGet, lsSet } from '../js/modules/core/state.js';
 import type { Transaction, DataHandler } from '../js/types/index.js';
 
-const SK_TX = 'budget_tracker_transactions';
+const SK_TX = 'harbor_transactions';
 
 // ==========================================
 // TEST UTILITIES
@@ -230,7 +230,7 @@ describe('DataManager Atomic Operations', () => {
       // Let the split operation's lsSet call fail (inside the atomic op).
       // After the create succeeds, the next lsSet inside the split's atomic body should fail.
       // _atomicOperation retries 3 times, fail all of them.
-      const realImpl = vi.mocked(lsSet).getMockImplementation()!;
+      const _realImpl = vi.mocked(lsSet).getMockImplementation()!;
       let callCount = 0;
       vi.mocked(lsSet).mockImplementation((key: string, value: any) => {
         callCount++;

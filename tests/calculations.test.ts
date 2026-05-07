@@ -3,18 +3,16 @@
  * Statistics and velocity calculations
  * Uses pure function exports from the actual calculations module
  */
-import { describe, it, expect, beforeEach } from 'vitest';
-import type { Transaction, VelocityData, YearStats } from '../js/types/index.js';
+import { describe, it, expect } from 'vitest';
+import type { Transaction } from '../js/types/index.js';
 import {
   toCents,
   toDollars,
   addAmounts,
   subtractAmounts,
   parseAmount,
-  sumByType,
-  getMonthKey,
-  parseMonthKey
-} from '../js/modules/core/utils.js';
+  sumByType
+} from '../js/modules/core/utils-pure.js';
 import {
   calcVelocityPure,
   getYearStatsPure,
@@ -135,8 +133,8 @@ describe('getYearStatsPure', () => {
 
   it('identifies top spending categories', () => {
     const result = getYearStatsPure(transactions, '2024');
-    expect(result.topCategories[0].id).toBe('rent');
-    expect(result.topCategories[0].amount).toBe(1000);
+    expect(result.topCategories[0]?.id).toBe('rent');
+    expect(result.topCategories[0]?.amount).toBe(1000);
   });
 
   it('counts transactions correctly', () => {
@@ -261,7 +259,7 @@ describe('Floating-point precision', () => {
 
   it('handles many transactions without accumulating error', () => {
     // 100 transactions of $19.99 should equal $1999.00 exactly
-    const transactions: Transaction[] = Array.from({ length: 100 }, (_, i) =>
+    const transactions: Transaction[] = Array.from({ length: 100 }, () =>
       tx({
         type: 'expense',
         amount: 19.99,
@@ -395,8 +393,8 @@ describe('Export/Import round-trip', () => {
 
     expect(imported.error).toBeUndefined();
     expect(imported.transactions.length).toBe(2);
-    expect(imported.transactions[0].amount).toBe(99.99);
-    expect(imported.transactions[1].category).toBe('salary');
+    expect(imported.transactions[0]?.amount).toBe(99.99);
+    expect(imported.transactions[1]?.category).toBe('salary');
   });
 
   it('preserves special characters in descriptions', () => {
@@ -407,7 +405,7 @@ describe('Export/Import round-trip', () => {
     const exported = exportData(original);
     const imported = importData(exported);
 
-    expect(imported.transactions[0].description).toBe('Café "Special" & More');
+    expect(imported.transactions[0]?.description).toBe('Café "Special" & More');
   });
 
   it('preserves unicode emojis', () => {
@@ -418,7 +416,7 @@ describe('Export/Import round-trip', () => {
     const exported = exportData(original);
     const imported = importData(exported);
 
-    expect(imported.transactions[0].description).toBe('🍕 Pizza night 🎉');
+    expect(imported.transactions[0]?.description).toBe('🍕 Pizza night 🎉');
   });
 
   it('handles empty transactions array', () => {

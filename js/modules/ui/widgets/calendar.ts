@@ -7,24 +7,45 @@
 'use strict';
 
 import * as signals from '../../core/signals.js';
-import { calendar as calendarActions } from '../../core/state-actions.js';
-import { parseMonthKey, parseLocalDate, getMonthKey } from '../../core/utils.js';
+import { calendar as calendarActions, navigation } from '../../core/state-actions.js';
+import { parseMonthKey, parseLocalDate, getMonthKey, monthKeyParts, fmtShort, getTodayStr } from '../../core/utils-pure.js';
+import { formatDateShort, formatMonthShortYear, formatViewedMonthPhrase, formatViewedMonthLabel, localeService } from '../../core/locale-service.js';
 import { getCatInfo } from '../../core/categories.js';
+// CR-Apr22-E slice 4 (finding 61d [P3]): calendar month + selection effects
+// used to subscribe to `userCategoryConfig` only incidentally — via
+// `getCatInfo(...)` reads deep inside `getBillsForMonth()` (conditional
+// on recurring-expense rows existing) and inside `renderDetailPanel`
+// (conditional on `dayTx.length > 0`). Paths that did NOT call
+// `getCatInfo` (e.g., viewing a month with zero recurring bills and
+// selecting a day with zero transactions) left the effect without any
+// edge to `userCategoryConfig`. A subsequent rename / recolor / emoji
+// change would then leave the heatmap + day-detail panel stale with
+// the pre-rename category info until some unrelated signal woke the
+// effect. Explicit reads at the top of both effects guarantee the edge
+// is live regardless of the branch the body takes. Matches the pattern
+// CR-Apr22-D slice 1 used for the dashboard chart effects.
+import { userCategoryConfig } from '../../core/category-store.js';
 import { isTrackedExpenseTransaction } from '../../core/transaction-classification.js';
+import { safeAmount } from '../../core/safe-amount.js';
 import { getMonthTx } from '../../features/financial/calculations.js';
 import { openTransactionsForDate, openTransactionsEdit } from '../core/ui-navigation.js';
 import DOM from '../../core/dom-cache.js';
-import { html, render, repeat, classMap } from '../../core/lit-helpers.js';
+// Phase 5g-1 (Inline-Behavior-Review rev 12, L30d): removed unused `repeat`
+// from this import. Grep across calendar.ts confirms zero `repeat(` call
+// sites — the rendered day/week lists use plain `.map(...)` in the html``
+// templates. If keyed re-rendering is ever needed here, re-import
+// deliberately.
+import { html, render, classMap } from '../../core/lit-helpers.js';
 import { effect, computed } from '@preact/signals-core';
 import { getDefaultContainer, Services } from '../../core/di-container.js';
-import { emptyState } from '../core/empty-state.js';
+// emptyState import removed — calendar now uses app-panel-empty pattern directly
 import type { Transaction } from '../../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
 // ==========================================
 
-interface BillInfo {
+export interface BillInfo {
   id: string;
   category: string;
   categoryName: string;
@@ -34,6 +55,47 @@ interface BillInfo {
   isPaid: boolean;
   isUpcoming: boolean;
   date: string;
+}
+
+/**
+ * Bucket bill entries into "upcoming" (due today or later) and "overdue"
+ * (due date strictly before today) — excluding already-paid bills from
+ * both buckets. Paid bills are independent of the bucket, since "paid"
+ * nullifies both "upcoming you should pay" and "overdue you forgot."
+ *
+ * CR-Apr22-G slice 6: the calendar summary strip previously collapsed this
+ * into a single `upcoming` list with a short-circuit that bypassed the
+ * date check whenever the viewed month was not the current real-time
+ * month. That short-circuit was right for FUTURE months (every day is
+ * strictly >= today) but wrong for PAST months (every day is strictly
+ * < today, yet the short-circuit counted them all as "upcoming"). This
+ * helper replaces the short-circuit with an unconditional date compare.
+ *
+ * Sorting: both buckets are sorted ascending by YYYY-MM-DD string
+ * compare, which agrees with chronological order under the fixed-width
+ * date format. Callers read `[0]` for "the soonest upcoming" or "the
+ * oldest overdue."
+ *
+ * @param billEntries flat list of bills harvested from the month's billsMap
+ * @param today       local-midnight Date used as the cutoff
+ * @returns           `{ upcoming, overdue }` — two disjoint, sorted lists
+ */
+export function bucketBillsByDueDate(
+  billEntries: BillInfo[],
+  today: Date
+): { upcoming: BillInfo[]; overdue: BillInfo[] } {
+  const upcoming: BillInfo[] = [];
+  const overdue: BillInfo[] = [];
+  for (const bill of billEntries) {
+    if (bill.isPaid) continue;
+    const due = parseLocalDate(bill.date);
+    if (due >= today) upcoming.push(bill);
+    else overdue.push(bill);
+  }
+  const asc = (a: BillInfo, b: BillInfo) => a.date.localeCompare(b.date);
+  upcoming.sort(asc);
+  overdue.sort(asc);
+  return { upcoming, overdue };
 }
 
 type CurrencyFormatter = (value: number) => string;
@@ -59,6 +121,33 @@ export function getEmptyCalendarActionDate(monthKey: string, selectedDay: number
   }
 
   return `${monthKey}-${String(selectedDay).padStart(2, '0')}`;
+}
+
+export function getCalendarFocusableDay(selectedDay: number | null, fallbackDay: number): number {
+  if (selectedDay !== null && Number.isInteger(selectedDay) && selectedDay > 0) {
+    return selectedDay;
+  }
+
+  return Math.max(1, fallbackDay);
+}
+
+export function getCalendarKeyboardTarget(day: number, key: string, daysInMonth: number): number | null {
+  switch (key) {
+    case 'ArrowLeft':
+      return Math.max(1, day - 1);
+    case 'ArrowRight':
+      return Math.min(daysInMonth, day + 1);
+    case 'ArrowUp':
+      return Math.max(1, day - 7);
+    case 'ArrowDown':
+      return Math.min(daysInMonth, day + 7);
+    case 'Home':
+      return 1;
+    case 'End':
+      return daysInMonth;
+    default:
+      return null;
+  }
 }
 
 // ==========================================
@@ -157,28 +246,55 @@ export function mountCalendar(): () => void {
   });
 
   const monthCleanup = effect(() => {
+    const _cur = signals.currency.value;  // re-render on currency change
+    // CR-Apr22-E slice 4: explicit subscription to the category config so
+    // a rename / recolor / emoji swap always re-runs the heatmap render
+    // (see import block above for the full rationale).
+    userCategoryConfig.value;
     const { mk, txs, bills, isEmpty } = monthData.value;
     const selectedDay = signals.selectedCalendarDay.value;
 
     if (badgeContainer) {
-      const [y, m] = mk.split('-');
-      const monthName = new Date(parseInt(y), parseInt(m) - 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+      const [y, m] = monthKeyParts(mk);
+      const monthName = formatMonthShortYear(new Date(y, m - 1));
       render(html`<span class="time-badge">${monthName}</span>`, badgeContainer);
     }
 
     if (isEmpty) {
-      const defaultDate = getEmptyCalendarActionDate(mk, selectedDay);
-      render(emptyState(
-        '↻',
-        'No calendar activity yet',
-        'Add transactions or recurring bills to plan the month day by day.',
-        { id: 'add-transaction-for-date', label: 'Add Transaction', date: defaultDate }
-      ), container);
+      // Design-Review-Apr21 P3 (batch 6 follow-up wave L): empty-state
+      // copy below used to hardcode "this month" even though the
+      // widget is reactive to `signals.currentMonth`. Use the shared
+      // month-phrase helpers so copy stays correct when the user is
+      // browsing a past or future month. `monthPhrase` embeds the
+      // "in" preposition for sentences that end with the month
+      // reference ("left {phrase}"); the label variant is used for
+      // carrier sentences that already supply their own preposition
+      // ("scheduled for {label}").
+      const monthPhrase = formatViewedMonthPhrase(mk);
+      const monthLabelOrThis = formatViewedMonthLabel(mk);
+      render(html`
+        <div class="app-panel-empty">
+          <div class="app-panel-empty__icon">📅</div>
+          <p class="app-panel-empty__title">No calendar activity yet</p>
+          <p class="app-panel-empty__copy">Add transactions or recurring bills to plan the month day by day.</p>
+        </div>
+      `, container);
       if (detailContainer) {
+        // UI/UX Review Part 2: added CTA to the calendar empty state
+        // so users can jump straight to adding a transaction for today
+        // instead of seeing a dead-end message.
+        const todayStr = getTodayStr();
         render(html`
           <div class="calendar-detail-empty">
             <p class="calendar-detail-empty__title">No day details yet</p>
-            <p class="calendar-detail-empty__body">Add your first transaction or recurring bill to unlock the day-by-day detail panel for this month.</p>
+            <p class="calendar-detail-empty__body">Tap a day on the calendar, or add your first transaction to get started.</p>
+            <button
+              type="button"
+              class="btn btn-primary mt-3 text-sm"
+              @click=${() => void openTransactionsForDate(todayStr)}
+            >
+              Add Transaction for Today
+            </button>
           </div>
         `, detailContainer);
       }
@@ -187,12 +303,12 @@ export function mountCalendar(): () => void {
           <div class="calendar-summary-card">
             <p class="calendar-summary-card__label">Activity Days</p>
             <p class="calendar-summary-card__value">0</p>
-            <p class="calendar-summary-card__meta">No recorded days in this month yet.</p>
+            <p class="calendar-summary-card__meta">No recorded days ${monthPhrase} yet.</p>
           </div>
           <div class="calendar-summary-card">
             <p class="calendar-summary-card__label">Recurring Bills</p>
             <p class="calendar-summary-card__value">0</p>
-            <p class="calendar-summary-card__meta">No recurring bill activity scheduled for this month.</p>
+            <p class="calendar-summary-card__meta">No recurring bill activity scheduled for ${monthLabelOrThis}.</p>
           </div>
           <div class="calendar-summary-card">
             <p class="calendar-summary-card__label">Next Planning Step</p>
@@ -208,6 +324,11 @@ export function mountCalendar(): () => void {
   });
 
   const selectionCleanup = effect(() => {
+    const _cur = signals.currency.value;  // re-render on currency change
+    // CR-Apr22-E slice 4: same reason as `monthCleanup` — selection-level
+    // day-detail + summary renders also walk `getCatInfo` on conditional
+    // paths, so an explicit read guarantees re-firing on config change.
+    userCategoryConfig.value;
     const { mk, txs, bills, isEmpty } = monthData.value;
     const selectedDay = signals.selectedCalendarDay.value;
 
@@ -234,12 +355,56 @@ export function mountCalendar(): () => void {
 
 function updateCalendarSelection(container: HTMLElement, selectedDay: number | null): void {
   const dayCells = container.querySelectorAll<HTMLElement>('.cal-day');
+  const todayCell = container.querySelector<HTMLElement>('.cal-today');
+  const firstDayCell = container.querySelector<HTMLElement>('.cal-day');
+  const fallbackDay = Number(todayCell?.dataset.day || firstDayCell?.dataset.day || 1);
+  const focusableDay = getCalendarFocusableDay(selectedDay, fallbackDay);
+
   dayCells.forEach((cell) => {
     const day = Number(cell.dataset.day || 0);
     const isSelected = selectedDay !== null && day === selectedDay;
     cell.classList.toggle('cal-selected', isSelected);
-    cell.tabIndex = selectedDay === null ? 0 : (isSelected ? 0 : -1);
+    cell.tabIndex = day === focusableDay ? 0 : -1;
   });
+}
+
+function focusCalendarDay(container: HTMLElement, day: number): void {
+  window.requestAnimationFrame(() => {
+    container.querySelector<HTMLElement>(`.cal-day[data-day="${day}"]`)?.focus();
+  });
+}
+
+function changeCalendarMonth(container: HTMLElement, monthKey: string, offset: number, preferredDay: number): void {
+  const monthDate = parseMonthKey(monthKey);
+  const nextMonthDate = new Date(monthDate.getFullYear(), monthDate.getMonth() + offset, 1);
+  const nextMonthKey = `${nextMonthDate.getFullYear()}-${String(nextMonthDate.getMonth() + 1).padStart(2, '0')}`;
+  const nextDaysInMonth = new Date(nextMonthDate.getFullYear(), nextMonthDate.getMonth() + 1, 0).getDate();
+  const nextDay = Math.min(preferredDay, nextDaysInMonth);
+
+  navigation.setCurrentMonth(nextMonthKey);
+  calendarActions.setSelectedDay(nextDay);
+  focusCalendarDay(container, nextDay);
+}
+
+function handleCalendarDayKeydown(
+  event: KeyboardEvent,
+  container: HTMLElement,
+  monthKey: string,
+  day: number,
+  daysInMonth: number
+): void {
+  const targetDay = getCalendarKeyboardTarget(day, event.key, daysInMonth);
+  if (targetDay !== null) {
+    event.preventDefault();
+    calendarActions.setSelectedDay(targetDay);
+    focusCalendarDay(container, targetDay);
+    return;
+  }
+
+  if (event.key === 'PageUp' || event.key === 'PageDown') {
+    event.preventDefault();
+    changeCalendarMonth(container, monthKey, event.key === 'PageUp' ? -1 : 1, day);
+  }
 }
 
 function renderCalendarGrid(container: HTMLElement, mk: string, txs: Transaction[], bills: Map<number, BillInfo[]>, selectedDay: number | null): void {
@@ -253,13 +418,18 @@ function renderCalendarGrid(container: HTMLElement, mk: string, txs: Transaction
   const dailyIncome: Record<number, number> = {};
   txs.forEach(t => {
     const day = parseLocalDate(t.date).getDate();
-    if (isTrackedExpenseTransaction(t)) dailySpend[day] = (dailySpend[day] || 0) + (t.amount || 0);
-    else dailyIncome[day] = (dailyIncome[day] || 0) + (t.amount || 0);
+    // rev 12 / #39 M1: `t.amount || 0` replaced with `safeAmount(t)` so
+    // non-finite ledger values surface as trackError telemetry rather than
+    // silently collapsing into the daily-spend / daily-income heatmap.
+    const amount = safeAmount(t);
+    if (isTrackedExpenseTransaction(t)) dailySpend[day] = (dailySpend[day] || 0) + amount;
+    else dailyIncome[day] = (dailyIncome[day] || 0) + amount;
   });
 
   const maxSpend = Math.max(...Object.values(dailySpend), 1);
   const today = new Date();
   const todayDay = (getMonthKey(today) === mk) ? today.getDate() : -1;
+  const focusableDay = getCalendarFocusableDay(selectedDay, todayDay > 0 ? todayDay : 1);
 
   // Build rows/weeks
   const rows: Array<{ week: Array<CalendarDayCell | null>; weekTotal: number }> = [];
@@ -289,7 +459,11 @@ function renderCalendarGrid(container: HTMLElement, mk: string, txs: Transaction
     rows.push({ week, weekTotal });
   }
 
-  const fmtCur = getDefaultContainer().resolveSync<CurrencyFormatter>(Services.CURRENCY_FORMATTER);
+  // Phase 5g-1 (Inline-Behavior-Review rev 12, L30d): removed an unused
+  // `const fmtCur = ...resolveSync<CurrencyFormatter>(...)` here. The
+  // renderDayCell path formats via the local `fmtShort()` helper, not the
+  // currency formatter. The separate `fmtCur` declared in renderSummaryStrip
+  // (further down in this file) IS used by its own scope and is unrelated.
   const isPhoneLayout = window.matchMedia('(max-width: 767px)').matches;
 
   const renderDayCell = (cell: CalendarDayCell) => {
@@ -309,10 +483,12 @@ function renderCalendarGrid(container: HTMLElement, mk: string, txs: Transaction
             type="button"
             class=${classMap({ 'cal-day': true, 'cal-today': cell.isToday, 'cal-selected': cell.isSelected })}
             data-day="${cell.day}"
+            tabindex=${cell.day === focusableDay ? '0' : '-1'}
             style="background: ${bg}"
             aria-label=${ariaLabelParts.join(', ')}
             aria-current=${cell.isToday ? 'date' : 'false'}
             aria-pressed=${cell.isSelected ? 'true' : 'false'}
+            @keydown=${(event: KeyboardEvent) => handleCalendarDayKeydown(event, container, mk, cell.day, daysInMonth)}
             @click=${() => selectDay(cell.day)}>
         <span class="cal-day-num">${cell.day}</span>
 
@@ -393,17 +569,35 @@ function renderSummaryStrip(
   billsMap.forEach((_bills, day) => activeDays.add(day));
 
   const billEntries = Array.from(billsMap.values()).flat();
-  const upcomingBills = billEntries
-    .filter((bill) => !bill.isPaid && (getMonthKey(today) !== mk || parseLocalDate(bill.date) >= today))
-    .sort((a, b) => a.date.localeCompare(b.date));
-  const nextUpcomingBill = upcomingBills[0] || null;
 
+  // CR-Apr22-G slice 6: bucket unpaid bills by due date vs. today (see
+  // `bucketBillsByDueDate` above for the rationale). The prior logic
+  // short-circuited with `getMonthKey(today) !== mk || date >= today`,
+  // which was wrong for past-month views: every unpaid bill in a past
+  // month was bucketed as "upcoming" because the "!== mk" branch bypassed
+  // the date check entirely.
+  const { upcoming: upcomingBills, overdue: overdueBills } =
+    bucketBillsByDueDate(billEntries, today);
+  const nextUpcomingBill = upcomingBills[0] || null;
+  const overdueCount = overdueBills.length;
+
+  // Route through canonical helper so the summary respects the app's
+  // configured locale (was hardcoded 'en-US').
   const selectedDateLabel = selectedDay
-    ? new Date(monthDate.getFullYear(), monthDate.getMonth(), selectedDay).toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric'
-      })
+    ? formatDateShort(new Date(monthDate.getFullYear(), monthDate.getMonth(), selectedDay))
     : 'No day selected';
+
+  // Design-Review-Apr21 P3 (batch 6 follow-up wave L): "left in this month"
+  // was hardcoded but this widget renders for any viewed month — when the
+  // user navigated to a past/future month the empty-state copy still
+  // implied the real current period. `formatViewedMonthPhrase` returns
+  // "this month" at current-view default and "in April 2026"-style labels
+  // when navigated elsewhere; dropping the literal "in" from the carrier
+  // sentence and letting the phrase supply it yields natural copy in both
+  // cases ("left this month." / "left in April 2026.") and avoids the
+  // double-preposition trap (`monthLabelOrThis` would have given
+  // "left in this month." at current view, the same awkward original).
+  const monthPhrase = formatViewedMonthPhrase(mk);
 
   render(html`
     <div class="calendar-summary-card">
@@ -415,9 +609,28 @@ function renderSummaryStrip(
       <p class="calendar-summary-card__label">Upcoming Bills</p>
       <p class="calendar-summary-card__value">${upcomingBills.length}</p>
       <p class="calendar-summary-card__meta">
-        ${nextUpcomingBill
-          ? `Next due: ${nextUpcomingBill.description || nextUpcomingBill.categoryName} on ${parseLocalDate(nextUpcomingBill.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
-          : 'No unpaid recurring bills left in this month.'}
+        ${(() => {
+          // CR-Apr22-G slice 6: three-way meta copy so past-month unpaid
+          // bills are surfaced as "overdue" rather than silently hidden.
+          //   • any upcoming        → "Next due: X on Y" (+ overdue chip)
+          //   • none upcoming + any overdue → "N overdue before today"
+          //   • none of either       → "No unpaid recurring bills left …"
+          // The overdue count appears as a trailing chip when upcoming
+          // bills exist so the user keeps the primary "what's next" signal
+          // but also sees the catch-up backlog at a glance.
+          const overdueChip = overdueCount > 0
+            ? ` (${overdueCount} overdue)`
+            : '';
+          if (nextUpcomingBill) {
+            const nextLabel = nextUpcomingBill.description || nextUpcomingBill.categoryName;
+            const nextDate = formatDateShort(parseLocalDate(nextUpcomingBill.date));
+            return `Next due: ${nextLabel} on ${nextDate}${overdueChip}`;
+          }
+          if (overdueCount > 0) {
+            return `${overdueCount} unpaid bill${overdueCount === 1 ? '' : 's'} overdue before today.`;
+          }
+          return `No unpaid recurring bills left ${monthPhrase}.`;
+        })()}
       </p>
     </div>
     <div class="calendar-summary-card">
@@ -445,11 +658,14 @@ function renderDetailPanel(container: HTMLElement, mk: string, day: number | nul
   const dayBills = billsMap.get(day) || [];
   const fmtCur = getDefaultContainer().resolveSync<CurrencyFormatter>(Services.CURRENCY_FORMATTER);
   const selectedDate = `${mk}-${String(day).padStart(2, '0')}`;
-  const selectedDateLabel = new Date(`${selectedDate}T00:00:00`).toLocaleDateString('en-US', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric'
-  });
+  // Route through locale-service so the detail heading respects the app's
+  // configured locale (was hardcoded 'en-US'). Custom format includes
+  // weekday, so call toLocaleDateString directly with the configured locale
+  // rather than adding a one-off formatter variant.
+  const selectedDateLabel = new Date(`${selectedDate}T00:00:00`).toLocaleDateString(
+    localeService.getLocale(),
+    { weekday: 'short', month: 'short', day: 'numeric' }
+  );
 
   if (dayTx.length === 0 && dayBills.length === 0) {
     render(html`
@@ -492,14 +708,14 @@ function renderDetailPanel(container: HTMLElement, mk: string, day: number | nul
 
       <div class="mt-3 space-y-2">
       ${dayBills.length > 0 ? html`
-        <div class="p-3 rounded-xl bg-warning/10 border border-warning/20">
-          <p class="text-[10px] font-black uppercase tracking-widest text-warning mb-2">Recurring Bills</p>
+        <div class="cal-detail-section cal-detail-section--bills">
+          <p class="cal-detail-section__header cal-detail-section__header--bills">Recurring Bills</p>
           ${dayBills.map(b => html`
             <div class="flex justify-between items-center py-1">
               <span class="text-xs font-bold text-primary">${b.emoji} ${b.description || b.categoryName}</span>
               <div class="flex items-center gap-2">
                 <span class="text-xs font-black text-expense">${fmtCur(b.amount)}</span>
-                <span class="text-[9px] font-bold px-1.5 py-0.5 rounded ${b.isPaid ? 'bg-income/20 text-income' : 'bg-warning/20 text-warning'}">
+                <span class="cal-status-badge ${b.isPaid ? 'cal-status-badge--paid' : 'cal-status-badge--due'}">
                   ${b.isPaid ? 'PAID' : 'DUE'}
                 </span>
               </div>
@@ -509,8 +725,8 @@ function renderDetailPanel(container: HTMLElement, mk: string, day: number | nul
       ` : ''}
 
       ${dayTx.length > 0 ? html`
-        <div class="p-3 rounded-xl bg-input">
-          <p class="text-[10px] font-black uppercase tracking-widest text-tertiary mb-2">Transactions</p>
+        <div class="cal-detail-section cal-detail-section--transactions">
+          <p class="cal-detail-section__header cal-detail-section__header--transactions">Transactions</p>
           ${dayTx.map(t => {
             const cat = getCatInfo(t.type, t.category);
             return html`
@@ -525,7 +741,7 @@ function renderDetailPanel(container: HTMLElement, mk: string, day: number | nul
                   <button
                     type="button"
                     class="calendar-detail-edit-btn"
-                    aria-label="Edit transaction ${t.description || cat.name}"
+                    aria-label="Edit transaction ${t.description || cat.name}, ${t.type === 'expense' ? '-' : '+'}${fmtCur(t.amount)}"
                     @click=${() => void openTransactionsEdit(t)}
                   >
                     Edit
@@ -541,19 +757,21 @@ function renderDetailPanel(container: HTMLElement, mk: string, day: number | nul
   `, container);
 }
 
-/**
- * Format number in short form (e.g., 1.2k)
- */
-function fmtShort(v: number): string {
-  const symbol = signals.currency.value.symbol;
-  const abs = Math.abs(v);
-  if (abs >= 1000) return symbol + (abs/1000).toFixed(abs >= 10000 ? 0 : 1) + 'k';
-  return symbol + Math.round(abs);
-}
+// CR-Apr22-G slice 2: local `fmtShort` deleted in favor of the canonical
+// `fmtShort` export from `utils-pure.js`. The local copy was a near-
+// duplicate that read `signals.currency.value.symbol` directly rather
+// than the cached formatter state maintained by `syncCurrencyFormat`.
+// The canonical helper uses the same formatter cache as `fmtCur` and
+// stays in lockstep with it — which matters because the month/selection
+// effects in this file already subscribe to `signals.currency.value`
+// (search: "re-render on currency change"), so deleting the local copy
+// does not lose reactivity. Also folds in the missing negative-sign
+// handling that the local copy lacked.
 
-/**
- * Legacy support for renderCalendar (now reactive)
- */
-export function renderCalendar(): void {
-  // Logic is now automatic via signals.currentMonth and mountCalendar
-}
+// Phase 5g-1 (Inline-Behavior-Review rev 12, L30d): deleted the
+// `export function renderCalendar(): void {}` legacy no-op shim.
+// Calendar rendering is now driven entirely by the reactive
+// `mountCalendar()` effect on signals.currentMonth. Grep across js/ +
+// tests/ confirms zero remaining callers — the only reference was an
+// already-commented-out `renderScheduler.register('renderCalendar', ...)`
+// line in app-events.ts, which can be cleaned up in a future sweep.

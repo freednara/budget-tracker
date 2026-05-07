@@ -1,18 +1,21 @@
-# Budget Tracker Elite - Complete Feature Inventory 📊
+# Harbor Ledger — Complete Feature Inventory
 
 ## Overview
-A sophisticated Progressive Web App for personal finance management with 100+ features across 138 TypeScript modules.
+Harbor Ledger is a privacy-first, local-first Progressive Web App for personal finance management. 100+ features across ~155 TypeScript modules, all running on-device.
 
 ---
 
-## 🏗️ Architecture & Technology
+## Architecture & technology
 
-### Tech Stack
-- **Frontend**: TypeScript, HTML5, CSS3
-- **Storage**: LocalStorage with fallback handling
-- **Architecture**: Modular TypeScript with event-driven patterns
-- **Testing**: Vitest with 188 tests across 8 test files
-- **PWA**: Service Worker, offline support, installable
+### Tech stack
+- **Language:** TypeScript (strict, 100% of source)
+- **Reactivity:** `@preact/signals-core` with action-object mutation discipline
+- **Rendering:** `lit-html` via centralized helpers
+- **Storage:** IndexedDB primary + LocalStorage fallback, with versioned migration
+- **DI:** Lazy-loading container (`core/di-container.ts`)
+- **Build:** Vite 7 + vite-plugin-pwa
+- **Testing:** Vitest (~636 cases across ~65 files) + Playwright E2E (Chromium, WebKit, Mobile Safari) + `@axe-core/playwright` for accessibility
+- **PWA:** Service worker, offline support, installable, Capacitor wrappers for iOS and Android
 
 ### Performance Features
 - DOM caching system for 50+ elements
@@ -321,17 +324,17 @@ A sophisticated Progressive Web App for personal finance management with 100+ fe
 
 ---
 
-## 📈 Statistics
+## Statistics
 
-- **Total Features**: 100+
-- **Code Modules**: 138 TypeScript modules
-- **Test Coverage**: 188 tests across 8 test files
-- **Categories**: 14 default (8 expense, 6 income)
-- **Achievement Badges**: 14
-- **Supported Currencies**: 28 currencies
-- **Max Transactions**: 10,000+
-- **Performance**: <200ms render
+- **Total features:** 100+
+- **Code modules:** ~155 TypeScript modules under `js/modules/`
+- **Test coverage:** ~636 Vitest cases across ~65 files, plus Playwright E2E across Chromium, WebKit, and Mobile Safari
+- **Categories:** 14 default (8 expense, 6 income)
+- **Achievement badges:** 14
+- **Supported currencies:** 28
+- **Browser support:** Chrome 90+, Firefox 88+, Safari 14+, Edge 90+, Mobile Safari 14+
+- **Performance guards:** Playwright gates for shell-ready, transactions-surface readiness, transaction edit, calendar selection, and dashboard refresh
 
 ---
 
-*This is a feature-complete personal finance management system with enterprise-level architecture, comprehensive testing, and exceptional user experience.*
+*Harbor Ledger is a feature-complete personal finance management system. Scale and performance characteristics depend on device, browser, and dataset size — benchmark on target devices rather than relying on a fixed transaction ceiling.*

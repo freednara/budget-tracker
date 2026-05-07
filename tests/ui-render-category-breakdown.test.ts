@@ -109,16 +109,25 @@ describe('ui-render category breakdown trends', () => {
     updateCategoryBreakdownChart();
 
     expect(chartRenderersMocks.renderDonutChart).toHaveBeenCalledOnce();
+    // 7a (Inline-Behavior-Review, CategoryTrendChange nullable widening):
+    // The producer was routed through `computeBaselineDelta` so 'new' and
+    // 'no-data' baseline statuses emit `change: null` rather than the
+    // fabricated `change: 100` / `change: 0` sentinels that pre-7a
+    // collapsed a "brand-new category" and a "truly flat category" into
+    // indistinguishable assertions. Type annotation widened to
+    // `number | null` so the test contract mirrors the production type.
     const [, , donutTrends] = chartRenderersMocks.renderDonutChart.mock.calls[0] as [
       string,
       Array<{ catId: string; label: string; value: number; color: string }>,
-      Record<string, { change: number; direction: 'up' | 'down' | 'flat' | 'new' }>
+      Record<string, { change: number | null; direction: 'up' | 'down' | 'flat' | 'new' }>
     ];
 
     expect(donutTrends.food).toEqual({ change: 7, direction: 'up' });
     expect(donutTrends.transport).toEqual({ change: 18, direction: 'down' });
     expect(donutTrends.shopping).toEqual({ change: 0, direction: 'down' });
-    expect(donutTrends.bills).toEqual({ change: 100, direction: 'new' });
-    expect(donutTrends.entertainment).toEqual({ change: 0, direction: 'flat' });
+    // 7a: 'new' (previous==0, current>0) — null rather than fabricated 100
+    expect(donutTrends.bills).toEqual({ change: null, direction: 'new' });
+    // 7a: 'no-data' (both zero) — null rather than fabricated 0
+    expect(donutTrends.entertainment).toEqual({ change: null, direction: 'flat' });
   });
 });

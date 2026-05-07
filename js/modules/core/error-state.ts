@@ -8,7 +8,7 @@
  */
 'use strict';
 
-import { signal, computed, Signal } from '@preact/signals-core';
+import { signal, computed } from '@preact/signals-core';
 
 // ==========================================
 // TYPE DEFINITIONS
@@ -18,14 +18,17 @@ import { signal, computed, Signal } from '@preact/signals-core';
  * Explicit error state for components
  * Replaces undefined returns with clear error information
  */
+// Phase 6 Slice 1j (rev 12 L6): optional fields widened for
+// `exactOptionalPropertyTypes` — the success and failure factories both
+// construct this with explicit `undefined` for unused optional fields.
 export interface ErrorState<T> {
   hasError: boolean;
-  error?: Error;
-  data?: T;
-  fallbackUsed?: boolean;
-  retryable?: boolean;
+  error?: Error | undefined;
+  data?: T | undefined;
+  fallbackUsed?: boolean | undefined;
+  retryable?: boolean | undefined;
   timestamp: number;
-  context?: string;
+  context?: string | undefined;
 }
 
 /**
@@ -109,13 +112,30 @@ function isRetryableError(error: Error): boolean {
  * Global error states for critical paths
  * Components can subscribe to these for error awareness
  */
+// Phase 6 cleanup (no-explicit-any sweep): signals are homogeneously typed
+// `ErrorState<unknown>` so `updateCriticalPathState` can route any shape
+// without cast-at-branch. The `.data` payload is not read anywhere (verified
+// via grep) — consumers read `.hasError`, `.error`, `.retryable`,
+// `.fallbackUsed`, which are type-independent. Widening to `unknown` is
+// safe and eliminates the last load-bearing `any` in this module.
+// CR-Apr24-I finding 324: store defaults so clearErrorStates() can
+// restore them instead of propagating stale/undefined error data.
+const ERROR_STATE_DEFAULTS: Record<string, unknown> = {
+  transactions: [],
+  balance: 0,
+  savings: 0,
+  budget: {},
+  dataLoad: true,
+  dataSave: true
+};
+
 export const errorStates = {
-  transactions: signal<ErrorState<any>>(createSuccessState([])),
-  balance: signal<ErrorState<number>>(createSuccessState(0)),
-  savings: signal<ErrorState<number>>(createSuccessState(0)),
-  budget: signal<ErrorState<any>>(createSuccessState({})),
-  dataLoad: signal<ErrorState<boolean>>(createSuccessState(true)),
-  dataSave: signal<ErrorState<boolean>>(createSuccessState(true))
+  transactions: signal<ErrorState<unknown>>(createSuccessState([])),
+  balance: signal<ErrorState<unknown>>(createSuccessState(0)),
+  savings: signal<ErrorState<unknown>>(createSuccessState(0)),
+  budget: signal<ErrorState<unknown>>(createSuccessState({})),
+  dataLoad: signal<ErrorState<unknown>>(createSuccessState(true)),
+  dataSave: signal<ErrorState<unknown>>(createSuccessState(true))
 };
 
 /**
@@ -182,12 +202,13 @@ export function withErrorState<T>(
     if (options?.criticalPath) {
       updateCriticalPathState(options.criticalPath, state);
       
-      // Re-throw for truly critical paths without fallback
-      if (!options.fallback) {
+      // CR-Apr24-G finding 322: use `undefined` check instead of truthiness
+      // so legitimate fallbacks like 0, false, '' are not misclassified.
+      if (options.fallback === undefined) {
         throw new CriticalPathError(err, options.criticalPath);
       }
     }
-    
+
     return state;
   }
 }
@@ -207,27 +228,28 @@ export async function withErrorStateAsync<T>(
   try {
     const result = await operation();
     const state = createSuccessState(result);
-    
+
     // Update global state if critical path
     if (options?.criticalPath) {
       updateCriticalPathState(options.criticalPath, state);
     }
-    
+
     return state;
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
     const state = createErrorState(err, context, options?.fallback);
-    
+
     // Update global state if critical path
     if (options?.criticalPath) {
       updateCriticalPathState(options.criticalPath, state);
-      
-      // Re-throw for truly critical paths without fallback
-      if (!options.fallback) {
+
+      // CR-Apr24-G finding 323: use `undefined` check instead of truthiness
+      // so legitimate fallbacks like 0, false, '' are not misclassified.
+      if (options.fallback === undefined) {
         throw new CriticalPathError(err, options.criticalPath);
       }
     }
-    
+
     return state;
   }
 }
@@ -256,7 +278,7 @@ export class CriticalPathError extends Error {
 /**
  * Update global error state for critical path
  */
-function updateCriticalPathState(path: CriticalPath, state: ErrorState<any>): void {
+function updateCriticalPathState(path: CriticalPath, state: ErrorState<unknown>): void {
   switch (path) {
     case CriticalPath.TRANSACTIONS:
       errorStates.transactions.value = state;
@@ -283,9 +305,12 @@ function updateCriticalPathState(path: CriticalPath, state: ErrorState<any>): vo
  * Clear all error states
  */
 export function clearErrorStates(): void {
-  Object.values(errorStates).forEach(state => {
-    state.value = createSuccessState(state.value.data);
-  });
+  // CR-Apr24-I finding 324: use stored defaults instead of state.value.data,
+  // which may be undefined from an error state, creating a bogus success.
+  for (const [key, state] of Object.entries(errorStates)) {
+    const defaultData = ERROR_STATE_DEFAULTS[key];
+    state.value = createSuccessState(defaultData !== undefined ? defaultData : state.value.data);
+  }
 }
 
 /**

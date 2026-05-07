@@ -9,6 +9,8 @@
  */
 'use strict';
 
+import { trackError } from './error-tracker.js';
+
 const DEV = import.meta.env.DEV;
 
 // ==========================================
@@ -19,16 +21,25 @@ export type RenderPriority = 'immediate' | 'user-blocking' | 'normal' | 'low' | 
 
 export interface RenderTask {
   name: string;
-  fn: () => void;
+  // Render tasks may be sync or async. Async suppliers (dynamic imports
+  // in `app-events.ts`) fire-and-forget; errors should surface via the
+  // trackError catch in processQueue below. Accepting Promise<void>
+  // here lets callers pass async functions without wrapping.
+  fn: () => void | Promise<void>;
   priority: RenderPriority;
 }
 
 export interface RenderScheduler {
-  register: (name: string, fn: () => void, priority?: RenderPriority) => void;
+  register: (name: string, fn: () => void | Promise<void>, priority?: RenderPriority) => void;
   schedule: (...names: string[]) => void;
   scheduleWithPriority: (name: string, priority: RenderPriority) => void;
   cancel: (name: string) => void;
-  flush: () => void;
+  // Phase 5g-1 (Inline-Behavior-Review rev 12, L49): removed `flush()`.
+  // Grep for `renderScheduler.flush|scheduler.flush` across js/ returned
+  // zero callers — the method was labeled `Legacy flush method` in its own
+  // docstring and existed only as an unreferenced synchronous drain. Pulling
+  // it off the interface means any future accidental re-introduction is a
+  // tsc error rather than a silently-dead surface.
 }
 
 // ==========================================
@@ -60,8 +71,16 @@ export function createRenderScheduler(): RenderScheduler {
   
   // Cycle detection
   const MAX_RENDER_PASSES = 10;
-  let currentFrameRenderCount = new Map<string, number>();
-  let frameStartTime = 0;
+  const currentFrameRenderCount = new Map<string, number>();
+  /**
+   * CR-Apr24-I finding 306: the previous 100ms wall-clock window could
+   * accumulate counts across multiple real frames, triggering false
+   * render-loop reports on high-refresh displays. Now we use a monotonic
+   * frame ID bumped inside the rAF callback (flushHighPriority), so
+   * counts are scoped to a single animation frame.
+   */
+  let currentFrameId = 0;
+  let counterFrameId = -1;
 
   /**
    * Register a render function with a name and priority
@@ -69,7 +88,7 @@ export function createRenderScheduler(): RenderScheduler {
    * @param fn - The render function to execute
    * @param priority - Render priority (defaults to 'normal')
    */
-  function register(name: string, fn: () => void, priority: RenderPriority = 'normal'): void {
+  function register(name: string, fn: () => void | Promise<void>, priority: RenderPriority = 'normal'): void {
     taskRegistry.set(name, { name, fn, priority });
   }
 
@@ -78,29 +97,37 @@ export function createRenderScheduler(): RenderScheduler {
    * @param names - Names of render functions to schedule
    */
   function schedule(...names: string[]): void {
-    // Check for render loops
-    const currentTime = performance.now();
-    if (currentTime - frameStartTime > 100) {
-      // New frame, reset counters
+    // CR-Apr24-I finding 306: reset counters on new animation frame
+    if (counterFrameId !== currentFrameId) {
       currentFrameRenderCount.clear();
-      frameStartTime = currentTime;
+      counterFrameId = currentFrameId;
     }
     
     names.forEach(name => {
+      // CR-Apr24-I finding 310: verify the task exists before counting,
+      // so an unregistered name cannot trip the render-loop detector.
+      const task = taskRegistry.get(name);
+      if (!task) {
+        if (DEV) console.warn(`[RenderScheduler] Unknown task name: "${name}"`);
+        return;
+      }
+
       // Check for render loop
       const renderCount = (currentFrameRenderCount.get(name) || 0) + 1;
       currentFrameRenderCount.set(name, renderCount);
-      
+
       if (renderCount > MAX_RENDER_PASSES) {
         if (DEV) console.error(`Render loop detected for "${name}": rendered ${renderCount} times in one frame`);
-        // Break the loop by not scheduling this render
+        if (renderCount === MAX_RENDER_PASSES + 1) {
+          trackError(
+            new Error(`Render loop detected for "${name}" (>${MAX_RENDER_PASSES} schedules in one frame)`),
+            { module: 'RenderScheduler', action: `schedule_render_loop_${name}` }
+          );
+        }
         return;
       }
-      
-      const task = taskRegistry.get(name);
-      if (task) {
-        taskQueues[task.priority].add(name);
-      }
+
+      taskQueues[task.priority].add(name);
     });
     
     scheduleNextFrame();
@@ -112,22 +139,28 @@ export function createRenderScheduler(): RenderScheduler {
    * @param priority - Override priority for this execution
    */
   function scheduleWithPriority(name: string, priority: RenderPriority): void {
-    // Check for render loops
-    const currentTime = performance.now();
-    if (currentTime - frameStartTime > 100) {
-      // New frame, reset counters
+    // CR-Apr24-I finding 306: reset counters on new animation frame
+    if (counterFrameId !== currentFrameId) {
       currentFrameRenderCount.clear();
-      frameStartTime = currentTime;
+      counterFrameId = currentFrameId;
     }
     
     const renderCount = (currentFrameRenderCount.get(name) || 0) + 1;
     currentFrameRenderCount.set(name, renderCount);
-    
+
     if (renderCount > MAX_RENDER_PASSES) {
       if (DEV) console.error(`Render loop detected for "${name}": rendered ${renderCount} times in one frame`);
+      // rev 12 M30 (#32 observability): boundary-only trackError — see
+      // matching comment in schedule() above.
+      if (renderCount === MAX_RENDER_PASSES + 1) {
+        trackError(
+          new Error(`Render loop detected for "${name}" (>${MAX_RENDER_PASSES} schedules in one frame)`),
+          { module: 'RenderScheduler', action: `scheduleWithPriority_render_loop_${name}` }
+        );
+      }
       return;
     }
-    
+
     taskQueues[priority].add(name);
     scheduleNextFrame();
   }
@@ -153,11 +186,14 @@ export function createRenderScheduler(): RenderScheduler {
     // Schedule low priority and idle tasks with requestIdleCallback
     if ((taskQueues.low.size > 0 || taskQueues.idle.size > 0) && 
         idleCallbackId === null) {
-      if ('requestIdleCallback' in window) {
-        idleCallbackId = (window as any).requestIdleCallback(() => flushLowPriority());
+      if (typeof window.requestIdleCallback === 'function') {
+        idleCallbackId = window.requestIdleCallback(() => flushLowPriority());
       } else {
         // Fallback for browsers without requestIdleCallback
-        idleCallbackId = (globalThis as any).setTimeout(() => flushLowPriority(), 50);
+        // setTimeout in browsers returns `number`. The cast through globalThis
+        // (instead of bare setTimeout) preserves the older fallback shape used
+        // before requestIdleCallback shipped — no `any` escape needed.
+        idleCallbackId = (globalThis as typeof window).setTimeout(() => flushLowPriority(), 50);
       }
     }
   }
@@ -167,6 +203,9 @@ export function createRenderScheduler(): RenderScheduler {
    */
   function flushHighPriority(): void {
     rafId = null;
+    // CR-Apr24-I finding 306: advance frame ID so cycle-detection counters
+    // are scoped to this actual animation frame, not a wall-clock window.
+    currentFrameId++;
     const startTime = performance.now();
     
     // Process tasks by priority with time slicing
@@ -199,10 +238,13 @@ export function createRenderScheduler(): RenderScheduler {
     
     // If we still have low-priority tasks, schedule another idle callback
     if (taskQueues.low.size > 0 || taskQueues.idle.size > 0) {
-      if ('requestIdleCallback' in window) {
-        idleCallbackId = (window as any).requestIdleCallback(() => flushLowPriority());
+      if (typeof window.requestIdleCallback === 'function') {
+        idleCallbackId = window.requestIdleCallback(() => flushLowPriority());
       } else {
-        idleCallbackId = (globalThis as any).setTimeout(() => flushLowPriority(), 50);
+        // setTimeout in browsers returns `number`. The cast through globalThis
+        // (instead of bare setTimeout) preserves the older fallback shape used
+        // before requestIdleCallback shipped — no `any` escape needed.
+        idleCallbackId = (globalThis as typeof window).setTimeout(() => flushLowPriority(), 50);
       }
     }
   }
@@ -231,56 +273,48 @@ export function createRenderScheduler(): RenderScheduler {
 
           if (count > MAX_RENDER_PASSES) {
             if (DEV) console.warn(`Render loop detected for "${name}": rendered ${count} times in one frame. Breaking loop.`);
+            // No trackError here — schedule() / scheduleWithPriority() already
+            // emitted at the boundary; processQueue runs later in the same
+            // frame on the same name and would double-fire.
             continue;
           }
 
-          task.fn();
-        } catch (e) {
-          if (DEV) console.error(`renderScheduler: ${name} failed`, e);
-        }
-      }
-    }
-  }
-
-  /**
-   * Legacy flush method - processes all queues immediately
-   */
-  function flush(): void {
-    const priorities: RenderPriority[] = ['immediate', 'user-blocking', 'normal', 'low', 'idle'];
-    
-    for (const priority of priorities) {
-      const queue = taskQueues[priority];
-      const tasks = Array.from(queue);
-      queue.clear();
-      
-      tasks.forEach(name => {
-        const task = taskRegistry.get(name);
-        if (task?.fn) {
-          try {
-            task.fn();
-          } catch (e) {
-            if (DEV) console.error(`renderScheduler: ${name} failed`, e);
+          const result = task.fn();
+          // Async render task: attach the same trackError routing we use
+          // for sync throws so promise rejections don't become silent
+          // unhandled rejections.
+          if (result && typeof (result as Promise<void>).then === 'function') {
+            (result as Promise<void>).catch((asyncErr: unknown) => {
+              trackError(asyncErr instanceof Error ? asyncErr : new Error(String(asyncErr)), {
+                module: 'RenderScheduler',
+                action: `processQueue_task_rejected_${name}`,
+              });
+            });
           }
+        } catch (e) {
+          // rev 12 M30 (#32 observability): render-task exceptions were
+          // DEV-only-logged then silently dropped — meaning a thrown
+          // render in prod produces *no signal at all* even though it
+          // visibly breaks the UI. trackError lets these surface in
+          // telemetry; we still swallow to keep the queue draining (one
+          // bad render mustn't take down the whole frame).
+          trackError(e instanceof Error ? e : new Error(String(e)), {
+            module: 'RenderScheduler',
+            action: `processQueue_task_threw_${name}`,
+          });
         }
-      });
-    }
-    
-    // Cancel scheduled frames
-    if (rafId !== null) {
-      cancelAnimationFrame(rafId);
-      rafId = null;
-    }
-    if (idleCallbackId !== null) {
-      if ('requestIdleCallback' in window) {
-        (window as any).cancelIdleCallback(idleCallbackId);
-      } else {
-        (globalThis as any).clearTimeout(idleCallbackId);
       }
-      idleCallbackId = null;
     }
   }
 
-  return { register, schedule, scheduleWithPriority, cancel, flush };
+  // Phase 5g-1 (Inline-Behavior-Review rev 12, L49): removed the legacy
+  // `flush()` method (34 LOC). It processed all queues synchronously and
+  // cancelled pending rAF/idleCallback handles, but had zero callers —
+  // scheduling and cancellation already happen naturally via `schedule` /
+  // `cancel`. The interface entry was also removed so no caller can
+  // silently re-surface the method.
+
+  return { register, schedule, scheduleWithPriority, cancel };
 }
 
 // ==========================================

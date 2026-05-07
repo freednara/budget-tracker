@@ -6,6 +6,7 @@ import type {
   Transaction,
   SavingsGoal,
   CustomCategory,
+  UserCategoryConfig,
   MonthlyAllocation,
   Debt
 } from '../js/types/index.js';
@@ -39,7 +40,7 @@ export function generateDate(options: {
   if (options.daysFromNow !== undefined) {
     const date = new Date(now);
     date.setDate(date.getDate() + options.daysFromNow);
-    return date.toISOString().split('T')[0];
+    return date.toISOString().split('T')[0] ?? '';
   }
   
   const year = options.year ?? now.getFullYear();
@@ -135,7 +136,7 @@ export function createDeterministicLedger(
       type: isIncome ? 'income' : 'expense',
       amount: isIncome ? 2500 + (i % 4) * 125 : 8 + (i % 23) * 3.75,
       description: isIncome ? `Income ${i}` : `Expense ${i}`,
-      category: isIncome ? 'salary' : expenseCategories[i % expenseCategories.length],
+      category: isIncome ? 'salary' : (expenseCategories[i % expenseCategories.length] ?? 'other'),
       date: generateDate({ year, month, day }),
       reconciled: i % 3 === 0,
       recurring: i % 11 === 0,
@@ -268,7 +269,7 @@ export function createMonthOfTransactions(options: {
     transactions.push(createExpenseTransaction({
       date: generateDate({ year, month, day: Math.floor(Math.random() * 28) + 1 }),
       amount: Math.round(Math.random() * 20000) / 100, // 0-200
-      category: categories[Math.floor(Math.random() * categories.length)]
+      category: categories[Math.floor(Math.random() * categories.length)] ?? 'other'
     }));
   }
   
@@ -298,7 +299,7 @@ export function createYearOfTransactions(year?: number): Transaction[] {
 export interface TestStateSnapshot {
   transactions: Transaction[];
   savingsGoals: Record<string, SavingsGoal>;
-  customCategories: CustomCategory[];
+  userCategories: UserCategoryConfig | null;
   monthlyAllocations: Record<string, MonthlyAllocation>;
   debts: Debt[];
   recurringTransactions: Transaction[];
@@ -312,7 +313,7 @@ export function createFullStateSnapshot(): TestStateSnapshot {
       'goal-2': createSavingsGoal({ name: 'Vacation', target: 5000 }),
       'goal-3': createSavingsGoal({ name: 'New Car', target: 30000 })
     },
-    customCategories: createCategorySet(),
+    userCategories: null,
     monthlyAllocations: {
       '2024-01': createMonthlyAllocation(),
       '2024-02': createMonthlyAllocation(),

@@ -40,8 +40,8 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
 async function expectPhoneTransactionFormFits(page: Page): Promise<void> {
   const metrics = await page.locator('#form-section').evaluate((section) => {
     const viewportWidth = document.documentElement.clientWidth;
-    const form = section.querySelector('#transaction-form') as HTMLElement | null;
-    const typeToggle = section.querySelector('.transactions-type-toggle') as HTMLElement | null;
+    const form = section.querySelector('#transaction-form');
+    const typeToggle = section.querySelector('.transactions-type-toggle');
     const formRows = form
       ? Array.from(form.querySelectorAll<HTMLElement>(':scope > .grid'))
       : [];
@@ -95,9 +95,9 @@ async function expectPhoneTransactionFormFits(page: Page): Promise<void> {
 async function expectPhoneCalendarStack(page: Page): Promise<void> {
   const metrics = await page.locator('#tab-calendar').evaluate((tab) => {
     const viewportWidth = document.documentElement.clientWidth;
-    const mainCard = tab.querySelector('.calendar-main-card') as HTMLElement | null;
-    const detailCard = tab.querySelector('.calendar-detail-card') as HTMLElement | null;
-    const heatmap = tab.querySelector('#spending-heatmap') as HTMLElement | null;
+    const mainCard = tab.querySelector('.calendar-main-card');
+    const detailCard = tab.querySelector('.calendar-detail-card');
+    const heatmap = tab.querySelector('#spending-heatmap');
     const grid = heatmap?.querySelector('.cal-grid') as HTMLElement | null;
 
     const mainRect = mainCard?.getBoundingClientRect();
@@ -180,7 +180,7 @@ async function expectPhoneSupportCardsCompactRail(page: Page): Promise<void> {
 
 async function prepareShellBudgetAlert(page: Page): Promise<void> {
   await page.addInitScript(() => {
-    localStorage.setItem('budget_tracker_alert_prefs', JSON.stringify({
+    localStorage.setItem('harbor_alert_prefs', JSON.stringify({
       budgetThreshold: 0.01,
       browserNotificationsEnabled: false,
       lastNotifiedAlertKeys: [],
@@ -193,13 +193,18 @@ async function prepareShellBudgetAlert(page: Page): Promise<void> {
   await expect(page.locator('#toast-container .toast')).toHaveCount(0, { timeout: 15000 });
   await page.locator('#tab-dashboard-btn').click();
   await expect(page.locator('#alert-banner .inline-alert-card')).toBeVisible({ timeout: 10000 });
-  await expect(page.locator('#dashboard-alerts .inline-alert-card')).toHaveCount(0);
-  await expect(page.locator('#budget-alerts .inline-alert-card')).toHaveCount(0);
+  // Phase 5g-4 Slice 2 (Inline-Behavior-Review rev 12, L30c — full closure):
+  // removed the two `#dashboard-alerts`/`#budget-alerts` .toHaveCount(0) guard
+  // assertions. Those in-page host divs were deleted from `index.html` in the
+  // same slice after Phase 5g-1 retired the `renderAlertHost` path — they only
+  // ever received a `null` template so they could never contain an alert card.
+  // The surviving `#alert-banner .inline-alert-card` visibility check above
+  // continues to cover the live shell host, which is the only alert surface.
 }
 
 async function swipeTransactionRow(page: Page, rowLocator: import('@playwright/test').Locator, direction: 'left' | 'right'): Promise<void> {
   await rowLocator.evaluate((row, swipeDirection) => {
-    const target = (row.querySelector('.swipe-content') as HTMLElement | null) ?? (row as HTMLElement);
+    const target = (row.querySelector('.swipe-content')) ?? (row as HTMLElement);
     const rect = target.getBoundingClientRect();
     const startX = rect.left + rect.width * 0.55;
     const endX = swipeDirection === 'left'
@@ -413,8 +418,11 @@ test.describe('Dashboard Layout', () => {
     await page.waitForTimeout(250);
 
     await expect(shellAlertHost.locator(`[data-alert-id="${alertId}"]`)).toHaveCount(0);
-    await expect(page.locator('#dashboard-alerts .inline-alert-card')).toHaveCount(0);
-    await expect(page.locator('#budget-alerts .inline-alert-card')).toHaveCount(0);
+    // Phase 5g-4 Slice 2 (Inline-Behavior-Review rev 12, L30c — full closure):
+    // removed the paired `#dashboard-alerts` / `#budget-alerts` .toHaveCount(0)
+    // post-dismiss guards. Those host divs no longer exist in `index.html`, so
+    // these assertions proved nothing. The `shellAlertHost` assertion above
+    // confirms the dismissed alert is cleared from the live shell host.
   });
 
   test('keeps dismissed budget alerts hidden as spending changes within the same month', async ({ page }) => {
@@ -452,12 +460,19 @@ test.describe('Dashboard Layout', () => {
     await page.locator('#tab-transactions-btn').click();
     await expect(page.locator('#tab-transactions')).toBeVisible({ timeout: 10000 });
     await expect(page.locator('#alert-banner .inline-alert-card')).toBeVisible({ timeout: 10000 });
-    await expect(page.locator('#dashboard-alerts .inline-alert-card')).toHaveCount(0);
+    // Phase 5g-4 Slice 2 (Inline-Behavior-Review rev 12, L30c — full closure):
+    // removed `#dashboard-alerts` cross-tab guard — that host div was deleted.
+    // The `#alert-banner` visibility check above is the meaningful assertion:
+    // the global shell-banner alert stays visible even when navigated away
+    // from the dashboard tab. (Test name describes exactly that.)
 
     await page.locator('#tab-calendar-btn').click();
     await expect(page.locator('#tab-calendar')).toBeVisible({ timeout: 10000 });
     await expect(page.locator('#alert-banner .inline-alert-card')).toBeVisible({ timeout: 10000 });
-    await expect(page.locator('#budget-alerts .inline-alert-card')).toHaveCount(0);
+    // Phase 5g-4 Slice 2 (Inline-Behavior-Review rev 12, L30c — full closure):
+    // removed `#budget-alerts` cross-tab guard — same rationale as the
+    // `#dashboard-alerts` removal above. Calendar tab is a third tab where the
+    // shell-banner alert should remain visible — the surviving assertion proves it.
   });
 
   test('income, expense, and balance support cards drill into month-scoped ledger views', async ({ page }) => {
@@ -552,10 +567,10 @@ test.describe('Dashboard Layout', () => {
 
     const insightMetrics = await page.locator('#insights-dashboard .insight-card').evaluateAll((cards) => {
       return cards.map((card) => {
-        const host = card.querySelector('[id^="insight-"]') as HTMLDivElement | null;
-        const copy = card.querySelector('.dashboard-insight-copy') as HTMLDivElement | null;
-        const text = card.querySelector('.dashboard-insight-text') as HTMLParagraphElement | null;
-        const button = card.querySelector('.insight-action-btn') as HTMLButtonElement | null;
+        const host = card.querySelector('[id^="insight-"]');
+        const copy = card.querySelector('.dashboard-insight-copy');
+        const text = card.querySelector('.dashboard-insight-text');
+        const button = card.querySelector('.insight-action-btn');
 
         return {
           hostWidth: host?.getBoundingClientRect().width ?? 0,
@@ -687,8 +702,8 @@ test.describe('Latest Mobile Layout Guards', () => {
       await prepareShellBudgetAlert(page);
       await expect(page.locator('#alert-banner .inline-alert-card')).toBeVisible({ timeout: 10000 });
       const shellAndAlertMetrics = await page.evaluate(() => {
-        const shell = document.querySelector('.app-shell') as HTMLElement | null;
-        const alert = document.getElementById('alert-banner') as HTMLElement | null;
+        const shell = document.querySelector('.app-shell');
+        const alert = document.getElementById('alert-banner');
         if (!shell || !alert) {
           return null;
         }
@@ -795,9 +810,9 @@ test.describe('Latest Mobile Layout Guards', () => {
       const firstRow = page.locator('#transactions-list .swipe-container').first();
       await expect(firstRow.locator('.desktop-actions')).toBeHidden();
       const rowLayout = await firstRow.evaluate((row) => {
-        const description = row.querySelector('.tx-description') as HTMLElement | null;
-        const amount = row.querySelector('.tx-amount') as HTMLElement | null;
-        const meta = row.querySelector('.tx-meta') as HTMLElement | null;
+        const description = row.querySelector('.tx-description');
+        const amount = row.querySelector('.tx-amount');
+        const meta = row.querySelector('.tx-meta');
         const rowRect = row.getBoundingClientRect();
         const descriptionRect = description?.getBoundingClientRect();
         const amountRect = amount?.getBoundingClientRect();

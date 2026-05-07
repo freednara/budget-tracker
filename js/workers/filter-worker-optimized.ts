@@ -22,12 +22,17 @@ import type {
   WorkerResponse,
   WorkerSortField,
   WorkerSortDirection,
-  WorkerUpdatePayload
+  WorkerUpdatePayload,
+  WorkerAbortPayload
 } from '../types/index.js';
 
 // Import shared money functions for consistency
 // FIXED: Using exact same functions as main thread
-import { toCents, toDollars } from '../modules/core/utils.js';
+// rev 12 / #41: parseLocalDate imported from shared helper to eliminate drift
+// between worker and main thread. Worker-local cache-wrapper below preserves
+// batch-processing perf characteristic unique to the worker.
+import { toCents, toDollars, parseLocalDate as parseLocalDateShared } from '../modules/core/utils-pure.js';
+import { isTrackedExpenseTransaction } from '../modules/core/transaction-classification.js';
 
 // Worker global scope types
 interface WorkerGlobalScope {
@@ -60,15 +65,18 @@ interface IndexedTransaction extends Transaction {
 
 // CRITICAL FIX: Persistent in-memory dataset to avoid 10k+ transaction transfers
 let transactionDataset: IndexedTransaction[] = [];
-let categoryMap: Record<string, any> = {};
 let lastUpdateTimestamp = 0;
-let datasetVersion = 0;
 let lastDatasetHash = '';
 let datasetInitialized = false;
-const DEV = typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV;
+// Vite exposes `import.meta.env` at build time; in TS without the Vite client
+// typings it's untyped, so we narrow the lookup manually rather than reaching
+// through `any`.
+const DEV = typeof import.meta !== 'undefined'
+  && typeof (import.meta as { env?: { DEV?: boolean } }).env?.DEV === 'boolean'
+  && (import.meta as { env?: { DEV?: boolean } }).env!.DEV === true;
 
 // Performance tracking
-let operationStats = {
+const operationStats = {
   filterOperations: 0,
   aggregateOperations: 0,
   searchOperations: 0,
@@ -77,15 +85,35 @@ let operationStats = {
   averageSearchTime: 0
 };
 
-// Dataset update queue for batch processing
-let pendingUpdates: Array<{
-  type: 'add' | 'update' | 'delete';
-  transaction: Transaction;
-  index?: number;
-}> = [];
+/**
+ * Fixes H15 (Inline-Behavior-Review rev 12): request IDs the main thread
+ * has told us to abandon. The worker checks this set at cancellation
+ * checkpoints (start of each filter/search/aggregate branch and right
+ * before `postMessage`) so an abort arrives before the result does, the
+ * result is dropped instead of racing back.
+ *
+ * Kept bounded by `MAX_CANCELLED_IDS`: we only need to remember an ID
+ * until its in-flight operation would have responded, and the main thread
+ * has already forgotten the request (either by timeout reject or
+ * AbortController reject) — so purging in FIFO order by count is safe.
+ */
+const cancelledRequestIds = new Set<number>();
+const cancelledOrder: number[] = [];
+const MAX_CANCELLED_IDS = 256;
 
-let batchUpdateTimer: number | null = null;
-const BATCH_UPDATE_DELAY = 100; // ms
+function markCancelled(requestId: number): void {
+  if (cancelledRequestIds.has(requestId)) return;
+  cancelledRequestIds.add(requestId);
+  cancelledOrder.push(requestId);
+  while (cancelledOrder.length > MAX_CANCELLED_IDS) {
+    const evicted = cancelledOrder.shift();
+    if (evicted !== undefined) cancelledRequestIds.delete(evicted);
+  }
+}
+
+function isCancelled(requestId: number): boolean {
+  return cancelledRequestIds.has(requestId);
+}
 
 // ==========================================
 // DATA INDEXING
@@ -126,22 +154,6 @@ function indexTransaction(tx: Transaction): IndexedTransaction {
   };
 }
 
-/**
- * Update the in-memory dataset (simple sync version)
- * FIXED: Only transfers data once or on explicit update
- */
-function updateDatasetSync(transactions: Transaction[], categories?: Record<string, any>): void {
-  // Index all transactions once
-  transactionDataset = transactions.map(indexTransaction);
-
-  if (categories) {
-    categoryMap = categories;
-  }
-
-  lastUpdateTimestamp = Date.now();
-  datasetInitialized = true;
-}
-
 // ==========================================
 // OPTIMIZED FILTERING
 // ==========================================
@@ -158,7 +170,6 @@ function filterTransactionsOptimized(
     showAllMonths,
     type,
     category,
-    childCatIds,
     searchQuery,
     search,
     tagsFilter,
@@ -171,10 +182,11 @@ function filterTransactionsOptimized(
   } = filters as WorkerTransactionFilters & { search?: string };
 
   // Pre-process filters for efficiency
-  const childSet = childCatIds ? new Set(childCatIds) : null;
   // Support both deprecated `searchQuery` and new `search` fields
-  const query = (searchQuery || search)?.toLowerCase();
-  const tagsQuery = tagsFilter?.toLowerCase();
+  // CR-Apr24-I finding 246: add .trim() to match the sync fallback path,
+  // so leading/trailing whitespace in queries behaves identically.
+  const query = (searchQuery || search)?.toLowerCase().trim() || undefined;
+  const tagsQuery = tagsFilter?.toLowerCase().trim() || undefined;
   
   // Convert date strings to timestamps once
   const dateFromTs = dateFrom ? parseLocalDate(dateFrom).getTime() : null;
@@ -199,7 +211,7 @@ function filterTransactionsOptimized(
 
     // Category filter
     if (category && category !== 'all') {
-      if (tx.category !== category && (!childSet || !childSet.has(tx.category))) {
+      if (tx.category !== category) {
         return false;
       }
     }
@@ -289,7 +301,23 @@ function sortTransactionsOptimized(
  * FIXED: Uses shared toCents/toDollars functions
  */
 function calculateAggregationsOptimized(transactions: IndexedTransaction[]): WorkerAggregations {
-  const result = transactions.reduce(
+  interface AggregationAccumulator {
+    totalIncomeCents: number;
+    totalExpensesCents: number;
+    incomeCount: number;
+    expenseCount: number;
+    categoryTotals: Record<string, number>;
+  }
+
+  const seed: AggregationAccumulator = {
+    totalIncomeCents: 0,
+    totalExpensesCents: 0,
+    incomeCount: 0,
+    expenseCount: 0,
+    categoryTotals: {}
+  };
+
+  const result = transactions.reduce<AggregationAccumulator>(
     (acc, tx) => {
       // FIXED: Use pre-computed cents value
       const amtCents = tx._amountCents;
@@ -297,7 +325,10 @@ function calculateAggregationsOptimized(transactions: IndexedTransaction[]): Wor
       if (tx.type === 'income') {
         acc.totalIncomeCents += amtCents;
         acc.incomeCount++;
-      } else if (tx.type === 'expense') {
+      } else if (isTrackedExpenseTransaction(tx)) {
+        // CR-Apr24-F finding 231: use isTrackedExpenseTransaction to
+        // exclude savings-transfer expenses, matching the sync fallback
+        // in worker-manager.ts and the rest of Harbor Ledger.
         acc.totalExpensesCents += amtCents;
         acc.expenseCount++;
         acc.categoryTotals[tx.category] = (acc.categoryTotals[tx.category] || 0) + amtCents;
@@ -305,13 +336,7 @@ function calculateAggregationsOptimized(transactions: IndexedTransaction[]): Wor
 
       return acc;
     },
-    {
-      totalIncomeCents: 0,
-      totalExpensesCents: 0,
-      incomeCount: 0,
-      expenseCount: 0,
-      categoryTotals: {} as Record<string, number>
-    }
+    seed
   );
 
   // FIXED: Use shared toDollars function for consistency
@@ -334,33 +359,36 @@ function calculateAggregationsOptimized(transactions: IndexedTransaction[]): Wor
 
 /**
  * Parse date string to Date object (cached version)
+ *
+ * rev 12 / #41: Parse logic now delegates to the shared main-thread helper
+ * (`parseLocalDateShared` from `modules/core/utils-pure.js`) so the worker and
+ * main thread can never drift on date-string interpretation (e.g. DST handling
+ * via noon anchor). The worker retains a local Map-based cache with the
+ * existing size-1000-clear-all eviction policy because batch transaction
+ * processing here benefits from memoization that the main thread does not need.
  */
 const dateCache = new Map<string, Date>();
 function parseLocalDate(dateStr: string | Date): Date {
   if (dateStr instanceof Date) return dateStr;
-  
-  // Check cache first
+
+  // Cache-wrapper: only strings are cacheable (Dates short-circuit above).
   if (typeof dateStr === 'string') {
     const cached = dateCache.get(dateStr);
     if (cached) return cached;
-    
-    let date: Date;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-      const [y, m, d] = dateStr.split('-').map(Number);
-      date = new Date(y, m - 1, d, 12, 0, 0);
-    } else {
-      date = new Date(dateStr);
-    }
-    
-    // Cache for reuse (limit cache size)
+
+    const date = parseLocalDateShared(dateStr);
+
+    // Cache for reuse (limit cache size — clear-all on overflow preserves
+    // existing LRU-ish semantics without adding eviction overhead).
     if (dateCache.size > 1000) {
       dateCache.clear();
     }
     dateCache.set(dateStr, date);
     return date;
   }
-  
-  return new Date(dateStr);
+
+  // Defensive: non-string, non-Date input falls through to shared helper.
+  return parseLocalDateShared(dateStr);
 }
 
 /**
@@ -388,14 +416,14 @@ function paginateResults<T>(
 
 /**
  * CRITICAL FIX: Enhanced dataset management to avoid 10k+ transaction transfers
- * SECURITY FIX: Now uses secure SHA-256 checksums for change detection
+ * Uses sync XXHash for lightweight change detection.
  */
-async function updateDataset(transactions: Transaction[], categoryMapData?: Record<string, any>): Promise<void> {
+function updateDataset(transactions: Transaction[], _categoryMapData?: Record<string, unknown>): void {
   const startTime = performance.now();
-  
-  // Generate secure dataset hash for change detection
-  const datasetHash = await generateDatasetHash(transactions);
-  
+
+  // Generate dataset hash for change detection (sync — PERF-01)
+  const datasetHash = generateDatasetHash(transactions);
+
   // Only update if data actually changed
   if (datasetHash === lastDatasetHash && transactionDataset.length === transactions.length) {
     if (DEV) console.debug('Worker dataset unchanged, skipping full sync');
@@ -403,10 +431,10 @@ async function updateDataset(transactions: Transaction[], categoryMapData?: Reco
   }
 
   if (DEV) console.debug(`Worker full dataset sync: ${transactions.length} transactions`);
-  
+
   // Clear existing dataset
   transactionDataset = [];
-  
+
   // Index new transactions in batches for better performance
   const batchSize = 1000;
   for (let i = 0; i < transactions.length; i += batchSize) {
@@ -414,15 +442,9 @@ async function updateDataset(transactions: Transaction[], categoryMapData?: Reco
     const indexedBatch = batch.map(indexTransaction);
     transactionDataset.push(...indexedBatch);
   }
-  
-  // Update category map if provided
-  if (categoryMapData) {
-    categoryMap = categoryMapData;
-  }
-  
+
   // Update metadata
   lastDatasetHash = datasetHash;
-  datasetVersion++;
   lastUpdateTimestamp = Date.now();
   operationStats.datasetUpdates++;
   datasetInitialized = true;
@@ -432,36 +454,53 @@ async function updateDataset(transactions: Transaction[], categoryMapData?: Reco
 }
 
 /**
- * SECURITY FIX: Generate cryptographically secure dataset hash for change detection
- * Uses SHA-256 via SubtleCrypto for tamper-resistant dataset verification
+ * Generate dataset hash for change detection.
+ *
+ * PERF-01: Switched from async SHA-256 (crypto.subtle.digest) to sync
+ * XXHash. This hash is used purely for *same-vs-different* detection when
+ * deciding whether to re-index the worker's in-memory dataset — it is not
+ * a security boundary. The async SubtleCrypto round-trip added ~1-2ms of
+ * microtask latency on every filter path, which is avoidable overhead for
+ * a non-cryptographic purpose.
  */
-async function generateDatasetHash(transactions: Transaction[]): Promise<string> {
-  // Lightweight fingerprint: sample key transactions + aggregate metrics
-  // Avoids O(N) string concatenation of all fields for all transactions
+function generateDatasetHash(transactions: Transaction[]): string {
+  // CR-Apr24-F finding 249: strengthened fingerprint. The prior v2 hash
+  // sampled only first/mid/last rows + total amount sum, so interior edits
+  // to description/tags/category/reconciled could collide as long as the
+  // sampled rows and total stayed the same. v3 adds:
+  // - a rolling description-length sum (catches description edits)
+  // - per-tx category/reconciled XOR (catches category reassignment)
+  // - 8 evenly-spaced samples instead of 3 (covers interior edits)
+  // Still O(N) only on the light accumulator walk, not full-string-concat.
   const n = transactions.length;
-  const first = transactions[0];
-  const last = transactions[n - 1];
-  const mid = transactions[Math.floor(n / 2)];
-  const sample = [first, mid, last].filter(Boolean);
 
-  // Include count + sample IDs/amounts + a rolling sum for change detection
-  let amountSum = 0;
-  for (let i = 0; i < n; i++) amountSum += transactions[i].amount;
-
-  const hashData = `v2:${n}:${amountSum.toFixed(2)}:` +
-    sample.map(tx => `${tx.__backendId}-${tx.amount}-${tx.date}-${tx.category}-${tx.type}-${tx.reconciled}`).join('|');
-
-  try {
-    const encoder = new TextEncoder();
-    const dataBuffer = encoder.encode(hashData);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-  } catch (error) {
-    console.warn('SubtleCrypto unavailable in Worker, using XXHash fallback:', error);
-    // Fallback to XXHash32-like algorithm (more secure than simple sum)
-    return generateXXHashFallback(hashData);
+  // Build sample indices: up to 8 evenly spaced
+  const sampleCount = Math.min(8, n);
+  const sampleIndices: number[] = [];
+  for (let s = 0; s < sampleCount; s++) {
+    sampleIndices.push(Math.floor(s * (n - 1) / Math.max(1, sampleCount - 1)));
   }
+  const sample = sampleIndices
+    .map(i => transactions[i])
+    .filter((tx): tx is Transaction & object => Boolean(tx));
+
+  // Rolling accumulators (O(N) but lightweight per-tx)
+  let amountSum = 0;
+  let descLenSum = 0;
+  let categoryHash = 0;
+  for (const tx of transactions) {
+    amountSum += tx?.amount ?? 0;
+    descLenSum += (tx?.description || '').length;
+    // Simple category/reconciled accumulator — order-sensitive enough to
+    // detect category reassignment even when amounts don't change.
+    categoryHash = (categoryHash * 31 + (tx?.category || '').length + (tx?.reconciled ? 1 : 0)) >>> 0;
+  }
+
+  const hashData = `v3:${n}:${amountSum.toFixed(2)}:${descLenSum}:${categoryHash}:` +
+    sample.map(tx => `${tx.__backendId}-${tx.amount}-${tx.date}-${tx.category}-${tx.type}-${tx.reconciled}-${(tx.description || '').length}`).join('|');
+
+  // PERF-01: use sync XXHash — no need for async SubtleCrypto for change detection.
+  return generateXXHashFallback(hashData);
 }
 
 /**
@@ -541,32 +580,8 @@ function updateDatasetIncremental(
       }
       break;
   }
-  
-  datasetVersion++;
-  lastUpdateTimestamp = Date.now();
-}
 
-/**
- * Get dataset statistics
- */
-function getDatasetStats(): {
-  size: number;
-  version: number;
-  lastUpdate: number;
-  memoryUsage: number;
-  operationStats: typeof operationStats;
-} {
-  // Estimate memory usage
-  const estimatedMemoryPerTransaction = 500; // bytes (rough estimate)
-  const memoryUsage = transactionDataset.length * estimatedMemoryPerTransaction;
-  
-  return {
-    size: transactionDataset.length,
-    version: datasetVersion,
-    lastUpdate: lastUpdateTimestamp,
-    memoryUsage,
-    operationStats: { ...operationStats }
-  };
+  lastUpdateTimestamp = Date.now();
 }
 
 // ==========================================
@@ -576,10 +591,39 @@ function getDatasetStats(): {
 /**
  * Optimized message handler
  * FIXED: Handles data updates separately from filtering
- * SECURITY FIX: Now supports async secure checksum operations
+ * PERF-01: dataset hashing is now sync (XXHash), so only the
+ * message-handler wrapper remains async for consistency with the
+ * onmessage signature.
+ *
+ * Phase 6 Slice 1b (L5 #181): extracted the async body into
+ * `handleWorkerMessage` and wrapped the `self.onmessage` assignment in a
+ * sync `(e) => { void handleWorkerMessage(e); }`. Worker-scope onmessage
+ * is typed as `(ev) => any`, but no-misused-promises flags a Promise-
+ * returning handler. The catch block in handleWorkerMessage already
+ * funnels errors into a worker-response envelope, so the `void` discard
+ * is safe — there's no path that leaves a rejection unhandled.
  */
-self.onmessage = async function(e: MessageEvent<WorkerMessage>): Promise<void> {
+async function handleWorkerMessage(e: MessageEvent<WorkerMessage>): Promise<void> {
   const { type, payload, requestId } = e.data;
+
+  // Fixes H15 (Inline-Behavior-Review rev 12): `abort` is a fire-and-forget
+  // control message, not a request. Handle it before the try/postMessage
+  // machinery so we never reply with a response envelope (which would
+  // confuse the main thread into treating it as a completed request).
+  if (type === 'abort') {
+    const { abortRequestId } = payload as WorkerAbortPayload;
+    if (typeof abortRequestId === 'number') {
+      markCancelled(abortRequestId);
+    }
+    return;
+  }
+
+  // Guard: if an abort for THIS request arrived before we started, bail.
+  // The main-thread pendingRequests entry is already gone by this point,
+  // so any response we send would be dropped anyway.
+  if (isCancelled(requestId)) {
+    return;
+  }
 
   try {
     let result: unknown;
@@ -602,7 +646,8 @@ self.onmessage = async function(e: MessageEvent<WorkerMessage>): Promise<void> {
             case 'delete':
               if (change.item) updateDatasetIncremental('delete', change.item);
               else if (change.id) {
-                updateDatasetIncremental('delete', { __backendId: change.id } as Transaction);
+                const stub = { __backendId: change.id };
+                updateDatasetIncremental('delete', stub as Transaction);
               }
               break;
             case 'batch-add':
@@ -610,21 +655,20 @@ self.onmessage = async function(e: MessageEvent<WorkerMessage>): Promise<void> {
               break;
             case 'batch-delete':
               (change.ids || []).forEach((id: string) => {
-                updateDatasetIncremental('delete', { __backendId: id } as Transaction);
+                const stub = { __backendId: id };
+                updateDatasetIncremental('delete', stub as Transaction);
               });
               break;
             case 'split':
               if (change.id) {
-                updateDatasetIncremental('delete', { __backendId: change.id } as Transaction);
+                const stub = { __backendId: change.id };
+                updateDatasetIncremental('delete', stub as Transaction);
               }
               (change.items || []).forEach((transaction: Transaction) => updateDatasetIncremental('add', transaction));
               break;
           }
-          if (categories) {
-            categoryMap = categories;
-          }
         } else if (transactions !== undefined) {
-          await updateDataset(transactions, categories);
+          updateDataset(transactions, categories);
         }
         result = { 
           success: true, 
@@ -640,7 +684,7 @@ self.onmessage = async function(e: MessageEvent<WorkerMessage>): Promise<void> {
         
         // Check if we need to update dataset
         if (filterPayload.transactions) {
-          await updateDataset(filterPayload.transactions, filters.categoryMap);
+          updateDataset(filterPayload.transactions, filters.categoryMap);
         }
 
         // FIXED: Filter using in-memory indexed data
@@ -666,10 +710,17 @@ self.onmessage = async function(e: MessageEvent<WorkerMessage>): Promise<void> {
       case 'search': {
         const searchPayload = payload as WorkerSearchPayload;
         const { query } = searchPayload;
-        
+
+        // CR-Apr24-F finding 239: refresh dataset from payload if provided,
+        // matching the filter and aggregate branches. Previously the search
+        // branch always searched stale transactionDataset.
+        if (searchPayload.transactions) {
+          updateDataset(searchPayload.transactions);
+        }
+
         // Quick search using pre-indexed search text
-        const matches = transactionDataset.filter(tx => 
-          tx._searchText.includes(query.toLowerCase())
+        const matches = transactionDataset.filter(tx =>
+          tx._searchText.includes(query.toLowerCase().trim())
         );
         
         const sorted = sortTransactionsOptimized(matches, 'date', 'desc');
@@ -681,19 +732,35 @@ self.onmessage = async function(e: MessageEvent<WorkerMessage>): Promise<void> {
 
       case 'aggregate': {
         const aggregatePayload = payload as WorkerAggregatePayload;
-        
+
         // Update dataset if provided
         if (aggregatePayload.transactions) {
-          await updateDataset(aggregatePayload.transactions);
+          updateDataset(aggregatePayload.transactions);
         }
-        
-        const aggregations = calculateAggregationsOptimized(transactionDataset);
+
+        // CR-Apr24-F finding 232: apply filters before aggregating.
+        // Previously the worker aggregated the entire dataset wholesale,
+        // ignoring the filters payload that aggregateTransactionsAsync
+        // forwards from the main thread.
+        const dataToAggregate = aggregatePayload.filters
+          ? filterTransactionsOptimized(aggregatePayload.filters)
+          : transactionDataset;
+        const aggregations = calculateAggregationsOptimized(dataToAggregate);
         result = aggregations;
         break;
       }
 
       default:
         throw new Error(`Unknown message type: ${type}`);
+    }
+
+    // Fixes H15 (Inline-Behavior-Review rev 12): final pre-reply cancellation
+    // checkpoint. If an abort raced in while we were computing, drop the
+    // result on the floor — the main thread already rejected this promise
+    // with "Request aborted" or "Worker request timeout" and doesn't want a
+    // late "success: true" envelope muddying its state.
+    if (isCancelled(requestId)) {
+      return;
     }
 
     const response: WorkerResponse = {
@@ -704,6 +771,11 @@ self.onmessage = async function(e: MessageEvent<WorkerMessage>): Promise<void> {
     self.postMessage(response);
 
   } catch (error) {
+    // Don't emit a failure envelope for an already-abandoned request either;
+    // it only generates noise on the main thread's onmessage handler.
+    if (isCancelled(requestId)) {
+      return;
+    }
     const response: WorkerResponse = {
       requestId,
       success: false,
@@ -711,4 +783,8 @@ self.onmessage = async function(e: MessageEvent<WorkerMessage>): Promise<void> {
     };
     self.postMessage(response);
   }
+}
+
+self.onmessage = (e: MessageEvent<WorkerMessage>): void => {
+  void handleWorkerMessage(e);
 };

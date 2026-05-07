@@ -1,6 +1,6 @@
-# Budget Tracker Elite - Agent Guidelines
+# Harbor Ledger — Agent Guidelines
 
-TypeScript PWA (~41,000 lines) using Preact Signals, Lit HTML, DI Container, and IndexedDB. Layered architecture with explicit bridge exceptions and reactive state management.
+Harbor Ledger is a privacy-first, local-first TypeScript PWA for personal finance. ~155 TypeScript modules under `js/modules/`, built on Preact Signals, lit-html, a lazy-loading DI container, and an IndexedDB-primary / LocalStorage-fallback storage stack. Layered architecture with explicit bridge exceptions and reactive state management.
 
 ## Architecture Rules
 
@@ -67,10 +67,15 @@ export const budgetUsagePercent = computed(() => {
 - `signals.ts` re-exports: `signal`, `batch`, `getDefaultContainer`, `Services`
 - Never mutate signal values in-place; always assign a new value
 
-### Mutations via Action Objects (`js/modules/core/state-actions.ts`)
+### Mutations via Action Objects (`js/modules/core/actions/`)
 
-Default all app-facing state changes through action methods. Direct signal writes are reserved for a narrow low-level allowlist that is enforced by tests:
-- `js/modules/core/state-actions.ts`
+State actions live in `core/actions/` split by domain. `core/state-actions.ts` is a thin barrel that re-exports everything so existing import sites don't need to change. Direct signal writes are reserved for a narrow low-level allowlist that is enforced by tests. **The authoritative source for this list is `tests/architecture-contract.test.ts` — if this file and the test disagree, the test wins; update this file to match.**
+
+- `js/modules/core/actions/data-actions.ts`
+- `js/modules/core/actions/filters-actions.ts`
+- `js/modules/core/actions/form-actions.ts`
+- `js/modules/core/actions/navigation-actions.ts`
+- `js/modules/core/category-store.ts`
 - `js/modules/core/state-hydration.ts`
 - `js/modules/data/transaction-renderer.ts`
 - `js/modules/features/backup/auto-backup.ts`
@@ -105,8 +110,8 @@ Action methods should:
 ### Adding New State
 
 1. Add signal in `signals.ts`: `export const newThing = signal<Type>(getStored<Type>(SK.NEW_THING))`
-2. Add storage key in `state.ts`: `SK.NEW_THING: 'budget_tracker_new_thing'` and add default to `STORAGE_DEFAULTS`
-3. Add action methods in `state-actions.ts` in the appropriate group
+2. Add storage key in `state.ts`: `SK.NEW_THING: 'harbor_new_thing'` and add default to `STORAGE_DEFAULTS`
+3. Add action methods in the appropriate file under `core/actions/` (navigation, form, data, filters, or sync-state)
 4. The auto-persist effect in `signals.ts` handles saving to localStorage
 
 ### Batch Updates
@@ -238,12 +243,13 @@ Available exports: `html`, `svg`, `render`, `nothing`, `repeat`, `classMap`, `st
 ```typescript
 import DOM from '../core/dom-cache.js';
 
-// Cached lookup by ID
+// Cached lookup by ID — returns null if the element is not in the DOM.
+// Always guard the null case explicitly; an empty return is a real signal.
 const el = DOM.get('my-element');
-const input = DOM.get('my-input') as HTMLInputElement;
+if (!el) return;
 
-// Safe access (never throws, returns mock if missing)
-const safe = DOM.getSafe('maybe-missing');
+const input = DOM.get<HTMLInputElement>('my-input');
+if (!input) return;
 
 // NEVER use raw DOM queries for cached elements
 document.getElementById('my-element'); // WRONG
@@ -303,6 +309,8 @@ const spent = (totals.categoryTotals || {})[categoryId] || 0;
 ### Useful Commands
 
 ```bash
+npm ci
+npm audit --omit=dev --audit-level=high
 npm run typecheck
 npm test
 npm run test:run
@@ -311,20 +319,34 @@ npm run test:e2e
 npm run test:e2e:smoke
 npm run test:e2e:ui
 npm run test:e2e:debug
+CI=true npm run test:coverage
+CI=true npm run test:e2e
+npx playwright install --with-deps
+npx vitest run tests/architecture-contract.test.ts tests/state-actions-contract.test.ts
+RUN_PERF_BENCH=1 npm run test:run -- tests/performance-benchmark.test.ts
 npx playwright test e2e/accessibility.spec.ts
 npx playwright test e2e/security.spec.ts
 npx playwright test e2e/visual-regression.spec.ts --project=chromium
+RUN_PERF_BENCH=1 PW_PERF_PROFILE=1 npx playwright test e2e/performance-benchmark.spec.ts
 ```
 
 - Use `npm run test:e2e:smoke` for the pinned smoke subset: `transaction-crud`, `dashboard-layout`, `data-lifecycle`, `advanced-resilience`
+- Use `npm ci` for CI-like installs; both GitHub Actions workflows use it instead of `npm install`
+- GitHub Actions CI and Pages deploy both run on Node.js 20; match that version locally when reproducing workflow-only failures
+- Pull requests that change dependencies also run GitHub's `actions/dependency-review-action@v4`; keep dependency updates clear of high-severity advisories
+- CI also runs `npm audit --omit=dev --audit-level=high` against production dependencies before coverage, so dependency changes should clear that gate
+- On a fresh machine or CI runner, install browsers with `npx playwright install --with-deps` before Playwright runs
+- Use `CI=true npm run test:coverage` and `CI=true npm run test:e2e` to reproduce CI behavior locally; CI enables Vitest coverage mode and Playwright `forbidOnly`/retry settings
+- Use `npx vitest run tests/architecture-contract.test.ts tests/state-actions-contract.test.ts` after boundary or state-mutation changes to re-check architecture imports, approved direct signal writers, and action-object coverage
 - Playwright runs three browser projects by default: `chromium`, `webkit`, and `mobile-safari`
+- Prefer the phased readiness helpers in `e2e/test-helpers.ts`: use `waitForAppPhase(page, 'shell' | 'interactive' | 'background')` for startup checkpoints, `waitForInteractiveAppReady()` for the default interactive path, and `resetAppState()` + `installPlaywrightBootstrap()` + `bootFreshApp()` for clean bootstraps
 - Some layout interactions are intentionally `webkit`-only in `e2e/dashboard-layout.spec.ts`; use `--project=webkit` when investigating those cases
 - Set `PW_PERF_PROFILE=1` to run Playwright against `npm run build && npm run preview -- --host 127.0.0.1 --port 4173` instead of the Vite dev server
 - Set `PW_REUSE_SERVER=1` to reuse an existing local server, and `PW_REPORTER` to override the default Playwright `line` reporter
-- Set `RUN_PERF_BENCH=1` to enable `e2e/performance-benchmark.spec.ts`; without it, the benchmark-only Playwright tests are skipped
+- Set `RUN_PERF_BENCH=1` to enable both `tests/performance-benchmark.test.ts` and `e2e/performance-benchmark.spec.ts`; without it, the benchmark-only Vitest and Playwright suites are skipped
 - `e2e/visual-regression.spec.ts-snapshots/` contains generated Playwright baselines; regenerate via the spec, do not hand-edit the snapshot files
 - The browser perf workflow has two modes: the required shell and hot-path regression check, plus advisory 1k/5k/10k ledger benchmark runs for local scale testing
-- GitHub Pages deploy uses `npm run test:run` before `npm run build`, so prefer `npm run test:run` for a fast local pre-deploy check when you do not need coverage
+- GitHub Pages deploy runs `npm run typecheck`, `npm run test:run`, then `npm run build`; prefer that sequence locally when reproducing deploy-only failures, and at minimum run `npm run test:run` for a fast pre-deploy check when coverage is unnecessary
 
 ### Transaction Factory Pattern
 
@@ -381,7 +403,7 @@ validateTransaction({ type: 'expense', ... }); // TS error
 
 These are the specific mistakes that caused 180 TypeScript errors. Do not repeat them:
 
-1. **Missing action methods** -- If consumer code calls `modal.clearFoo()`, the method must exist in `state-actions.ts`. When adding a new signal that UI code will clear/set, add the corresponding action methods.
+1. **Missing action methods** -- If consumer code calls `modal.clearFoo()`, the method must exist in the appropriate file under `core/actions/`. When adding a new signal that UI code will clear/set, add the corresponding action methods.
 
 2. **Forgetting `.js` in imports** -- Every relative import should end in `.js` to match the existing codebase convention. The Vite resolver handles `.js` -> `.ts` mapping.
 
@@ -407,7 +429,7 @@ Before submitting changes, verify:
 
 - [ ] `npm run typecheck` passes
 - [ ] All imports use `.js` extensions
-- [ ] All new signals have corresponding action methods in `state-actions.ts`
+- [ ] All new signals have corresponding action methods in `core/actions/`
 - [ ] All new storage keys use `SK` constants with defaults in `STORAGE_DEFAULTS`
 - [ ] No new direct signal writes outside the approved low-level writer allowlist
 - [ ] Optional properties accessed with guards (`|| {}`, `?.`)

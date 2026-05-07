@@ -1,10 +1,13 @@
 /**
  * Application Configuration Type Definitions
- * 
+ *
  * Strongly typed configuration interfaces to replace 'any' types
  * throughout the application.
  */
 'use strict';
+
+import type { LitTemplate } from '../core/lit-helpers.js';
+import type { VelocityData } from '../../types/index.js';
 
 // ==========================================
 // TIMING CONFIGURATION
@@ -117,7 +120,7 @@ export type EmptyStateRenderer = (
   title: string,
   subtitle: string,
   action: EmptyStateAction | null
-) => any; // Returns LitTemplate but keeping any for compatibility
+) => LitTemplate;
 
 // ==========================================
 // TAB SWITCHERS
@@ -162,7 +165,7 @@ export interface ApplicationServices {
   refreshAll: AsyncRenderCallback;
   
   // Features
-  calcVelocity: () => any; // Returns VelocityData
+  calcVelocity: () => VelocityData;
   renderQuickShortcuts: RenderCallback;
   populateCategoryFilter: RenderCallback;
   renderCustomCatsList: RenderCallback;
@@ -197,7 +200,7 @@ export interface ApplicationConfig {
 export interface ChartRendererConfig {
   fmtCur: CurrencyFormatter;
   monthLabel: MonthFormatter;
-  calcVelocity: () => any; // Returns VelocityData
+  calcVelocity: () => VelocityData;
 }
 
 // ==========================================

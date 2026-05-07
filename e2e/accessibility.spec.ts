@@ -143,29 +143,8 @@ test.describe('WCAG Accessibility Compliance', () => {
   });
 
   test('specific color values should meet WCAG AA contrast ratios', async ({ page }) => {
-    const colorTests = [
-      { 
-        selector: '.text-tertiary',
-        expectedMinContrast: 4.5,
-        description: 'Tertiary text'
-      },
-      {
-        selector: '.text-success',
-        expectedMinContrast: 4.5,
-        description: 'Success text (income)'
-      },
-      {
-        selector: '.text-danger',
-        expectedMinContrast: 4.5,
-        description: 'Danger text (expense)'
-      },
-      {
-        selector: '.text-warning',
-        expectedMinContrast: 4.5,
-        description: 'Warning text'
-      }
-    ];
-
+    // Color tokens exercised via the inline-style testDiv below:
+    // `.text-tertiary`, `.text-success`, `.text-danger`, `.text-warning`.
     for (const theme of ['light', 'dark']) {
       await page.evaluate((t) => {
         if (t === 'light') {

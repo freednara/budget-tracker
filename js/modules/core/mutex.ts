@@ -60,6 +60,68 @@ export class Mutex {
   }
 }
 
+// ==========================================
+// CROSS-TAB MUTEX (Web Locks API)
+// ==========================================
+
+/**
+ * Round 7 fix: Cross-tab mutex using the Web Locks API.
+ *
+ * The local `Mutex` class only serializes within a single tab — two tabs
+ * can each acquire their own "lock" independently, leading to silent data
+ * corruption on concurrent read-modify-write cycles. `CrossTabMutex`
+ * wraps `navigator.locks.request()` to provide true cross-tab exclusion.
+ * Falls back to a local `Mutex` on browsers without Web Locks support
+ * (Safari < 15.4, Firefox < 96), so the same-tab serialization guarantee
+ * is always preserved.
+ */
+export class CrossTabMutex {
+  private readonly lockName: string;
+  private readonly fallback: Mutex;
+  private readonly timeoutMs: number;
+
+  constructor(name: string, timeoutMs: number = 10000) {
+    this.lockName = `harbor_mutex_${name}`;
+    this.timeoutMs = timeoutMs;
+    this.fallback = new Mutex();
+  }
+
+  /**
+   * Run `fn` under an exclusive cross-tab lock.
+   *
+   * When the Web Locks API is available, the lock is process-wide (all
+   * same-origin tabs contend on the same named resource). An
+   * AbortController enforces the timeout to prevent deadlocks if a tab
+   * crashes while holding a lock.
+   *
+   * When Web Locks are unavailable, falls back to the local Mutex which
+   * at least prevents same-tab interleaving.
+   */
+  async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    if (typeof navigator !== 'undefined' && typeof navigator.locks?.request === 'function') {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
+      try {
+        return await navigator.locks.request(
+          this.lockName,
+          { mode: 'exclusive', signal: controller.signal },
+          async () => fn()
+        );
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') {
+          throw new Error(`CrossTabMutex "${this.lockName}" timed out after ${this.timeoutMs}ms`);
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
+    // Fallback: local-only mutex (no cross-tab protection)
+    return this.fallback.runExclusive(fn);
+  }
+}
+
 /**
  * Semaphore for limiting concurrent operations
  */
@@ -81,6 +143,11 @@ export class Semaphore {
   }
 
   release(): void {
+    // CR-Apr24-I finding 311: guard against underflow from unbalanced
+    // release calls — a negative count corrupts all subsequent acquire().
+    if (this.current <= 0) {
+      throw new Error('Semaphore.release: no matching acquire (count already 0)');
+    }
     this.current--;
     const next = this.queue.shift();
     if (next) {
@@ -120,6 +187,12 @@ export class ReadWriteLock {
   }
 
   releaseRead(): void {
+    // CR-Apr24-I finding 312: guard against underflow from unbalanced
+    // releaseRead calls — negative reader count prevents writers from
+    // ever draining.
+    if (this.readers <= 0) {
+      throw new Error('ReadWriteLock.releaseRead: no matching acquireRead (readers already 0)');
+    }
     this.readers--;
     if (this.readers === 0 && this.writeQueue.length > 0) {
       const writer = this.writeQueue.shift();
@@ -142,6 +215,12 @@ export class ReadWriteLock {
   }
 
   releaseWrite(): void {
+    // CR-Apr24-I finding 313: guard against releaseWrite when no write
+    // lock is held — releasing a phantom write would silently drain the
+    // write queue or release readers out of turn.
+    if (!this.writing) {
+      throw new Error('ReadWriteLock.releaseWrite: no matching acquireWrite (not writing)');
+    }
     this.writing = false;
     
     // Prioritize waiting writers

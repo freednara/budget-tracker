@@ -5,7 +5,7 @@
  * and call getTodayStr(), so we mock both. daysBetween is private but exercised
  * through the public API.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Transaction, StreakData } from '../js/types/index.js';
 
 // ==========================================
@@ -25,8 +25,8 @@ vi.mock('../js/modules/core/signals.js', () => ({
   savingsContribs: { value: [] },
 }));
 
-vi.mock('../js/modules/core/utils.js', async () => {
-  const actual = await vi.importActual<Record<string, unknown>>('../js/modules/core/utils.js');
+vi.mock('../js/modules/core/utils-pure.js', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>('../js/modules/core/utils-pure.js');
   return {
     ...actual,
     getTodayStr: () => mockTodayRef.value,

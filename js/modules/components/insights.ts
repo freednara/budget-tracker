@@ -8,16 +8,14 @@
  */
 'use strict';
 
-import { effect, computed } from '@preact/signals-core';
+import { effect } from '@preact/signals-core';
 import * as signals from '../core/signals.js';
 import { html, render, nothing } from '../core/lit-helpers.js';
 import { mountEffects, unmountEffects } from '../core/effect-manager.js';
-import { generateInsights } from '../features/personalization/insights.js';
 import { handleInsightAction as handleInsightActionImpl } from '../ui/core/ui-render.js';
 import DOM from '../core/dom-cache.js';
-import type { 
-  InsightResult, 
-  InsightResultWithAction, 
+import type {
+  InsightResult,
   InsightActionData,
   InsightAction
 } from '../../types/index.js';
@@ -25,36 +23,13 @@ import type {
 // ==========================================
 // COMPUTED INSIGHTS DATA
 // ==========================================
-
-/**
- * Computed insights that auto-update when data changes
- * FIXED: Now uses the centralized memoized signal to avoid duplicate logic
- */
-const insightsData = computed(() => {
-  // Prefer the memoized signal only when it matches the current object-shaped contract.
-  const memoizedInsights = signals.currentInsights?.value as unknown;
-  if (
-    memoizedInsights &&
-    !Array.isArray(memoizedInsights) &&
-    typeof memoizedInsights === 'object' &&
-    'insight1' in memoizedInsights &&
-    'insight2' in memoizedInsights &&
-    'insight3' in memoizedInsights
-  ) {
-    return memoizedInsights as {
-      insight1: InsightResult | string;
-      insight2: InsightResult | string;
-      insight3: InsightResult | string;
-    };
-  }
-  
-  // Fallback to direct generation (for backwards compatibility)
-  const _transactions = signals.transactions.value.length;
-  const _currentMonth = signals.currentMonth.value;
-  const _insightPersonality = signals.insightPers.value;
-  
-  return generateInsights();
-});
+//
+// Reads directly from `signals.currentInsights`, which is the single
+// source of truth for both success and error paths (contract unified
+// 2026-04-20 — see signals.ts P1 #1 fix). We no longer fall back to
+// invoking `generateInsights()` directly when the shape "looks wrong":
+// that fallback re-executed the failing code outside the signal's
+// try/catch and crashed the dashboard.
 
 // ==========================================
 // HELPER FUNCTIONS
@@ -70,9 +45,9 @@ function handleInsightAction(actionData: InsightActionData): void {
 }
 
 const DEFAULT_INSIGHT_ACTIONS: Record<'insight1' | 'insight2' | 'insight3', InsightAction> = {
-  insight1: { type: 'goto-transactions', label: 'Open ledger' },
-  insight2: { type: 'goto-budget', label: 'Review budget' },
-  insight3: { type: 'goto-transactions', label: 'Open ledger' }
+  insight1: { type: 'goto-transactions', label: 'View trend' },
+  insight2: { type: 'goto-budget', label: 'View forecast' },
+  insight3: { type: 'goto-transactions', label: 'View category' }
 };
 
 function renderInsightAction(action: InsightAction) {
@@ -81,7 +56,6 @@ function renderInsightAction(action: InsightAction) {
       type="button"
       class="insight-action-btn"
       @click=${() => handleInsightAction({ actionType: action.type, data: action.category })}
-      style="background: var(--color-accent); color: white;"
     >
       ${action.label} →
     </button>
@@ -89,27 +63,34 @@ function renderInsightAction(action: InsightAction) {
 }
 
 /**
- * Render a single insight result
+ * Render a single insight result.
+ * When `suppressAction` is true (used by the error path), we render the
+ * copy without any action button so a dashboard error doesn't advertise
+ * a misleading CTA.
  */
-function renderInsight(result: InsightResult | null, fallbackAction: InsightAction) {
+function renderInsight(
+  result: InsightResult | null,
+  fallbackAction: InsightAction,
+  suppressAction = false
+) {
   if (result === null) return nothing;
-  
+
   if (typeof result === 'string') {
     return html`
       <div class="dashboard-insight-copy">
         <p class="dashboard-insight-text">${result}</p>
-        ${renderInsightAction(fallbackAction)}
+        ${suppressAction ? nothing : renderInsightAction(fallbackAction)}
       </div>
     `;
   }
-  
+
   // Result is an object with text and optional action
-  const resultObj = result as InsightResultWithAction;
+  const resultObj = result;
   const action = resultObj.action ?? fallbackAction;
   return html`
     <div class="dashboard-insight-copy">
       <p class="dashboard-insight-text">${resultObj.text}</p>
-      ${renderInsightAction(action)}
+      ${suppressAction ? nothing : renderInsightAction(action)}
     </div>
   `;
 }
@@ -128,19 +109,31 @@ export function mountInsights(): () => void {
   const insight3 = DOM.get('insight-3');
 
   // Single effect that renders all 3 insight containers in one pass
-  // (avoids 3 independent effect executions when insightsData changes)
+  // (avoids 3 independent effect executions when currentInsights changes).
+  // Error-path rendering: when `_error` is true, suppress action buttons on
+  // all three slots so the "temporarily unavailable" copy stands on its own.
   mountEffects('insights', [
     () => effect(() => {
-      const insights = insightsData.value;
+      const insights = signals.currentInsights.value;
+      const suppressAction = insights._error === true;
 
-      if (insight1 && 'insight1' in insights) {
-        render(renderInsight(insights.insight1, DEFAULT_INSIGHT_ACTIONS.insight1), insight1);
+      if (insight1) {
+        render(
+          renderInsight(insights.insight1, DEFAULT_INSIGHT_ACTIONS.insight1, suppressAction),
+          insight1
+        );
       }
-      if (insight2 && 'insight2' in insights) {
-        render(renderInsight(insights.insight2, DEFAULT_INSIGHT_ACTIONS.insight2), insight2);
+      if (insight2) {
+        render(
+          renderInsight(insights.insight2, DEFAULT_INSIGHT_ACTIONS.insight2, suppressAction),
+          insight2
+        );
       }
-      if (insight3 && 'insight3' in insights) {
-        render(renderInsight(insights.insight3, DEFAULT_INSIGHT_ACTIONS.insight3), insight3);
+      if (insight3) {
+        render(
+          renderInsight(insights.insight3, DEFAULT_INSIGHT_ACTIONS.insight3, suppressAction),
+          insight3
+        );
       }
     }),
   ]);

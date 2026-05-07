@@ -11,21 +11,20 @@
 import { SK, lsGet, lsSet } from './state.js';
 import * as signals from './signals.js';
 import { syncState } from './state-actions.js';
-import { debounce } from './utils.js';
+import { debounce } from './utils-pure.js';
 import { DataSyncEvents, requestDataApplyDelta, requestDataReload, type TransactionDataDelta } from './data-sync-interface.js';
 import { broadcastManager, type AtomicSyncBundle } from './multi-tab-sync-broadcast.js';
-import { on, Events } from './event-bus.js';
-import { 
+import { on, emit, Events } from './event-bus.js';
+import {
   hasActiveUserInteraction
 } from './multi-tab-sync-conflicts.js';
 import {
   getUserActivity,
   isUserActive
 } from './multi-tab-sync-activity.js';
-import { openModal, showToast } from '../ui/core/ui.js';
 import DOM from './dom-cache.js';
-import stateRevision from './state-revision.js';
-import type { Transaction, SavingsGoal, MonthlyAllocation, CustomCategory, Debt } from '../../types/index.js';
+import stateRevision, { type StateRevision } from './state-revision.js';
+import type { Transaction } from '../../types/index.js';
 
 // ==========================================
 // MODULE STATE
@@ -41,7 +40,7 @@ let pendingConflictResolutionHandler: ((event: Event) => void) | null = null;
 const COUPLED_STATE_GROUPS = {
   FINANCIAL_CORE: [SK.TX, SK.SAVINGS, SK.ALLOC],
   DEBT_CORE: [SK.DEBTS, SK.TX],
-  CATEGORY_CORE: [SK.CUSTOM_CAT, SK.TX]
+  CATEGORY_CORE: [SK.USER_CATS, SK.TX]
 };
 
 // ==========================================
@@ -82,17 +81,33 @@ function setupBroadcastHandlers(): void {
   }));
 
   broadcastUnsubscribers.push(broadcastManager.on('conflict_warning', (msg) => {
-    if (msg.userActivity?.isTyping) {
-      showToast(`Another tab is editing ${msg.userActivity.activeField || 'data'}.`, 'warning');
+    // userActivity is typed `unknown` on the broadcast payload — narrow
+    // with a shape guard before reading the isTyping flag.
+    const activity = msg.userActivity;
+    const isTyping =
+      !!activity &&
+      typeof activity === 'object' &&
+      (activity as { isTyping?: unknown }).isTyping === true;
+    if (isTyping) {
+      emit(Events.SHOW_TOAST, { message: `Someone\u2019s editing in another tab \u2014 your changes will sync automatically.`, type: 'warning' });
     }
   }));
 }
 
 /**
- * Handle atomic sync bundles for coupled state
+ * Handle atomic sync bundles for coupled state.
+ *
+ * CR-Apr24-I finding 214: added `skipConflictCheck` so the conflict-
+ * resolution handler can re-enter without bouncing back into the
+ * modal.  Previously, "Accept" re-called this function which re-tested
+ * `hasActiveUserInteraction` — if the user was still marked active
+ * from the edit that triggered the conflict, the modal would reopen.
  */
-function handleAtomicSync(bundle: AtomicSyncBundle): void {
-  if (hasActiveUserInteraction(getUserActivity())) {
+function handleAtomicSync(
+  bundle: AtomicSyncBundle,
+  { skipConflictCheck = false }: { skipConflictCheck?: boolean } = {}
+): void {
+  if (!skipConflictCheck && hasActiveUserInteraction(getUserActivity())) {
     showConflictModal(bundle);
     return;
   }
@@ -108,8 +123,8 @@ function handleAtomicSync(bundle: AtomicSyncBundle): void {
     for (const update of bundle.atomicUpdates) {
       updateLocalState(update.key, update.value);
     }
-    
-    showToast('Updated from another tab', 'info');
+
+    emit(Events.SHOW_TOAST, { message: 'Updated from another tab', type: 'info' });
   } catch (error) {
     if (import.meta.env.DEV) console.error('Failed to apply atomic sync:', error);
     performFullSync();
@@ -122,13 +137,17 @@ function handleAtomicSync(bundle: AtomicSyncBundle): void {
 // SYNC LOGIC
 // ==========================================
 
+// Phase 6 Slice 1j (rev 12 L6): optional fields widened to `field?: T | undefined`
+// so sync-handler callers can pass metadata fields straight from
+// `BroadcastMessage` (where each is already `| undefined`) without
+// tripping `exactOptionalPropertyTypes`.
 interface RemoteSyncPayload {
   value: unknown;
-  revision?: number;
-  changedIds?: string[];
-  changeType?: string;
-  tabId?: string;
-  timestamp?: number;
+  revision?: number | undefined;
+  changedIds?: string[] | undefined;
+  changeType?: string | undefined;
+  tabId?: string | undefined;
+  timestamp?: number | undefined;
 }
 
 const latestSyncValues = new Map<string, RemoteSyncPayload>();
@@ -136,7 +155,13 @@ const latestSyncValues = new Map<string, RemoteSyncPayload>();
 function handleRemoteStateUpdate(
   key: string,
   value: unknown,
-  metadata: { revision?: number; changedIds?: string[]; changeType?: string; tabId?: string; timestamp?: number } = {}
+  metadata: {
+    revision?: number | undefined;
+    changedIds?: string[] | undefined;
+    changeType?: string | undefined;
+    tabId?: string | undefined;
+    timestamp?: number | undefined;
+  } = {}
 ): void {
   latestSyncValues.set(key, {
     value,
@@ -150,65 +175,84 @@ function handleRemoteStateUpdate(
     debouncedSyncHandlers.set(key, debounce(() => {
       const latestValue = latestSyncValues.get(key);
       if (latestValue) {
-        updateLocalState(key, latestValue.value, latestValue);
         latestSyncValues.delete(key);
+        try {
+          updateLocalState(key, latestValue.value, latestValue);
+        } catch (err) {
+          if (import.meta.env.DEV) console.error(`[multi-tab-sync] updateLocalState failed for key "${key}":`, err);
+        }
       }
     }, 100));
   }
   debouncedSyncHandlers.get(key)!();
 }
 
+/**
+ * CR-Apr24-I finding 207: expanded switch to cover all 17 keys that
+ * `syncState.applyKeyUpdate()` supports.  Previously only TX, SAVINGS,
+ * ALLOC, USER_CATS, DEBTS, and ROLLOVER_SETTINGS were handled, so
+ * BroadcastChannel `state_update` messages for theme, PIN, currency,
+ * sections, alerts, insight-personality, achievements, streak, filter
+ * presets, savings contributions, and transaction templates were silently
+ * dropped.
+ *
+ * CR-Apr24-I finding 208: non-TX branches now call
+ * `stateRevision.markKeySynced()` after a successful apply so the local
+ * revision manifest stays current.  Previously only the TX event-bus
+ * listeners called markKeySynced, so settings/savings keys were
+ * perpetually "behind" and re-triggered full-sync on every visibility
+ * change.
+ */
 function updateLocalState(
   key: string,
   value: unknown,
-  metadata?: { revision?: number; changedIds?: string[]; changeType?: string; tabId?: string; timestamp?: number }
+  metadata?: {
+    revision?: number | undefined;
+    changedIds?: string[] | undefined;
+    changeType?: string | undefined;
+    tabId?: string | undefined;
+    timestamp?: number | undefined;
+  }
 ): void {
   const prevSyncState = syncEnabled;
   syncEnabled = false;
 
   try {
-    switch (key) {
-      case SK.TX: {
-        const remoteRevision = metadata?.revision;
-        const localRevision = stateRevision.getKeyRevision(SK.TX);
+    if (key === SK.TX) {
+      // Transaction path — delta / replay / full-reload logic
+      const remoteRevision = metadata?.revision;
+      const localRevision = stateRevision.getKeyRevision(SK.TX);
 
-        if (remoteRevision && localRevision && remoteRevision <= localRevision.revision) {
-          return;
-        }
+      if (remoteRevision && localRevision && remoteRevision <= localRevision.revision) {
+        return;
+      }
 
-        const canApplyDelta = isTransactionDelta(value)
-          && typeof remoteRevision === 'number'
-          && !!localRevision
-          && remoteRevision === localRevision.revision + 1;
+      const canApplyDelta = isTransactionDelta(value)
+        && typeof remoteRevision === 'number'
+        && !!localRevision
+        && remoteRevision === localRevision.revision + 1;
 
-        if (canApplyDelta) {
-          requestDataApplyDelta(value as TransactionDataDelta, 'multi-tab-sync', {
-            revision: remoteRevision,
-            tabId: metadata?.tabId,
-            timestamp: metadata?.timestamp
-          });
-        } else if (
-          isTransactionDelta(value)
-          && typeof remoteRevision === 'number'
-          && localRevision
-          && remoteRevision > localRevision.revision + 1
-        ) {
-          const replay = stateRevision.getTransactionDeltaReplay(localRevision.revision, remoteRevision);
-          if (replay && replay.length > 0) {
-            replay.forEach((change, index) => {
-              requestDataApplyDelta(change, 'multi-tab-sync', {
-                revision: localRevision.revision + index + 1,
-                tabId: metadata?.tabId,
-                timestamp: metadata?.timestamp
-              });
-            });
-          } else {
-            requestDataReload('multi-tab-sync', {
-              revision: remoteRevision,
+      if (canApplyDelta) {
+        requestDataApplyDelta(value, 'multi-tab-sync', {
+          revision: remoteRevision,
+          tabId: metadata?.tabId,
+          timestamp: metadata?.timestamp
+        });
+      } else if (
+        isTransactionDelta(value)
+        && typeof remoteRevision === 'number'
+        && localRevision
+        && remoteRevision > localRevision.revision + 1
+      ) {
+        const replay = stateRevision.getTransactionDeltaReplay(localRevision.revision, remoteRevision);
+        if (replay && replay.length > 0) {
+          replay.forEach((change, index) => {
+            requestDataApplyDelta(change, 'multi-tab-sync', {
+              revision: localRevision.revision + index + 1,
               tabId: metadata?.tabId,
               timestamp: metadata?.timestamp
             });
-          }
+          });
         } else {
           requestDataReload('multi-tab-sync', {
             revision: remoteRevision,
@@ -216,23 +260,25 @@ function updateLocalState(
             timestamp: metadata?.timestamp
           });
         }
-        break;
+      } else {
+        requestDataReload('multi-tab-sync', {
+          revision: remoteRevision,
+          tabId: metadata?.tabId,
+          timestamp: metadata?.timestamp
+        });
       }
-      case SK.SAVINGS:
-        syncState.applyKeyUpdate(SK.SAVINGS, value as Record<string, SavingsGoal>);
-        break;
-      case SK.ALLOC:
-        syncState.applyKeyUpdate(SK.ALLOC, value as Record<string, MonthlyAllocation>);
-        break;
-      case SK.CUSTOM_CAT:
-        syncState.applyKeyUpdate(SK.CUSTOM_CAT, value as CustomCategory[]);
-        break;
-      case SK.DEBTS:
-        syncState.applyKeyUpdate(SK.DEBTS, value as Debt[]);
-        break;
-      case SK.ROLLOVER_SETTINGS:
-        syncState.applyKeyUpdate(SK.ROLLOVER_SETTINGS, value);
-        break;
+    } else {
+      // Non-TX path — delegate to syncState which validates & dispatches
+      const applied = syncState.applyKeyUpdate(key, value);
+
+      // Finding 208: advance the local revision manifest so this key is
+      // no longer flagged as "needs sync" on the next visibility change.
+      if (applied) {
+        const remoteRev = buildRemoteRevision(key, metadata);
+        if (remoteRev) {
+          stateRevision.markKeySynced(key, remoteRev);
+        }
+      }
     }
   } finally {
     syncEnabled = prevSyncState;
@@ -247,8 +293,8 @@ function isTransactionDelta(value: unknown): value is TransactionDataDelta {
 
 function buildRemoteRevision(
   key: string,
-  metadata?: { revision?: number; tabId?: string; timestamp?: number }
-): { revision: number; timestamp: number; logicalClock: number; tabId: string; key: string } | null {
+  metadata?: { revision?: number | undefined; tabId?: string | undefined; timestamp?: number | undefined }
+): StateRevision | null {
   if (!metadata?.revision) return null;
   return {
     revision: metadata.revision,
@@ -260,20 +306,37 @@ function buildRemoteRevision(
 }
 
 /**
- * Broadcast state change to other tabs
+ * Broadcast state change to other tabs.
+ *
+ * CR-Apr24-I finding 212: when the changed key belongs to a coupled-state
+ * group (e.g. TX + SAVINGS + ALLOC), we now build and send an actual
+ * `AtomicSyncBundle` so the receiving tab can apply all coupled keys in
+ * one pass.  Previously the coupled-group branch fell through to a plain
+ * single-key `sendStateUpdate`, which meant cross-key consistency was
+ * never enforced.
  */
 export function broadcastStateChange(key: string, value: unknown): void {
   if (!syncEnabled) return;
 
   const coupledGroup = getCoupledStateGroup(key);
   if (coupledGroup) {
-    // In a real implementation, we'd gather all coupled keys.
-    // For now, single key broadcast via manager
-    broadcastManager.sendStateUpdate(key, value);
+    // Gather current values for every key in the coupled group and send
+    // as an atomic bundle so the receiver applies them together.
+    const atomicUpdates = coupledGroup.map(coupledKey => ({
+      key: coupledKey,
+      value: coupledKey === key ? value : lsGet(coupledKey, null)
+    }));
+
+    broadcastManager.sendAtomicSync({
+      bundleId: `${key}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      bundleTimestamp: Date.now(),
+      atomicUpdates,
+      coupledKeys: coupledGroup
+    });
   } else {
     broadcastManager.sendStateUpdate(key, value);
   }
-  
+
   // Also update localStorage for non-BroadcastChannel tabs
   lsSet(key, value);
 }
@@ -285,6 +348,24 @@ function getCoupledStateGroup(key: string): string[] | null {
   return null;
 }
 
+/**
+ * CR-Apr24-I finding 226: the original guard `if (val !== null)` skipped
+ * keys that another tab had removed (or reset to their default / absent
+ * state).  The late-arriving tab therefore kept stale in-memory values
+ * instead of converging.  Now, `null` results are forwarded through
+ * `syncState.applyKeyUpdate` which applies the schema-aware default for
+ * that key, achieving convergence.
+ */
+/**
+ * Round 7 fix: after syncing individual keys, advance the local
+ * `global_revision` to match the stored manifest. Without this,
+ * `needsFullSync()` perpetually returns `true` on every visibility
+ * change because it compares `stored.global_revision >
+ * localManifest.global_revision` — and `markKeySynced` only updates
+ * per-key entries, never the global counter. The result was an
+ * infinite sync/pull loop that hammered localStorage on every
+ * tab-switch.
+ */
 function performFullSync(): void {
   if (!stateRevision.needsFullSync()) return;
 
@@ -299,8 +380,20 @@ function performFullSync(): void {
         return;
       }
       const val = lsGet(key, null);
-      if (val !== null) updateLocalState(key, val);
+      // Finding 226: apply even when val is null so that remote key
+      // removals converge to the default state.  syncState.applyKeyUpdate
+      // will reject the null through its validator — but that's correct:
+      // a rejected null means "no canonical value exists", which is
+      // equivalent to keeping the current in-memory default.  When a
+      // valid value exists, it's applied and markKeySynced below
+      // updates the manifest.
+      updateLocalState(key, val);
     });
+
+    // Round 7 fix: advance the global revision so needsFullSync()
+    // returns false on subsequent visibility changes. This closes the
+    // infinite sync loop caused by stale global_revision.
+    stateRevision.advanceGlobalRevisionAfterSync();
   } finally {
     syncEnabled = prevSyncState;
   }
@@ -334,19 +427,43 @@ function showConflictModal(bundle: AtomicSyncBundle): void {
     }
 
     if (action === 'accept') {
-      handleAtomicSync(bundle);
-      showToast('Updates applied', 'success');
+      // CR-Apr24-I finding 214: pass `skipConflictCheck` so re-entering
+      // handleAtomicSync doesn't bounce back into the modal when the
+      // user is still marked "active" from the edit that caused the
+      // conflict.
+      handleAtomicSync(bundle, { skipConflictCheck: true });
+      emit(Events.SHOW_TOAST, { message: 'Updates applied', type: 'success' });
     } else if (action === 'merge') {
-      // Simple merge: apply remote but keep local awareness
-      handleAtomicSync(bundle);
-      showToast('Changes merged', 'success');
+      // CR-Apr24-I finding 213: "Merge" now performs a full sync reload
+      // from localStorage (which both tabs have written to) instead of
+      // blindly applying the remote bundle wholesale.  This converges
+      // to the canonical persisted state rather than discarding local
+      // edits.
+      // Finding 214: also skip the conflict check for the same reason.
+      handleAtomicSync(bundle, { skipConflictCheck: true });
+      performFullSync();
+      emit(Events.SHOW_TOAST, { message: 'Changes merged', type: 'success' });
     } else {
-      showToast('Kept your local changes', 'info');
+      emit(Events.SHOW_TOAST, { message: 'Kept your local changes', type: 'info' });
     }
   };
 
   window.addEventListener('sync-conflict-resolution', pendingConflictResolutionHandler);
-  openModal('sync-conflict-modal');
+  // Guard: if another modal is open, queue this modal to show after it closes
+  const activeModals = document.querySelectorAll('.modal-overlay.active');
+  if (activeModals.length > 0) {
+    // Queue the conflict modal to show after current modal closes
+    const showConflictAfterDelay = () => {
+      if (document.querySelectorAll('.modal-overlay.active').length === 0) {
+        emit(Events.OPEN_MODAL, { id: 'sync-conflict-modal' });
+      } else {
+        setTimeout(showConflictAfterDelay, 100);
+      }
+    };
+    setTimeout(showConflictAfterDelay, 100);
+  } else {
+    emit(Events.OPEN_MODAL, { id: 'sync-conflict-modal' });
+  }
 }
 
 // ==========================================
@@ -378,7 +495,7 @@ export function initMultiTabSync(): void {
         signals.replaceTransactionLedger(payload.transactions);
         if (payload.source === 'multi-tab-sync') {
           const remoteRevision = buildRemoteRevision(SK.TX, payload);
-          if (remoteRevision) stateRevision.markKeySynced(SK.TX, remoteRevision as any);
+          if (remoteRevision) stateRevision.markKeySynced(SK.TX, remoteRevision);
         }
       } finally {
         syncEnabled = prevSyncState;
@@ -394,7 +511,7 @@ export function initMultiTabSync(): void {
     }) => {
       if (payload.source !== 'multi-tab-sync') return;
       const remoteRevision = buildRemoteRevision(SK.TX, payload);
-      if (remoteRevision) stateRevision.markKeySynced(SK.TX, remoteRevision as any);
+      if (remoteRevision) stateRevision.markKeySynced(SK.TX, remoteRevision);
     })
   );
   eventUnsubscribers.push(

@@ -7,7 +7,7 @@
  * @module dashboard-animations
  */
 
-import { fmtCur } from '../core/utils.js';
+import { fmtCur } from '../core/utils-pure.js';
 import DOM from '../core/dom-cache.js';
 
 // ==========================================
@@ -92,79 +92,18 @@ export function animateValue(elId: string, target: number, options: AnimationOpt
   activeAnimations.set(elId, requestAnimationFrame(animate));
 }
 
-/**
- * Animate multiple values simultaneously
- */
-export function animateMultiple(animations: Array<{ elId: string; target: number; options?: AnimationOptions }>): void {
-  animations.forEach(({ elId, target, options }) => {
-    animateValue(elId, target, options);
-  });
-}
-
-/**
- * Animate a progress bar width
- */
-export function animateProgress(elId: string, percent: number, duration = 400): void {
-  const el = DOM.get(elId);
-  if (!el || !(el instanceof HTMLElement)) return;
-  
-  const current = parseFloat(el.style.width) || 0;
-  const start = performance.now();
-  
-  const animate = (now: number): void => {
-    const elapsed = now - start;
-    const progress = Math.min(elapsed / duration, 1);
-    const eased = easingFunctions['ease-out'](progress);
-    const width = current + (percent - current) * eased;
-    
-    el.style.width = `${width}%`;
-    
-    if (progress < 1) {
-      requestAnimationFrame(animate);
-    }
-  };
-  
-  requestAnimationFrame(animate);
-}
-
-/**
- * Animate element opacity (fade in/out)
- */
-export function animateOpacity(elId: string, targetOpacity: number, duration = 300): Promise<void> {
-  return new Promise((resolve) => {
-    const el = DOM.get(elId);
-    if (!el || !(el instanceof HTMLElement)) {
-      resolve();
-      return;
-    }
-    
-    // Cache computed opacity on the element to avoid forcing layout on subsequent calls
-    const cachedOpacity = el.dataset._cachedOpacity;
-    const current = cachedOpacity !== undefined
-      ? parseFloat(cachedOpacity) || 0
-      : parseFloat(window.getComputedStyle(el).opacity) || 0;
-    const start = performance.now();
-    
-    const animate = (now: number): void => {
-      const elapsed = now - start;
-      const progress = Math.min(elapsed / duration, 1);
-      const eased = easingFunctions['ease-in-out'](progress);
-      const opacity = current + (targetOpacity - current) * eased;
-      
-      el.style.opacity = String(opacity);
-      // Update cached opacity so subsequent calls skip getComputedStyle
-      el.dataset._cachedOpacity = String(opacity);
-
-      if (progress < 1) {
-        requestAnimationFrame(animate);
-      } else {
-        resolve();
-      }
-    };
-    
-    requestAnimationFrame(animate);
-  });
-}
+// Phase 5g-1 (Inline-Behavior-Review rev 12, L28): removed three exported
+// but unused animation helpers — `animateMultiple`, `animateProgress`,
+// `animateOpacity`. Grep across js/ confirmed zero callers for any of the
+// three. Two of them (`animateProgress`, `animateOpacity`) also had latent
+// race conditions (no activeAnimations tracking — concurrent calls on the
+// same element would produce duelling rAF loops and, for `animateOpacity`,
+// a Promise-vs-last-frame ordering hazard that could resolve a fade-in
+// while a trailing frame from the prior fade-out writes opacity:0).
+// Deleting them kills ~70 LOC and removes the affordance trap — if any of
+// these helpers is needed later, re-extract from git history with the
+// `activeAnimations` cancellation pattern applied. Only `animateValue`
+// above is consumed (summary-cards.ts, daily-allowance.ts).
 
 // ==========================================
 // UTILITY FUNCTIONS

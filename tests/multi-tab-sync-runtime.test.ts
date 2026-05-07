@@ -21,7 +21,8 @@ const {
       getKeysNeedingSync: vi.fn<() => string[]>(() => []),
       getKeyRevision: vi.fn(() => null),
       getTransactionDeltaReplay: vi.fn(() => null),
-      markKeySynced: vi.fn()
+      markKeySynced: vi.fn(),
+      advanceGlobalRevisionAfterSync: vi.fn()
     },
     broadcastManagerMock: {
       init: vi.fn(),

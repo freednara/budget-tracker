@@ -2,7 +2,7 @@
  * Edge Case Tests for Financial Calculations
  * Tests leap years, precision limits, timezone shifts, and other edge cases
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import type { Transaction } from '../js/types/index.js';
 import {
   calcVelocityPure,
@@ -12,10 +12,8 @@ import {
 import {
   toCents,
   toDollars,
-  addAmounts,
-  parseMonthKey,
-  getMonthKey
-} from '../js/modules/core/utils.js';
+  parseMonthKey
+} from '../js/modules/core/utils-pure.js';
 
 function tx(overrides: Partial<Transaction> & { type: 'expense' | 'income'; amount: number; date: string; category: string }): Transaction {
   return {
@@ -321,6 +319,6 @@ describe('Category Aggregation Edge Cases', () => {
     ];
     
     const stats = getYearStatsPure(transactions, '2024');
-    expect(stats.topCategories[0].id).toBe(longCategory);
+    expect(stats.topCategories[0]?.id).toBe(longCategory);
   });
 });

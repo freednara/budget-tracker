@@ -32,13 +32,13 @@
       sessionStorage.clear();
 
       localStorage.setItem(
-        'budget_tracker_migration_status',
+        'harbor_migration_status',
         JSON.stringify({ completed: true, timestamp: Date.now(), version: '2.7', itemCount: 0 })
       );
 
       if (skipOnboarding) {
         localStorage.setItem(
-          'budget_tracker_onboarding',
+          'harbor_onboarding',
           JSON.stringify({ completed: true, step: 6 })
         );
       }

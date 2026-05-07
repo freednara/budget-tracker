@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { SK } from '../js/modules/core/state.js';
 import * as signals from '../js/modules/core/signals.js';
-import { alerts, calendar, debts, filters, modal, onboarding, syncState } from '../js/modules/core/state-actions.js';
-import type { Debt } from '../js/types/index.js';
+import { userCategoryConfig } from '../js/modules/core/category-store.js';
+import { alerts, calendar, filters, modal, onboarding, syncState } from '../js/modules/core/state-actions.js';
+import type { Debt, UserCategoryConfig } from '../js/types/index.js';
 
 describe('state action contract', () => {
   afterEach(() => {
@@ -13,7 +14,7 @@ describe('state action contract', () => {
     onboarding.setState({ active: false, step: 0, completed: false });
     signals.dismissedAlerts.value = new Set();
     signals.debts.value = [];
-    signals.customCats.value = [];
+    userCategoryConfig.value = null;
   });
 
   it('updates calendar selection through actions', () => {
@@ -62,18 +63,18 @@ describe('state action contract', () => {
     };
 
     const appliedDebt = syncState.applyKeyUpdate(SK.DEBTS, [nextDebt]);
-    const appliedCategory = syncState.applyKeyUpdate(SK.CUSTOM_CAT, [{
-      id: 'custom_food',
-      name: 'Coffee',
-      emoji: '☕',
-      color: '#123456',
-      type: 'expense'
-    }]);
+    const testConfig: UserCategoryConfig = {
+      presetId: 'test',
+      version: 1,
+      expense: [{ id: 'custom_food', name: 'Coffee', emoji: '☕', color: '#123456', type: 'expense', order: 0 }],
+      income: []
+    };
+    const appliedCategory = syncState.applyKeyUpdate(SK.USER_CATS, testConfig);
 
     expect(appliedDebt).toBe(true);
     expect(appliedCategory).toBe(true);
     expect(signals.debts.value).toEqual([nextDebt]);
-    expect(signals.customCats.value[0]?.id).toBe('custom_food');
+    expect(userCategoryConfig.value?.expense[0]?.id).toBe('custom_food');
   });
 
   it('dismisses alerts through the alert action contract', () => {

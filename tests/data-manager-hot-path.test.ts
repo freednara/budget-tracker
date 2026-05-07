@@ -26,34 +26,26 @@ const { mockStorageManager, mockStateRevision, mockBroadcastManager, mockInvalid
   };
 });
 
-vi.mock('../js/modules/core/state.js', () => ({
-  SK: {
-    TX: 'budget_tracker_transactions',
-    SAVINGS: 'budget_tracker_savings',
-    SAVINGS_CONTRIB: 'budget_tracker_savings_contrib',
-    ALLOC: 'budget_tracker_alloc',
-    ACHIEVE: 'budget_tracker_achieve',
-    STREAK: 'budget_tracker_streak',
-    CUSTOM_CAT: 'budget_tracker_custom_cat',
-    DEBTS: 'budget_tracker_debts',
-    CURRENCY: 'budget_tracker_currency',
-    SECTIONS: 'budget_tracker_sections',
-    PIN: 'budget_tracker_pin',
-    INSIGHT_PERS: 'budget_tracker_insight_pers',
-    ALERTS: 'budget_tracker_alerts',
-    THEME: 'budget_tracker_theme',
-    ROLLOVER_SETTINGS: 'budget_tracker_rollover_settings',
-    FILTER_PRESETS: 'budget_tracker_filter_presets',
-    TX_TEMPLATES: 'budget_tracker_tx_templates',
-    ONBOARD: 'budget_tracker_onboard',
-    LAST_BACKUP: 'budget_tracker_last_backup',
-    FILTER_EXPANDED: 'budget_tracker_filter_expanded'
-  },
-  lsGet: vi.fn((_key: string, fallback: unknown) => fallback),
-  lsSet: vi.fn(() => true),
-  getStored: vi.fn((_key: string, fallback?: unknown) => fallback),
-  normalizeAlertPrefs: vi.fn((value: unknown) => value ?? { budgetThreshold: null, browserNotificationsEnabled: false, lastNotifiedAlertKeys: [] })
-}));
+// Spread actual state.ts so `SK`, `STORAGE_DEFAULTS`, every exported
+// constant (e.g. `BACKUP_REMINDER_TX_COUNT_KEY`) and helper stays honest;
+// only replace the three LS-IO functions the data-manager hot path
+// actually calls. Per `feedback_test_mock_drift.md`: never hand-copy
+// SK/config values into a vi.mock factory — spread the real module and
+// override only the functions you stub. Before this refactor the mock
+// was a hand-copied `SK` object that fell out of sync every time a new
+// storage key was registered.
+vi.mock('../js/modules/core/state.js', async () => {
+  const actual = await vi.importActual<typeof import('../js/modules/core/state.js')>(
+    '../js/modules/core/state.js'
+  );
+  return {
+    ...actual,
+    lsGet: vi.fn((_key: string, fallback: unknown) => fallback),
+    lsSet: vi.fn(() => true),
+    getStored: vi.fn((_key: string, fallback?: unknown) => fallback),
+    normalizeAlertPrefs: vi.fn((value: unknown) => value ?? { budgetThreshold: null, browserNotificationsEnabled: false, lastNotifiedAlertKeys: [] })
+  };
+});
 
 vi.mock('../js/modules/data/storage-manager.js', () => ({
   storageManager: mockStorageManager,
@@ -195,7 +187,7 @@ describe('DataManager hot mutation paths', () => {
     expect(result.isOk).toBe(true);
     expect(mockStorageManager.importAll).toHaveBeenCalledWith({ transactions: [replacement] }, true);
     expect(mockBroadcastManager.sendStateUpdate).toHaveBeenCalledWith(
-      'budget_tracker_transactions',
+      'harbor_transactions',
       undefined,
       expect.objectContaining({ changeType: 'reload' })
     );

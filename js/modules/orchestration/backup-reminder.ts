@@ -6,7 +6,6 @@
  */
 'use strict';
 
-import { SK } from '../core/state.js';
 import { safeStorage } from '../core/safe-storage.js';
 import * as signals from '../core/signals.js';
 import DOM from '../core/dom-cache.js';
@@ -38,14 +37,21 @@ const SNOOZE_COUNT_KEY = 'backup_reminder_snooze_count';
 
 // ==========================================
 // REACTIVE STATE
-// = :=========================================
+// ==========================================
+// Phase 5g-1 (Inline-Behavior-Review rev 12, L55): fixed the `// = :====`
+// typo that mirrored the one in `dom-cache.ts:14` (L47). See the sweep
+// task #147 for the remaining instances across the codebase.
 
 const snoozeUntil = signals.signal<number>(safeStorage.getJSON(SNOOZE_KEY, 0));
 const snoozeCount = signals.signal<number>(safeStorage.getJSON(SNOOZE_COUNT_KEY, 0));
 
 async function triggerBackupExport(): Promise<void> {
   const { triggerJsonExport } = await import('../features/import-export/import-export-events.js');
-  triggerJsonExport();
+  // Commit E (new batch P2): `triggerJsonExport` is now async and only
+  // returns `true` when the File System Access API confirms a write to
+  // disk. Await so a cancelled save propagates back to the reminder
+  // flow instead of being treated as fire-and-forget completion.
+  await triggerJsonExport();
 }
 
 /**
@@ -59,13 +65,17 @@ const backupStatus = computed(() => {
   // Cache Date.now() to avoid multiple calls per computation
   const now = Date.now();
 
-  // Handle both numeric timestamps and ISO date strings (from import)
-  let lastTsNum: number;
-  if (typeof lastTs === 'string' && lastTs) {
-    lastTsNum = new Date(lastTs).getTime();
-  } else {
-    lastTsNum = Number(lastTs) || 0;
-  }
+  // Handle both numeric timestamps and ISO date strings (from import).
+  // Fixes L56 (Inline-Behavior-Review rev 12): the previous fallback
+  // `Number(lastTs) || 0` masked NaN as 0, and so did `new Date(badStr).getTime()`
+  // (which yields NaN for unparseable strings, then `lastTsNum > 0` was false,
+  // collapsing into "0 days since" — a silently-stale prompt). Pairs with the
+  // L36 normalizeLastBackup hardening at the hydration boundary; this is the
+  // computed-side defense in case the signal itself drifts.
+  const rawNum = typeof lastTs === 'string' && lastTs
+    ? new Date(lastTs).getTime()
+    : (typeof lastTs === 'number' ? lastTs : Number(lastTs));
+  const lastTsNum = Number.isFinite(rawNum) ? rawNum : 0;
   const MS_PER_DAY = 86_400_000; // 1000 * 60 * 60 * 24
   const daysSince = lastTsNum > 0 ? Math.floor((now - lastTsNum) / MS_PER_DAY) : 0;
   const newTxCount = Math.max(0, currentCount - lastCount);
@@ -196,12 +206,13 @@ export function mountBackupReminder(): () => void {
   return cleanup;
 }
 
-/**
- * Legacy support for checkBackupReminder (now reactive)
- */
-export function checkBackupReminder(): void {
-  // Logic is now automatic via effect() in mountBackupReminder
-}
+// Phase 5g-1 (Inline-Behavior-Review rev 12, L54): removed the legacy no-op
+// `checkBackupReminder()` export. The reactive backupStatus computed
+// (backed by mountBackupReminder's effect) now handles all scheduling —
+// the shim existed only to preserve stale imports and did literally
+// nothing when called. Paired with the deletions in `app-events.ts`
+// (interface field + scheduler registration + 4 call sites) and
+// `app-init-di.ts` (callback wiring).
 
 /**
  * Statistics for UI and debug

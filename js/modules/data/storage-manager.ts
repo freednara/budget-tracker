@@ -12,9 +12,18 @@ import { IndexedDBAdapter } from './indexeddb-adapter.js';
 import { LocalStorageAdapter } from './localstorage-adapter.js';
 import { STORES } from './storage-adapter.js';
 import { emit, Events } from '../core/event-bus.js';
+import { trackError } from '../core/error-tracker.js';
 import { generateSecureId } from '../core/utils-dom.js';
+
+/** Tag the error so dashboards can filter storage-quota exhaustion events. */
+function isQuotaExceeded(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { name?: string; code?: number };
+  return e.name === 'QuotaExceededError' ||
+    e.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+    e.code === 22 || e.code === 1014;
+}
 import type {
-  StorageResult,
   StorageType,
   StoreName,
   Transaction,
@@ -51,6 +60,72 @@ interface StorageStats {
   [key: string]: unknown;
 }
 
+const VALID_SYNC_TYPES = new Set<SyncMessage['type']>([
+  'create',
+  'update',
+  'delete',
+  'batch',
+  'clear'
+]);
+
+const VALID_SYNC_STORES = new Set<StoreName | 'all'>([
+  ...Object.values(STORES),
+  'all'
+]);
+
+const MAX_SYNC_MESSAGE_AGE_MS = 5 * 60 * 1000;
+const MAX_SYNC_FUTURE_SKEW_MS = 10 * 1000;
+
+/**
+ * CR-Apr22 (slice 1 — finding #2, settings-shape mismatch on rollback):
+ *
+ * Cross-adapter export shape translation. Rollback feeds the IndexedDB
+ * export directly to `LocalStorageAdapter.importAll()`, but the two
+ * adapters disagree on the shape of the `settings` payload:
+ *
+ *   - IndexedDB `exportAll()` iterates every `STORES.*` including
+ *     `STORES.SETTINGS` and calls `getAll()` — which returns an **array
+ *     of `{key, value}` rows** keyed by the `key` IDB primary key.
+ *   - LocalStorage `importAll()` consumes `data.settings` as a
+ *     **keyed object** (`{theme: 'dark', currency: {...}, ...}`) and
+ *     writes each entry through `_getSettingsKey(key)` →
+ *     `SETTINGS_KEY_MAP` → the canonical `harbor_*` keys consumed by
+ *     the app.
+ *
+ * Without translation, LS `importAll()` would enter its
+ * `Object.entries(data.settings)` branch with an array, yielding entries
+ * like `['0', {key: 'theme', value: 'dark'}]` — writing to
+ * `harbor_0`, `harbor_1`, ... (keys no consumer reads) while every real
+ * `harbor_theme`, `harbor_currency`, ... stays unwritten. The user reboots
+ * onto LS with all settings defaulted and the IDB export effectively
+ * lost. This helper is the single normalization point so the shape
+ * divergence cannot recur at other IDB→LS handoffs.
+ *
+ * Returns a **new** payload; never mutates the input so callers retain
+ * the raw export for diagnostic logging / partial-failure markers.
+ */
+export function normalizeIdbExportForLocalStorage(data: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...data };
+  const rawSettings = data.settings;
+
+  if (Array.isArray(rawSettings)) {
+    const settingsObject: Record<string, unknown> = {};
+    for (const row of rawSettings) {
+      if (row && typeof row === 'object') {
+        const r = row as { key?: unknown; value?: unknown };
+        if (typeof r.key === 'string' && r.key.length > 0) {
+          // `value` may legitimately be any JSON-serializable shape
+          // (booleans, numbers, nested objects). Preserve as-is.
+          settingsObject[r.key] = r.value;
+        }
+      }
+    }
+    out.settings = settingsObject;
+  }
+
+  return out;
+}
+
 // ==========================================
 // STORAGE MANAGER CLASS
 // ==========================================
@@ -64,6 +139,21 @@ class StorageManager {
   private _errorCount: number = 0;
   private _initialized: boolean = false;
   private _syncMessageCounter: number = 0;
+  /**
+   * CR-Apr22 (slice 1 — finding #1, rollback re-trigger loop):
+   * Once we've attempted rollback and recorded a failure marker (partial
+   * export, LS init failure, LS importAll failure), we must not keep
+   * firing `_triggerRollback` every time a subsequent IDB write fails —
+   * that used to produce a hot loop of export-then-fail, spamming logs
+   * and wasting a full data export on every single write error.
+   *
+   * The marker is a one-shot promise: "on the next boot, force LS
+   * fallback" (see `_getRollbackFailureMarker` in `init`). The flag
+   * below latches the same promise for the rest of the current session:
+   * `_handleError` continues to emit per-op errors but `_triggerRollback`
+   * short-circuits once rollback has already been attempted.
+   */
+  private _rollbackAttempted: boolean = false;
   readonly ERROR_THRESHOLD: number = 5;
 
   constructor() {
@@ -84,6 +174,26 @@ class StorageManager {
     if (rollbackFailure) {
       const lsFallback = await this._initLocalStorageAdapter();
       if (lsFallback.isOk) {
+        // New-batch P2: the marker was previously written once and
+        // never cleared, which pinned the app on localStorage forever —
+        // even after a successful recovery session. The marker is a
+        // one-shot hint: "on the next boot, skip IDB and go straight
+        // to LS". Once that boot has succeeded via LS we can safely
+        // drop it so a future boot may attempt IDB again. If IDB is
+        // still broken, the normal fallback path handles it. Retaining
+        // the raw details in-memory avoids losing the diagnostic
+        // context for the current session.
+        try {
+          localStorage.removeItem('harbor_storage_rollback_failed');
+        } catch (err) {
+          if (import.meta.env.DEV) console.warn('Failed to clear rollback-failure marker:', err);
+        }
+        if (import.meta.env.DEV) {
+          console.warn(
+            'Storage: forced localStorage fallback after prior rollback failure',
+            rollbackFailure
+          );
+        }
         return lsFallback;
       }
     }
@@ -135,7 +245,7 @@ class StorageManager {
     | { reason?: string; timestamp?: number; exportErrors?: Record<string, string> }
     | null {
     try {
-      const stored = localStorage.getItem('budget_tracker_storage_rollback_failed');
+      const stored = localStorage.getItem('harbor_storage_rollback_failed');
       if (!stored) return null;
       return JSON.parse(stored) as { reason?: string; timestamp?: number; exportErrors?: Record<string, string> };
     } catch {
@@ -154,10 +264,27 @@ class StorageManager {
     }
 
     try {
-      this.syncChannel = new BroadcastChannel('budget_tracker_sync');
+      this.syncChannel = new BroadcastChannel('harbor_sync');
 
-      this.syncChannel.onmessage = (event: MessageEvent<SyncMessage>) => {
-        this._handleSyncMessage(event.data);
+      this.syncChannel.onmessage = (event: MessageEvent<SyncMessage | { type: 'force_close_for_reset'; senderTabId?: string }>) => {
+        // Round 7 fix: handle reset force-close signal from sibling tab.
+        // Close our IDB connections so the resetting tab can deleteDatabase().
+        // CR-May01: skip the message when it was sent by THIS tab — the
+        // resetting tab must NOT close its own IDB connection; it needs the
+        // connection alive for `storageManager.clearAll()` to succeed.
+        if (event.data && typeof event.data === 'object' && (event.data as { type: string }).type === 'force_close_for_reset') {
+          const sender = (event.data as { senderTabId?: string }).senderTabId;
+          if (sender && sender === this._tabId) {
+            // Message from ourselves — ignore.
+            return;
+          }
+          if (import.meta.env.DEV) console.info('[storage-manager] Received force_close_for_reset — closing IDB and reloading');
+          this._closeAllConnections();
+          // Reload after a brief delay to let the resetting tab proceed
+          setTimeout(() => window.location.reload(), 500);
+          return;
+        }
+        this._handleSyncMessage(event.data as SyncMessage);
       };
     } catch (err) {
       if (import.meta.env.DEV) console.warn('BroadcastChannel setup failed, using localStorage sync:', err);
@@ -174,7 +301,7 @@ class StorageManager {
     }
 
     this.storageSyncHandler = (event: StorageEvent) => {
-      if (event.key?.startsWith('budget_tracker_sync_')) {
+      if (event.key?.startsWith('harbor_sync_')) {
         try {
           const message = JSON.parse(event.newValue || '') as SyncMessage;
           this._handleSyncMessage(message);
@@ -191,6 +318,11 @@ class StorageManager {
    * Handle incoming sync messages from other tabs
    */
   private _handleSyncMessage(message: SyncMessage): void {
+    if (!this._isValidSyncMessage(message)) {
+      if (import.meta.env.DEV) console.warn('Ignoring invalid storage sync payload', message);
+      return;
+    }
+
     // Ignore own messages
     if (message.tabId === this._tabId) return;
 
@@ -201,6 +333,40 @@ class StorageManager {
       data: message.data,
       timestamp: message.timestamp
     });
+  }
+
+  private _isValidSyncMessage(message: unknown): message is SyncMessage {
+    if (!message || typeof message !== 'object') {
+      return false;
+    }
+
+    const candidate = message as Partial<SyncMessage>;
+    if (!VALID_SYNC_TYPES.has(candidate.type as SyncMessage['type'])) {
+      return false;
+    }
+
+    if (!VALID_SYNC_STORES.has(candidate.store as StoreName | 'all')) {
+      return false;
+    }
+
+    if (typeof candidate.tabId !== 'string' || candidate.tabId.trim().length === 0) {
+      return false;
+    }
+
+    if (typeof candidate.timestamp !== 'number' || !Number.isFinite(candidate.timestamp)) {
+      return false;
+    }
+
+    const now = Date.now();
+    if (candidate.timestamp < now - MAX_SYNC_MESSAGE_AGE_MS) {
+      return false;
+    }
+
+    if (candidate.timestamp > now + MAX_SYNC_FUTURE_SKEW_MS) {
+      return false;
+    }
+
+    return true;
   }
 
   /**
@@ -229,21 +395,37 @@ class StorageManager {
 
   /**
    * Broadcast via localStorage (fallback method)
+   *
+   * Fixes H1 (Inline-Behavior-Review rev 12): previously both catches
+   * were empty. The outer catch silently dropped the entire cross-tab
+   * broadcast (so remote tabs never heard about the change); the inner
+   * silently leaked `harbor_sync_*` keys under a tight quota. Both now
+   * route through `trackError`; QuotaExceededError is annotated on the
+   * action string so it can be filtered in error-tracker dashboards.
    */
   private _broadcastViaLocalStorage(message: SyncMessage): void {
+    const key = `harbor_sync_${Date.now()}_${this._tabId}_${this._syncMessageCounter++}`;
     try {
-      const key = `budget_tracker_sync_${Date.now()}_${this._tabId}_${this._syncMessageCounter++}`;
       localStorage.setItem(key, JSON.stringify(message));
       // Clean up after a short delay
       setTimeout(() => {
         try {
           localStorage.removeItem(key);
-        } catch {
-          // Ignore cleanup errors
+        } catch (cleanupErr: unknown) {
+          // Orphan key left behind — log so we can see if this accumulates.
+          const quota = isQuotaExceeded(cleanupErr) ? '.quota' : '';
+          trackError(cleanupErr instanceof Error ? cleanupErr : new Error(String(cleanupErr)), {
+            module: 'storage-manager',
+            action: `broadcastViaLocalStorage.cleanup${quota}`
+          });
         }
       }, 1000);
-    } catch {
-      // Ignore broadcast errors
+    } catch (err: unknown) {
+      const quota = isQuotaExceeded(err) ? '.quota' : '';
+      trackError(err instanceof Error ? err : new Error(String(err)), {
+        module: 'storage-manager',
+        action: `broadcastViaLocalStorage${quota}`
+      });
     }
   }
 
@@ -484,8 +666,15 @@ class StorageManager {
     this._errorCount++;
     if (import.meta.env.DEV) console.error(`Storage error in ${operation} for ${store}:`, err);
 
-    if (this._errorCount >= this.ERROR_THRESHOLD && this.type === 'indexeddb') {
-      this._triggerRollback();
+    // CR-Apr22 (slice 1 — finding #1): `_rollbackAttempted` short-circuits
+    // the threshold check so a failed rollback does not keep re-triggering
+    // a full export+import attempt on every subsequent failing write.
+    if (
+      this._errorCount >= this.ERROR_THRESHOLD &&
+      this.type === 'indexeddb' &&
+      !this._rollbackAttempted
+    ) {
+      void this._triggerRollback();
     }
   }
 
@@ -510,12 +699,31 @@ class StorageManager {
           timestamp: Date.now(),
           exportErrors
         });
+        // CR-Apr22 (slice 1 — finding #1): latch the attempt and clear
+        // the error count. Without these, every subsequent failing IDB
+        // write would re-increment past the threshold and re-enter this
+        // method, producing a hot loop of re-exports. The design choice
+        // to refuse partial-snapshot import is intentional — the marker
+        // ensures the NEXT boot forces LS fallback (see `init`) — but the
+        // current session must not keep trying to roll back over and over.
+        this._rollbackAttempted = true;
+        this._errorCount = 0;
         return;
       }
 
       const importableData: Record<string, unknown> = { ...data };
       delete importableData._meta;
       delete importableData._exportErrors;
+
+      // CR-Apr22 (slice 1 — finding #2): translate IDB export shape
+      // (settings as array of `{key, value}` rows) into the LS import
+      // shape (settings as keyed object) before handing off. Without
+      // this the LS adapter writes every settings row to `harbor_0`,
+      // `harbor_1`, ... instead of the canonical `harbor_theme`,
+      // `harbor_currency`, ... keys, silently dropping every setting
+      // on rollback. See `normalizeIdbExportForLocalStorage` for the
+      // full shape-mismatch rationale.
+      const normalizedData = normalizeIdbExportForLocalStorage(importableData);
 
       // Switch to localStorage adapter
       const lsAdapter = new LocalStorageAdapter();
@@ -525,7 +733,7 @@ class StorageManager {
       }
 
       // Import data to localStorage
-      const importResult = await lsAdapter.importAll(importableData, true);
+      const importResult = await lsAdapter.importAll(normalizedData, true);
       if (!importResult) {
         throw new Error('Failed to import rollback snapshot into localStorage');
       }
@@ -536,7 +744,7 @@ class StorageManager {
       this._errorCount = 0;
 
       // Mark rollback in localStorage
-      localStorage.setItem('budget_tracker_storage_rollback', JSON.stringify({
+      localStorage.setItem('harbor_storage_rollback', JSON.stringify({
         reason: 'error_threshold',
         timestamp: Date.now(),
         exportErrors
@@ -548,6 +756,11 @@ class StorageManager {
         reason: err instanceof Error ? err.message : String(err),
         timestamp: Date.now()
       });
+      // CR-Apr22 (slice 1 — finding #1): same latch as the partial-export
+      // path. Once we've tried and failed, further in-session retriggers
+      // are pure waste — the marker takes care of the next boot.
+      this._rollbackAttempted = true;
+      this._errorCount = 0;
     } finally {
       this._rollbackInProgress = false;
     }
@@ -555,7 +768,7 @@ class StorageManager {
 
   private _recordRollbackFailure(details: { reason: string; timestamp: number; exportErrors?: Record<string, string> }): void {
     try {
-      localStorage.setItem('budget_tracker_storage_rollback_failed', JSON.stringify(details));
+      localStorage.setItem('harbor_storage_rollback_failed', JSON.stringify(details));
     } catch (err) {
       if (import.meta.env.DEV) console.warn('Failed to persist rollback failure details:', err);
     }
@@ -573,6 +786,15 @@ class StorageManager {
   // ==========================================
   // UTILITY METHODS
   // ==========================================
+
+  /**
+   * Get the unique tab identifier for this instance.
+   * Used by app-reset to tag the force_close_for_reset broadcast so
+   * this tab's own listener can ignore the self-sent message.
+   */
+  getTabId(): string {
+    return this._tabId;
+  }
 
   /**
    * Get storage type
@@ -621,9 +843,23 @@ class StorageManager {
   }
 
   /**
+   * Close all active IDB connections without resetting internal state.
+   * Called by sibling tabs in response to a force_close_for_reset signal
+   * so the resetting tab can delete the database without being blocked.
+   */
+  private _closeAllConnections(): void {
+    if (this.adapter instanceof IndexedDBAdapter) {
+      this.adapter.close();
+    }
+  }
+
+  /**
    * Reset the storage manager (for testing)
    */
   reset(): void {
+    if (this.adapter instanceof IndexedDBAdapter) {
+      this.adapter.close();
+    }
     if (this.syncChannel) {
       this.syncChannel.close();
       this.syncChannel = null;
@@ -637,6 +873,11 @@ class StorageManager {
     this._initialized = false;
     this._errorCount = 0;
     this._syncMessageCounter = 0;
+    // CR-Apr22 (slice 1 — finding #1): clear the session latch so tests
+    // (and any dev-mode resets) don't inherit a "rollback already attempted"
+    // state from a previous run.
+    this._rollbackAttempted = false;
+    this._rollbackInProgress = false;
   }
 }
 

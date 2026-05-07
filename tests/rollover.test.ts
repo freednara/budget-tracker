@@ -8,6 +8,7 @@ import {
   getEffectiveBudgetPure
 } from '../js/modules/features/financial/rollover.js';
 import type { Transaction } from '../js/types/index.js';
+import { createTx } from './helpers/fixtures.js';
 
 interface RolloverTestState {
   rolloverSettings: {
@@ -33,22 +34,6 @@ function createState(overrides: Partial<RolloverTestState> = {}): RolloverTestSt
     },
     monthlyAllocations: overrides.monthlyAllocations || {},
     transactions: overrides.transactions || []
-  };
-}
-
-function createTx(overrides: Partial<Transaction> = {}): Transaction {
-  return {
-    __backendId: `tx_${Math.random().toString(36).slice(2)}`,
-    type: 'expense',
-    amount: 50,
-    category: 'food',
-    description: 'Test',
-    date: '2026-02-15',
-    currency: 'USD',
-    recurring: false,
-    reconciled: false,
-    splits: false,
-    ...overrides
   };
 }
 
@@ -113,14 +98,15 @@ describe('calculateRolloverPure', () => {
     expect(calculateRolloverPure('food', '2026-03', state)).toBe(50);
   });
 
-  it('should respect maxRollover cap for negative rollover', () => {
+  it('should NOT cap negative rollover (ROLL-01: maxRollover applies to surplus only)', () => {
     const state = createState({
       rolloverSettings: { enabled: true, mode: 'all', categories: [], maxRollover: 30, negativeHandling: 'carry' },
       monthlyAllocations: { '2026-02': { food: 100 } },
       transactions: [createTx({ amount: 200, category: 'food', date: '2026-02-15' })]
     });
-    // Overspent by 100, capped to -30
-    expect(calculateRolloverPure('food', '2026-03', state)).toBe(-30);
+    // Overspent by 100 — negative balances carry forward in full (not capped)
+    // so the user sees "I overspent $100" rather than a silently-forgiven $30.
+    expect(calculateRolloverPure('food', '2026-03', state)).toBe(-100);
   });
 
   it('should return 0 for category not in selected list', () => {

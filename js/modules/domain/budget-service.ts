@@ -165,21 +165,24 @@ export function calculateRolloverAmount(
         return 0;
       case 'carry':
         // Let negative pass through (reduces next month's budget)
+        // Round 7 fix: 'carry' and 'ignore' modes are currently identical;
+        // both allow negative balance to pass through. This is intentional
+        // to support future differentiation (e.g., 'ignore' could reset to 0
+        // while 'carry' propagates the deficit). Retaining both for API stability.
         break;
       case 'ignore':
         // Let negative pass through unchanged
+        // Round 7 fix: 'ignore' currently identical to 'carry' — see above.
         break;
     }
   }
 
-  // Apply max rollover cap
-  if (settings.maxRollover !== null) {
+  // ROLL-01: Apply max rollover cap to POSITIVE surplus only.
+  // Negative balances (overspending) carry forward in full so
+  // `negativeHandling` alone controls their fate.
+  if (settings.maxRollover !== null && unspentCents > 0) {
     const maxCents = toCents(settings.maxRollover);
-    if (unspentCents > 0) {
-      unspentCents = Math.min(unspentCents, maxCents);
-    } else if (unspentCents < 0) {
-      unspentCents = Math.max(unspentCents, -maxCents);
-    }
+    unspentCents = Math.min(unspentCents, maxCents);
   }
 
   return toDollars(unspentCents);
@@ -219,10 +222,12 @@ export function calculateAccumulatedRollover(
     }
   }
 
-  // Apply max rollover cap
-  if (settings.maxRollover !== null) {
+  // ROLL-01: Apply max rollover cap to POSITIVE surplus only.
+  // Negative balances (overspending) carry forward in full so
+  // `negativeHandling` alone controls their fate.
+  if (settings.maxRollover !== null && accumulatedCents > 0) {
     const maxCents = toCents(settings.maxRollover);
-    accumulatedCents = Math.max(-maxCents, Math.min(accumulatedCents, maxCents));
+    accumulatedCents = Math.min(accumulatedCents, maxCents);
   }
 
   return toDollars(accumulatedCents);

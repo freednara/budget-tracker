@@ -30,6 +30,15 @@ export interface PayoffResult {
   months: number;
   totalInterest: number;
   payoffDate: Date | null;
+  /**
+   * 7l (debt domain parity): mirrors `PayoffInfo.cannotPayOff` in the
+   * feature layer (`types/index.ts:134`). True when the monthly payment
+   * doesn't cover monthly interest accrual and the debt is projected to
+   * grow forever. Callers should treat `months === Infinity` +
+   * `cannotPayOff === true` as "explicitly unpayable at current rate",
+   * distinct from `payment <= 0` (no payment committed).
+   */
+  cannotPayOff?: boolean;
 }
 
 export interface AmortizationEntry {
@@ -61,6 +70,13 @@ export interface StrategyResult {
   schedule: PayoffScheduleEntry[];
   totalReleased: number;
   paymentAcceleration: number;
+  /**
+   * 7l (debt domain parity): mirrors `PayoffStrategyResult.cannotPayOff`
+   * in the feature layer (`types/index.ts:186`). True when the strategy
+   * cannot fully amortize one or more debts — i.e., the simulation
+   * bailed on observed negative amortization.
+   */
+  cannotPayOff?: boolean;
 }
 
 export interface StrategyComparison {
@@ -142,19 +158,31 @@ export function calculatePayoffDate(
 
   while (balanceCents > 0 && months < maxMonths) {
     const interestCents = Math.round(balanceCents * monthlyRate);
+
+    // 7l (debt domain parity): detect negative amortization on the first
+    // iteration, not after 12 months. Mirrors the feature-layer fix in
+    // `debt-planner.ts:calculatePayoffDate`. Because `balanceCents` never
+    // decreases when `interestCents >= paymentCents`, the condition is
+    // monotonically stable — bailing on month 1 is correct and prevents
+    // the prior implementation from inflating `totalInterest` by up to a
+    // year's worth of phantom projected interest before returning
+    // Infinity.
+    if (interestCents >= paymentCents) {
+      return { months: Infinity, totalInterest: Infinity, payoffDate: null, cannotPayOff: true };
+    }
+
     totalInterestCents += interestCents;
 
     const newBalance = balanceCents + interestCents - paymentCents;
     balanceCents = Math.max(0, newBalance);
     months++;
-
-    // Check if payment doesn't cover interest (infinite loop prevention)
-    if (interestCents >= paymentCents && months > 12) {
-      return { months: Infinity, totalInterest: Infinity, payoffDate: null };
-    }
   }
 
+  // Fixes H11 (Inline-Behavior-Review rev 12): setDate(1) first so a
+  // payoff projection generated on the 31st doesn't overflow into a
+  // later month (e.g. Jan 31 + 1 month silently lands on Mar 3).
   const payoffDate = new Date();
+  payoffDate.setDate(1);
   payoffDate.setMonth(payoffDate.getMonth() + months);
 
   return {
@@ -196,14 +224,23 @@ export function generateAmortizationSchedule(
 
     const interestCents = Math.round(balanceCents * monthlyRate);
 
-    // If payment doesn't cover interest, record the shortfall and stop
+    // 7l (debt domain parity): mirror the feature-layer fix in
+    // `debt-planner.ts:generateAmortizationSchedule`. Emit a row that
+    // satisfies the `payment = principal + interest` identity — the prior
+    // shape reported `interest = interestCents` (accrued) while `payment
+    // = paymentCents` (paid), which chart code consuming
+    // `entry.interest` double-counted as "interest paid this period."
+    // New shape: `interest` == what this payment actually covered
+    // (`paymentCents`); `principal` == 0; `balance` reflects the
+    // capitalized unpaid interest so the negative amortization is
+    // visible in the balance column instead.
     if (interestCents >= paymentCents) {
       balanceCents = balanceCents + interestCents - paymentCents;
       schedule.push({
         month,
         payment: toDollars(paymentCents),
         principal: 0,
-        interest: toDollars(interestCents),
+        interest: toDollars(paymentCents),
         balance: toDollars(balanceCents)
       });
       break;
@@ -274,6 +311,7 @@ export function simulatePayoffStrategy(
   const maxMonths = 1200;
   const order: DebtPayoffOrder[] = [];
   const schedule: PayoffScheduleEntry[] = [];
+  let cannotPayOff = false;
 
   while (states.some(d => d.balanceCents > 0) && month < maxMonths) {
     month++;
@@ -281,12 +319,29 @@ export function simulatePayoffStrategy(
     let availableExtraCents = baseExtraCents + (opts.enableRollover ? totalReleasedCents : 0);
     let monthlyReleasedCents = 0;
 
+    // 7l (debt domain parity): snapshot start-of-month balances so neg-am
+    // detection compares end-of-month vs start-of-month for each debt
+    // rather than heuristically comparing interest to a stale "min +
+    // leftover extra" figure. Mirrors the feature-layer fix in
+    // `debt-planner.ts:simulatePayoffStrategy`.
+    const monthStartBalances = new Map<string, number>(
+      states.map(d => [d.id, d.balanceCents])
+    );
+
     // Focus debt = first with balance > 0
     const focusIdx = states.findIndex(d => d.balanceCents > 0);
 
+    // 7l (debt domain parity): apply interest + minimums in pass 1, then
+    // cascade leftover extra across remaining debts in priority order in
+    // pass 2, then mark payoff + rollover in pass 3. Mirrors the three-
+    // pass restructure in `debt-planner.ts:simulatePayoffStrategy`. The
+    // old one-pass shape gated extra on `idx === focusIdx`, stranding any
+    // extra that exceeded the focus debt's remaining balance — the
+    // strategy under-delivered on its own promise, especially in the
+    // last month of each debt's payoff.
     for (let idx = 0; idx < states.length; idx++) {
       const debt = states[idx];
-      if (debt.balanceCents <= 0 || debt.paidOffMonth !== null) continue;
+      if (!debt || debt.balanceCents <= 0 || debt.paidOffMonth !== null) continue;
 
       let interestCents: number;
 
@@ -309,15 +364,19 @@ export function simulatePayoffStrategy(
       // Apply minimum payment
       const minPaymentCents = Math.min(debt.minPaymentCents, debt.balanceCents);
       debt.balanceCents -= minPaymentCents;
+    }
 
-      // Apply extra to focus debt only
-      if (idx === focusIdx && availableExtraCents > 0) {
-        const extraApplied = Math.min(availableExtraCents, debt.balanceCents);
-        debt.balanceCents -= extraApplied;
-        availableExtraCents -= extraApplied;
-      }
+    // Pass 2: cascade leftover extra across remaining debts in priority order.
+    for (let idx = focusIdx; idx >= 0 && idx < states.length && availableExtraCents > 0; idx++) {
+      const debt = states[idx];
+      if (!debt || debt.balanceCents <= 0 || debt.paidOffMonth !== null) continue;
+      const extraApplied = Math.min(availableExtraCents, debt.balanceCents);
+      debt.balanceCents -= extraApplied;
+      availableExtraCents -= extraApplied;
+    }
 
-      // Check if paid off this month
+    // Pass 3: finalize payoff + rollover releases after all payments land.
+    for (const debt of states) {
       if (debt.balanceCents <= 0 && debt.paidOffMonth === null) {
         debt.paidOffMonth = month;
         debt.balanceCents = 0;
@@ -344,15 +403,20 @@ export function simulatePayoffStrategy(
       });
     }
 
-    // Safety check for negative amortization
+    // 7l (debt domain parity): observed neg-am — bail when no active debt
+    // saw its balance decrease this month. Mirrors feature-layer fix:
+    // strictly more accurate than the old "interest >= min + leftover-
+    // extra" heuristic, and drops the arbitrary 12-month warmup. Infinite
+    // growth is caught immediately while the simulation is still allowed
+    // to run for profiles where rollover eventually unlocks later debts.
     const activeDebts = states.filter(d => d.balanceCents > 0);
-    if (activeDebts.length > 0 && month > 12) {
-      const hasNegAmort = activeDebts.some((d, i) => {
-        const monthlyInterest = Math.round(d.balanceCents * d.rateCents);
-        const totalPayment = d.minPaymentCents + (i === 0 ? availableExtraCents : 0);
-        return monthlyInterest >= totalPayment;
-      });
-      if (hasNegAmort) break;
+    const allDebtsNegAm = activeDebts.length > 0 && activeDebts.every(d => {
+      const start = monthStartBalances.get(d.id) ?? 0;
+      return d.balanceCents >= start;
+    });
+    if (allDebtsNegAm) {
+      cannotPayOff = true;
+      break;
     }
   }
 
@@ -362,7 +426,8 @@ export function simulatePayoffStrategy(
     order,
     schedule,
     totalReleased: toDollars(totalReleasedCents),
-    paymentAcceleration: opts.enableRollover ? toDollars(totalReleasedCents) : 0
+    paymentAcceleration: opts.enableRollover ? toDollars(totalReleasedCents) : 0,
+    cannotPayOff
   };
 }
 

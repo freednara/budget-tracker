@@ -2,7 +2,7 @@
 
 > Professional-grade personal finance management with uncompromising privacy
 
-[![Version](https://img.shields.io/badge/version-2.6.2-blue.svg)](https://github.com/yourusername/budget-tracker)
+[![Version](https://img.shields.io/badge/version-2.6.2-blue.svg)](https://github.com/FrankReed/harbor-ledger)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![PWA](https://img.shields.io/badge/PWA-Ready-purple.svg)](https://web.dev/progressive-web-apps/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-100%25-blue.svg)](https://www.typescriptlang.org/)
@@ -23,16 +23,16 @@
 
 ### Try It Now
 
-Visit [budgettracker.app](https://budgettracker.app) and click "Install App" - works on any device!
+Visit [harborledger.app](https://harborledger.app) and click "Install App" - works on any device!
 
 ### Self-Host
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/budget-tracker.git
+git clone https://github.com/FrankReed/harbor-ledger.git
 
 # Navigate to directory
-cd budget-tracker
+cd harbor-ledger
 
 # Install dependencies
 npm install
@@ -49,18 +49,18 @@ npm run build
 The project has been refactored from a monolithic `app.js` into a modern, modular structure under `js/modules/`, coordinated by a lazy-loading Dependency Injection (DI) container.
 
 ```
-budget-tracker/
+harbor-ledger/
 ├── app.ts              # Application entry point & orchestration
 ├── js/
 │   ├── modules/
-│   │   ├── core/           # DI, Signals, EventBus, Multi-tab sync, Performance (43 modules)
+│   │   ├── core/           # DI, Signals, EventBus, Multi-tab sync, Performance (49 modules)
 │   │   ├── data/           # IndexedDB/LocalStorage adapters, Migration, StorageManager (11 modules)
 │   │   ├── ui/             # Base UI components and layout management (23 modules)
-│   │   ├── features/       # Business logic (Budget, Debt, Savings, etc.) (24 modules)
-│   │   ├── components/     # Lit-style UI components (Charts, Modals, etc.) (19 modules)
+│   │   ├── features/       # Business logic (Budget, Debt, Savings, etc.) (29 modules)
+│   │   ├── components/     # Lit-style UI components (Charts, Modals, etc.) (24 modules)
 │   │   ├── orchestration/  # App lifecycle and feature integration (11 modules)
 │   │   ├── transactions/   # Transaction system (4 modules)
-│   │   └── types/          # TypeScript type definitions (3 modules)
+│   │   └── types/          # TypeScript type definitions (1 module)
 │   └── workers/        # Off-main-thread workers (filter-worker-optimized.ts)
 └── tests/              # Comprehensive Vitest & Playwright suite
 ```
@@ -77,8 +77,8 @@ budget-tracker/
 
 ### Enforced Internal Contracts
 
-- State mutations default through [`js/modules/core/state-actions.ts`](/Users/freed/Desktop/Budget%20Tracker/js/modules/core/state-actions.ts), with only a small test-enforced low-level direct-writer allowlist.
-- The transactions ledger surface rerenders through [`js/modules/data/transaction-surface-coordinator.ts`](/Users/freed/Desktop/Budget%20Tracker/js/modules/data/transaction-surface-coordinator.ts), not ad hoc renderer imports across the app.
+- State mutations default through [`js/modules/core/state-actions.ts`](js/modules/core/state-actions.ts), with only a small test-enforced low-level direct-writer allowlist.
+- The transactions ledger surface rerenders through [`js/modules/data/transaction-surface-coordinator.ts`](js/modules/data/transaction-surface-coordinator.ts), not ad hoc renderer imports across the app.
 - Core/data layer UI bridges are limited to a documented allowlist and pinned by an architecture contract test.
 
 ## 📊 Core Features
@@ -124,7 +124,7 @@ Advisory-only checks:
 ## 🔒 Security
 
 - **Privacy First**: All data stays on your device.
-- **PIN Protection**: PBKDF2-SHA256 with 100k iterations.
+- **PIN Protection**: PBKDF2-SHA256 with 600k iterations.
 - **XSS Prevention**: Standardized sanitization and safe DOM operations.
 - **Data Atomicity**: Mutex-protected storage operations for multi-tab safety.
 
@@ -173,7 +173,7 @@ We welcome contributions! Please see our [Contributing Guide](docs/CONTRIBUTING.
 
 ### Code Style
 
-- ES6+ JavaScript
+- TypeScript (strict)
 - Prettier formatting
 - ESLint rules enforced
 - Comprehensive JSDoc comments
@@ -200,10 +200,13 @@ We welcome contributions! Please see our [Contributing Guide](docs/CONTRIBUTING.
 
 ## 📚 Documentation
 
-- [User Guide](docs/USER_GUIDE.md) - Getting started and tutorials
-- [API Reference](docs/API.md) - Module documentation
-- [Architecture](docs/ARCHITECTURE.md) - System design
-- [Deployment](docs/DEPLOYMENT.md) - Hosting instructions
+- [Project Summary](docs/PROJECT_SUMMARY.md) - Overview and feature summary
+- [Technical Review](docs/TECHNICAL_REVIEW.md) - Architecture and code quality analysis
+- [Feature Inventory](docs/FEATURE_INVENTORY.md) - Complete feature listing
+- [DI Migration Guide](docs/DI_MIGRATION_GUIDE.md) - Dependency injection patterns
+- [Contributing](docs/CONTRIBUTING.md) - How to contribute
+- [Improvement Roadmap](docs/IMPROVEMENT_ROADMAP.md) - Planned enhancements
+- [Launch Checklist](docs/LAUNCH_CHECKLIST.md) - Pre-launch verification steps
 
 ## 🗺️ Roadmap
 
@@ -223,7 +226,7 @@ See the [full roadmap](docs/IMPROVEMENT_ROADMAP.md) for detailed plans.
 
 ## 📊 Comparison
 
-| Feature | Budget Tracker | YNAB | Mint | PocketGuard |
+| Feature | Harbor Ledger | YNAB | Mint | PocketGuard |
 |---------|---------------|------|------|-------------|
 | Price | Free/$4.99 | $14.99/mo | Free (ads) | $7.99/mo |
 | Privacy First | ✅ | ❌ | ❌ | ❌ |
@@ -246,21 +249,21 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 💬 Support
 
-- **Documentation**: [docs.budgettracker.app](https://docs.budgettracker.app)
-- **Issues**: [GitHub Issues](https://github.com/yourusername/budget-tracker/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/budget-tracker/discussions)
-- **Email**: support@budgettracker.app
+- **Documentation**: [docs.harborledger.app](https://docs.harborledger.app)
+- **Issues**: [GitHub Issues](https://github.com/FrankReed/harbor-ledger/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/FrankReed/harbor-ledger/discussions)
+- **Email**: support@harborledger.app
 
 ## 🌟 Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=yourusername/budget-tracker&type=Date)](https://star-history.com/#yourusername/budget-tracker&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=FrankReed/harbor-ledger&type=Date)](https://star-history.com/#FrankReed/harbor-ledger&Date)
 
 ---
 
 <div align="center">
   <b>Budget without compromise. Privacy without sacrifice.</b>
   <br><br>
-  <a href="https://budgettracker.app">Try It Now</a> •
-  <a href="https://github.com/yourusername/budget-tracker/issues">Report Bug</a> •
-  <a href="https://github.com/yourusername/budget-tracker/discussions">Request Feature</a>
+  <a href="https://harborledger.app">Try It Now</a> •
+  <a href="https://github.com/FrankReed/harbor-ledger/issues">Report Bug</a> •
+  <a href="https://github.com/FrankReed/harbor-ledger/discussions">Request Feature</a>
 </div>

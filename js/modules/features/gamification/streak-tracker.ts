@@ -11,9 +11,9 @@
  */
 'use strict';
 
-import { SK, persist, lsGet } from '../../core/state.js';
+import { SK, persist } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
-import { getTodayStr, parseLocalDate } from '../../core/utils.js';
+import { getTodayStr, parseLocalDate, formatDateForInput } from '../../core/utils-pure.js';
 import DOM from '../../core/dom-cache.js';
 import { on, createListenerGroup, destroyListenerGroup } from '../../core/event-bus.js';
 import { FeatureEvents } from '../../core/feature-event-interface.js';
@@ -70,12 +70,26 @@ function getTransactionDates(transactions: Transaction[]): { sortedAsc: string[]
   return txDatesCache;
 }
 
-/**
- * Invalidate the transaction dates cache (call when transactions change)
- */
-export function invalidateTxDatesCache(): void {
-  txDatesCache = null;
-}
+// Phase 5g-1 (Inline-Behavior-Review rev 12, L22 part 1): removed the
+// exported `invalidateTxDatesCache()` function. Grep across js/ confirms
+// zero callers — the cache-invalidation invariant is already satisfied by
+// the codebase-wide immutable-update discipline (`signals.transactions.value`
+// is always assigned a *new* array on mutation; the existing
+// `txRef === transactions` identity check in the cache sees the new
+// reference and rebuilds). Exposing the function without a caller was an
+// affordance trap: it advertised an API contract the rest of the codebase
+// silently doesn't honor, and a future contributor dutifully wiring it up
+// in an in-place-mutation code path would be a regression vector.
+//
+// Phase 5g-3 Slice 3 (Inline-Behavior-Review rev 12, L22 part 2): the
+// three inline `${y}-${MM}-${DD}` compositions at getYesterday(),
+// getDateSequence(), and calculateCurrentStreak()'s streak-walk loop
+// were converged onto `formatDateForInput(date)` in utils-pure.ts —
+// which already had the exact same body (direction reversal from the
+// review's recommended `formatLocalDateStr` name; helper already
+// existed under a different name, grep-verified in 15 existing call
+// sites). Padding can no longer drift across call sites, and a single
+// fix lands if timezone handling ever needs to change.
 
 /**
  * Configure streak settings
@@ -89,19 +103,22 @@ export function setStreakConfig(config: Partial<StreakConfig>): void {
 // ==========================================
 
 /**
- * Calculate days between two date strings using timezone-safe logic
- * Uses noon-to-noon comparison to avoid DST issues
+ * Calculate days between two date strings using timezone-safe logic.
+ * Round 7 fix: Use YYYY-MM-DD string comparison to avoid DST boundary issues
+ * that can occur with Math.round() on millisecond differences.
  */
 function daysBetween(dateStr1: string, dateStr2: string): number {
-  const date1 = parseLocalDate(dateStr1); // Parse as local date
-  const date2 = parseLocalDate(dateStr2);
-  
-  // Set both to noon to avoid DST issues
-  date1.setHours(12, 0, 0, 0);
-  date2.setHours(12, 0, 0, 0);
-  
-  const diffTime = Math.abs(date2.getTime() - date1.getTime());
-  return Math.round(diffTime / (1000 * 60 * 60 * 24));
+  // Parse YYYY-MM-DD strings directly into [YYYY, MM, DD] components
+  const parts1 = dateStr1.split('-').map(Number);
+  const parts2 = dateStr2.split('-').map(Number);
+  const y1 = parts1[0] ?? 0, m1 = parts1[1] ?? 1, d1 = parts1[2] ?? 1;
+  const y2 = parts2[0] ?? 0, m2 = parts2[1] ?? 1, d2 = parts2[2] ?? 1;
+
+  // Calculate difference in days using UTC to avoid DST boundary issues
+  const utc1 = Date.UTC(y1, m1 - 1, d1);
+  const utc2 = Date.UTC(y2, m2 - 1, d2);
+
+  return Math.abs(Math.round((utc2 - utc1) / (1000 * 60 * 60 * 24)));
 }
 
 /**
@@ -110,23 +127,7 @@ function daysBetween(dateStr1: string, dateStr2: string): number {
 function getYesterday(): string {
   const today = parseLocalDate(getTodayStr());
   today.setDate(today.getDate() - 1);
-  return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-}
-
-/**
- * Generate consecutive date sequence between two dates
- */
-function getDateSequence(startDate: string, endDate: string): string[] {
-  const dates: string[] = [];
-  const current = parseLocalDate(startDate);
-  const end = parseLocalDate(endDate);
-  
-  while (current <= end) {
-    dates.push(`${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}-${String(current.getDate()).padStart(2, '0')}`);
-    current.setDate(current.getDate() + 1);
-  }
-  
-  return dates;
+  return formatDateForInput(today);
 }
 
 // ==========================================
@@ -140,7 +141,7 @@ function getDateSequence(startDate: string, endDate: string): string[] {
 export function calculateCurrentStreak(): StreakData {
   const today = getTodayStr();
   const yesterday = getYesterday();
-  const transactions = signals.transactions.value as Transaction[];
+  const transactions = signals.transactions.value;
 
   // Get cached deduplicated transaction dates
   const { sortedDesc: transactionDates, dateSet: txDateSet } = getTransactionDates(transactions);
@@ -154,7 +155,11 @@ export function calculateCurrentStreak(): StreakData {
   }
   
   // Start streak calculation from today or most recent transaction date
-  const mostRecentTxDate = transactionDates[0];
+  // Phase 6 Slice 1i (rev 12 L6): `transactionDates[0]` is now
+  // `string | undefined` under `noUncheckedIndexedAccess`. The
+  // length check above guarantees presence, but narrow through a
+  // `?? ''` default so downstream helpers see a concrete string.
+  const mostRecentTxDate = transactionDates[0] ?? '';
   let streakCount = 0;
   let streakEndDate = '';
   
@@ -192,7 +197,7 @@ export function calculateCurrentStreak(): StreakData {
   for (let i = 1; i <= maxStreak; i++) {
     const previousDate = parseLocalDate(currentDate);
     previousDate.setDate(previousDate.getDate() - 1);
-    const prevDateStr = `${previousDate.getFullYear()}-${String(previousDate.getMonth() + 1).padStart(2, '0')}-${String(previousDate.getDate()).padStart(2, '0')}`;
+    const prevDateStr = formatDateForInput(previousDate);
 
     if (txDateSet.has(prevDateStr)) {
       streakCount++;
@@ -221,7 +226,13 @@ function getLongestStreak(transactions: Transaction[]): number {
   let currentStreak = 1;
   
   for (let i = 1; i < transactionDates.length; i++) {
-    const daysDiff = daysBetween(transactionDates[i - 1], transactionDates[i]);
+    // Phase 6 Slice 1i (rev 12 L6): loop bound guarantees both
+    // indexes, but `transactionDates[n]` is `string | undefined` under
+    // `noUncheckedIndexedAccess`. Skip any gap defensively.
+    const prev = transactionDates[i - 1];
+    const curr = transactionDates[i];
+    if (prev === undefined || curr === undefined) continue;
+    const daysDiff = daysBetween(prev, curr);
     
     if (daysDiff === 1) {
       currentStreak++;
@@ -238,7 +249,7 @@ function getLongestStreak(transactions: Transaction[]): number {
  * Update streak when a transaction is added
  * Supports both current-day and backfill scenarios
  */
-export function checkStreak(txDate: string): void {
+export function checkStreak(_txDate: string): void {
   // Recalculate streak based on current transaction data
   const newStreak = calculateCurrentStreak();
   
@@ -256,7 +267,7 @@ export function checkStreak(txDate: string): void {
  */
 export function updateStreakOnStartup(): void {
   const currentStreak = calculateCurrentStreak();
-  const previousStreak = signals.streak.value as StreakData;
+  const previousStreak = signals.streak.value;
   
   // Only update if streak has changed (to avoid unnecessary renders)
   if (
@@ -279,7 +290,7 @@ export function renderStreak(): void {
   const widget = DOM.get('streak-widget');
   if (!widget) return;
 
-  const streak = signals.streak.value as StreakData;
+  const streak = signals.streak.value;
   const today = getTodayStr();
   const yesterday = getYesterday();
 
@@ -363,7 +374,7 @@ export function getStreakStats(): {
   streakPercentage: number;
   averageStreakLength: number;
 } {
-  const transactions = signals.transactions.value as Transaction[];
+  const transactions = signals.transactions.value;
   const transactionDates = [...new Set(transactions.map(tx => tx.date))];
   const totalDays = transactionDates.length;
   
@@ -383,8 +394,13 @@ export function getStreakStats(): {
   let currentStreak = 1;
   
   for (let i = 1; i < sortedDates.length; i++) {
-    const daysDiff = daysBetween(sortedDates[i - 1], sortedDates[i]);
-    
+    // Phase 6 Slice 1i (rev 12 L6): guard both ends; see the
+    // matching loop in `getLongestStreak` for the rationale.
+    const prev = sortedDates[i - 1];
+    const curr = sortedDates[i];
+    if (prev === undefined || curr === undefined) continue;
+    const daysDiff = daysBetween(prev, curr);
+
     if (daysDiff === 1) {
       currentStreak++;
     } else {
@@ -423,7 +439,7 @@ export function getStreakRepairInfo(): {
   }
   
   const today = getTodayStr();
-  const transactions = signals.transactions.value as Transaction[];
+  const transactions = signals.transactions.value;
   const transactionDates = new Set(transactions.map(tx => tx.date));
   
   // Look back from today to find potential streak
@@ -458,17 +474,18 @@ export function getStreakRepairInfo(): {
  * Debug streak calculation (development/testing)
  */
 export function debugStreak(): void {
-  if (!import.meta.env.DEV) return;
-  console.group('Streak Debug Information');
-  console.log('Config:', streakConfig);
-  console.log('Current Streak:', getStreakInfo());
-  console.log('Statistics:', getStreakStats());
-  console.log('Repair Info:', getStreakRepairInfo());
+  if (import.meta.env.DEV) {
+    console.group('Streak Debug Information');
+    console.log('Config:', streakConfig);
+    console.log('Current Streak:', getStreakInfo());
+    console.log('Statistics:', getStreakStats());
+    console.log('Repair Info:', getStreakRepairInfo());
 
-  const transactions = signals.transactions.value as Transaction[];
-  const transactionDates = [...new Set(transactions.map(tx => tx.date))].sort();
-  console.log('Transaction Dates:', transactionDates);
-  console.groupEnd();
+    const transactions = signals.transactions.value;
+    const transactionDates = [...new Set(transactions.map(tx => tx.date))].sort();
+    console.log('Transaction Dates:', transactionDates);
+    console.groupEnd();
+  }
 }
 
 // ==========================================

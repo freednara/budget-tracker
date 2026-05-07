@@ -73,7 +73,6 @@ async function addExpenseWithDetails(
 }
 
 async function openAdvancedFilters(page: import('@playwright/test').Page) {
-  const panel = page.locator('#advanced-filters');
   const toggle = page.locator('#toggle-advanced-filters');
   if ((await toggle.getAttribute('aria-expanded')) !== 'true') {
     await toggle.click();
@@ -211,7 +210,7 @@ test.describe('Transaction CRUD', () => {
     await expect(customChip).toContainText('🥗');
 
     const storedEmoji = await page.evaluate(() => {
-      const customCats = JSON.parse(localStorage.getItem('budget_tracker_custom_categories') || '[]');
+      const customCats = JSON.parse(localStorage.getItem('harbor_custom_categories') || '[]');
       return customCats.at(-1)?.emoji || null;
     });
     expect(storedEmoji).toBe('🥗');

@@ -67,8 +67,14 @@ export function generateRecoveryPhrase(): string {
   crypto.getRandomValues(randomValues);
 
   for (let i = 0; i < 12; i++) {
-    const index = randomValues[i] % WORD_LIST.length;
-    words.push(WORD_LIST[index]);
+    // Phase 6 Slice 1i (rev 12 L6): `randomValues[i]` and
+    // `WORD_LIST[index]` are `T | undefined` under
+    // `noUncheckedIndexedAccess`. Defaults keep modulo math and the
+    // push argument well-typed; the Uint32Array fill above guarantees
+    // presence at runtime so '?? 0' and '?? ""' are unreachable.
+    const raw = randomValues[i] ?? 0;
+    const index = raw % WORD_LIST.length;
+    words.push(WORD_LIST[index] ?? '');
   }
 
   return words.join(' ');
@@ -279,19 +285,31 @@ export async function verifyPin(entered: string, stored: string): Promise<boolea
   }
 
   // Legacy SHA-256 hash (64 hex chars, no salt)
+  //
+  // Route through timingSafeEqual for consistency with the PBKDF2 and
+  // plaintext branches. A raw `===` on the hex string short-circuits on
+  // first mismatched character, letting a local attacker timing the call
+  // recover the stored hash one nibble at a time. Low risk in practice
+  // (the store is localStorage, not a network boundary), but the helper
+  // exists and every other branch already uses it. Fixes M10
+  // (Inline-Behavior-Review rev 12).
   if (/^[0-9a-f]{64}$/.test(stored)) {
     const encoder = new TextEncoder();
     const buf = await crypto.subtle.digest('SHA-256', encoder.encode(entered));
     const hash = Array.from(new Uint8Array(buf))
       .map(b => b.toString(16).padStart(2, '0'))
       .join('');
-    return hash === stored;
+    return timingSafeEqual(encoder.encode(hash), encoder.encode(stored));
   }
 
-  // Plaintext comparison (very old legacy)
-  // FIXED: Use constant-time comparison to prevent timing attacks
-  const enc = new TextEncoder();
-  return timingSafeEqual(enc.encode(entered), enc.encode(stored));
+  // Unrecognized format — reject verification and force PIN reset.
+  // Previously this was a plaintext fallback, but accepting arbitrary
+  // stored formats is a security risk: corrupted localStorage or XSS
+  // write access could bypass cryptographic protection.
+  if (import.meta.env.DEV) {
+    console.warn('[pin-crypto] Unrecognized PIN format in storage — rejecting verification');
+  }
+  return false;
 }
 
 // ==========================================
@@ -317,7 +335,10 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let binary = '';
   for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
+    // Phase 6 Slice 1i (rev 12 L6): `bytes[i]` is `number | undefined`
+    // under `noUncheckedIndexedAccess`; the `i < bytes.length` bound
+    // guarantees presence, but `?? 0` keeps the charCode argument typed.
+    binary += String.fromCharCode(bytes[i] ?? 0);
   }
   return btoa(binary);
 }

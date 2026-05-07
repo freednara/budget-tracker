@@ -7,7 +7,10 @@
  * @module indexeddb-adapter
  */
 
-import { StorageAdapter, STORES, SETTINGS_KEYS } from './storage-adapter.js';
+import { StorageAdapter, STORES } from './storage-adapter.js';
+import { emit, Events } from '../core/event-bus.js';
+import { trackError } from '../core/error-tracker.js';
+import { monthKeyParts } from '../core/utils-pure.js';
 import type {
   StorageResult,
   StorageType,
@@ -31,13 +34,6 @@ interface StorageStats {
   dbName: string;
   version: number | undefined;
   stores: Record<string, number | 'error'>;
-}
-
-interface CountFilters {
-  type?: string;
-  category?: string;
-  reconciled?: boolean;
-  monthKey?: string;
 }
 
 // ==========================================
@@ -89,7 +85,23 @@ export class IndexedDBAdapter extends StorageAdapter {
 
       request.onupgradeneeded = (event: IDBVersionChangeEvent) => {
         const db = (event.target as IDBOpenDBRequest).result;
-        this._createSchema(db);
+        // Fixes M11 (Inline-Behavior-Review rev 12): the previous handler
+        // called a single `_createSchema(db)` that relied on
+        // `if (!db.objectStoreNames.contains(...))` guards for every store
+        // — additive only, no version ladder. That pattern works at
+        // version 1 but silently breaks the first time we need an
+        // *altering* upgrade (e.g. change a keyPath, add an index to an
+        // existing store, or drop a store): the new code would never run
+        // for anyone whose DB already had the store. The version-ladder
+        // shape below is the standard IDB idiom — every future bump
+        // appends a `if (oldVersion < N)` block, so upgrade paths compose
+        // no matter which release the user last ran.
+        const oldVersion = event.oldVersion;
+        if (oldVersion < 1) {
+          this._createInitialSchema(db);
+        }
+        // Future migrations:
+        //   if (oldVersion < 2) { /* add indexes, rename stores, etc. */ }
       };
 
       request.onsuccess = (event: Event) => {
@@ -119,6 +131,23 @@ export class IndexedDBAdapter extends StorageAdapter {
       };
 
       request.onblocked = () => {
+        // Phase 6 Slice 1e (Inline-Behavior-Review rev 12, L11): previously
+        // this path resolved with an error string and went silent — nothing
+        // reached the user, nothing reached monitoring. Fires when another
+        // tab already holds an older-version connection and our upgrade
+        // can't proceed. Surface via toast so the user can take action
+        // (close the offending tab) and route trackError so the blocked
+        // state is visible in production observability. The resolved
+        // payload still carries `isOk: false` — callers that already
+        // branch on failure keep working unchanged.
+        const message =
+          'Harbor Ledger is open in another tab. Please close it and reload this page to finish setup.';
+        emit(Events.SHOW_TOAST, { message, type: 'error' });
+        trackError(
+          'IndexedDB: database upgrade blocked by another tab',
+          { module: 'indexeddb-adapter', action: 'init_blocked_by_other_tab' },
+          'error'
+        );
         resolve({ isOk: false, error: 'Database blocked by other tabs' });
       };
     });
@@ -127,9 +156,13 @@ export class IndexedDBAdapter extends StorageAdapter {
   }
 
   /**
-   * Create the database schema
+   * Create the v1 schema. Called only when `oldVersion < 1` (i.e. fresh DB).
+   * Subsequent versions should be expressed as their own private method
+   * (`_migrateToV2`, etc.) and invoked from the version-ladder branches
+   * in `onupgradeneeded`. The defensive `if (!contains(...))` guards are
+   * kept inside the body so a rerun (e.g. test setup teardown) is harmless.
    */
-  private _createSchema(db: IDBDatabase): void {
+  private _createInitialSchema(db: IDBDatabase): void {
     // Transactions store with indexes
     if (!db.objectStoreNames.contains(STORES.TRANSACTIONS)) {
       const txStore = db.createObjectStore(STORES.TRANSACTIONS, { keyPath: '__backendId' });
@@ -240,7 +273,7 @@ export class IndexedDBAdapter extends StorageAdapter {
         const objectStore = this._getStore(store, 'readwrite');
         // Ensure the value has the correct key
         const data: Record<string, unknown> = typeof value === 'object' && value !== null
-          ? { ...value as object }
+          ? { ...value }
           : { value };
 
         // Set the appropriate key field based on store type
@@ -320,7 +353,7 @@ export class IndexedDBAdapter extends StorageAdapter {
 
         // Create range for the month using first-day-of-next-month as exclusive upper bound
         const startDate = `${monthKey}-01`;
-        const [y, m] = monthKey.split('-').map(Number);
+        const [y, m] = monthKeyParts(monthKey);
         const nextMonth = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
         const endDate = `${nextMonth}-01`;
         const range = IDBKeyRange.bound(startDate, endDate, false, true);
@@ -361,7 +394,7 @@ export class IndexedDBAdapter extends StorageAdapter {
         if (Object.keys(filters).length === 1 && filters.monthKey) {
           const index = objectStore.index('by_date');
           // Use same boundary strategy as getTransactionsByMonth (exclusive upper bound on next month's first day)
-          const [y, m] = filters.monthKey.split('-').map(Number);
+          const [y, m] = monthKeyParts(filters.monthKey);
           const nextMonth = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
           const range = IDBKeyRange.bound(`${filters.monthKey}-01`, `${nextMonth}-01`, false, true);
           const request = index.count(range);
@@ -478,7 +511,7 @@ export class IndexedDBAdapter extends StorageAdapter {
   }
 
   async replaceTransactionWithSplits(originalId: string, splits: Transaction[]): Promise<boolean> {
-    return new Promise((resolve, reject) => {
+    const doReplace = (): Promise<boolean> => new Promise((resolve, reject) => {
       try {
         if (!this.db) {
           resolve(false);
@@ -500,6 +533,30 @@ export class IndexedDBAdapter extends StorageAdapter {
         reject(err);
       }
     });
+
+    // Use Web Locks API to prevent cross-tab race conditions during split
+    if (typeof navigator.locks?.request === 'function') {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      try {
+        return await navigator.locks.request(
+          'harbor_split_tx',
+          { mode: 'exclusive', signal: controller.signal },
+          async () => doReplace()
+        );
+      } catch (err) {
+        // Lock timeout or other failure — do NOT proceed unlocked, throw so caller can retry
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          throw new Error('Split transaction lock timed out — another tab may be performing a split. Please try again.');
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
+    // Fallback for browsers without Web Locks API (no cross-tab protection possible)
+    return doReplace();
   }
 
   // ==========================================
@@ -554,11 +611,15 @@ export class IndexedDBAdapter extends StorageAdapter {
           const items = data[storeName];
           if (Array.isArray(items) && items.length > 0) {
             const store = tx.objectStore(storeName);
-            for (const item of items) {
+            // Phase 6 cleanup (no-explicit-any sweep): `Array.isArray` narrows
+            // `unknown` to `any[]`, so iterate with an explicit `unknown` to
+            // keep the keyPath lookup type-checked.
+            for (const item of items as unknown[]) {
               // Use the store's keyPath to determine if item has a valid key
               const keyPath = store.keyPath as string | null;
               if (keyPath) {
-                const key = (item as any)[keyPath];
+                const record = (item ?? {}) as Record<string, unknown>;
+                const key = record[keyPath];
                 if (key != null) {
                   store.put(item);
                 }
@@ -608,10 +669,19 @@ export class IndexedDBAdapter extends StorageAdapter {
         tx.objectStore(name).clear();
       }
 
+      // CR-May02: race the transaction against a timeout so a blocked IDB
+      // connection (e.g. a sibling tab that didn't close in time) can't
+      // hang the UI indefinitely with disabled buttons and "Clearing…" text.
+      const IDB_CLEAR_TIMEOUT_MS = 8000;
       await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-        tx.onabort = () => reject(tx.error || new Error('Clear all transaction aborted'));
+        const timer = setTimeout(() => {
+          try { tx.abort(); } catch { /* already finished */ }
+          reject(new Error(`clearAll transaction timed out after ${IDB_CLEAR_TIMEOUT_MS}ms`));
+        }, IDB_CLEAR_TIMEOUT_MS);
+
+        tx.oncomplete = () => { clearTimeout(timer); resolve(); };
+        tx.onerror = () => { clearTimeout(timer); reject(tx.error); };
+        tx.onabort = () => { clearTimeout(timer); reject(tx.error || new Error('Clear all transaction aborted')); };
       });
 
       return true;

@@ -26,7 +26,7 @@ describe('ui-render selection updates', () => {
     renderCategories();
     const container = document.getElementById('category-chips') as HTMLElement;
     const foodChip = container.querySelector('[data-category="food"]') as HTMLButtonElement;
-    const transportChip = container.querySelector('[data-category="transport"]') as HTMLButtonElement;
+    const _transportChip = container.querySelector('[data-category="transport"]') as HTMLButtonElement;
 
     expect(foodChip.getAttribute('aria-pressed')).toBe('true');
 

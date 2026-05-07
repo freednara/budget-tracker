@@ -1,5 +1,5 @@
 {
-  "name": "budget-tracker",
+  "name": "harbor-ledger",
   "version": "2.6.2",
   "description": "Harbor Ledger PWA",
   "type": "module",
@@ -14,14 +14,20 @@
     "test:e2e:smoke": "playwright test e2e/transaction-crud.spec.ts e2e/dashboard-layout.spec.ts e2e/data-lifecycle.spec.ts e2e/advanced-resilience.spec.ts --workers=1 --reporter=line",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:debug": "playwright test --debug",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.11.1",
+    "@capacitor/cli": "^8.3.0",
     "@playwright/test": "^1.58.2",
     "@vitest/coverage-v8": "^2.1.9",
+    "eslint": "^10.2.1",
+    "globals": "^17.5.0",
     "happy-dom": "^20.8.4",
     "typescript": "^5.9.3",
+    "typescript-eslint": "^8.58.2",
     "vite": "^7.3.1",
     "vite-plugin-pwa": "^1.2.0",
     "vitest": "^2.1.9"
@@ -29,7 +35,6 @@
   "sideEffects": false,
   "dependencies": {
     "@capacitor/android": "^8.3.0",
-    "@capacitor/cli": "^8.3.0",
     "@capacitor/core": "^8.3.0",
     "@capacitor/ios": "^8.3.0",
     "@preact/signals-core": "^1.14.0",

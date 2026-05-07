@@ -6,19 +6,22 @@
 const DEV = import.meta.env.DEV;
 
 function isPerfDebugEnabled(): boolean {
-  return DEV && typeof window !== 'undefined' && (window as any).__APP_DEBUG_PERF__ === true;
+  return DEV && typeof window !== 'undefined' && window.__APP_DEBUG_PERF__ === true;
 }
 
 // ==========================================
 // TYPES AND INTERFACES
 // ==========================================
 
+// Phase 6 Slice 1j (rev 12 L6): `tags` widened for
+// `exactOptionalPropertyTypes` — recordMetric() forwards its
+// `tags?: Record<string, string>` parameter directly into the payload.
 export interface PerformanceMetric {
   name: string;
   value: number;
   unit: 'ms' | 'bytes' | 'count' | 'percent';
   timestamp: number;
-  tags?: Record<string, string>;
+  tags?: Record<string, string> | undefined;
 }
 
 export interface PerformanceReport {
@@ -65,9 +68,27 @@ export class PerformanceMonitor {
   private maxMetrics = 1000;
   private observers: Array<(metric: PerformanceMetric) => void> = [];
   private memoryIntervalId: ReturnType<typeof setInterval> | null = null;
+  // CR-Apr24-I finding 302: track Web Vitals observers for teardown
+  private vitalObservers: PerformanceObserver[] = [];
 
   constructor() {
     this.initWebVitals();
+  }
+
+  /**
+   * CR-Apr24-I finding 302: disconnect all eagerly-installed Web Vitals
+   * observers so shorter-lived instances (tests, temp instrumentation)
+   * do not leak PerformanceObservers.
+   */
+  destroy(): void {
+    for (const obs of this.vitalObservers) {
+      try { obs.disconnect(); } catch { /* idempotent */ }
+    }
+    this.vitalObservers.length = 0;
+    if (this.memoryIntervalId !== null) {
+      clearInterval(this.memoryIntervalId);
+      this.memoryIntervalId = null;
+    }
   }
   
   /**
@@ -113,7 +134,7 @@ export class PerformanceMonitor {
     // Use Performance API for detailed timing
     try {
       performance.measure(`pm-${name}`, `pm-${startMark}`, endMark ? `pm-${endMark}` : undefined);
-    } catch (e) {
+    } catch (_e) {
       // Marks might not exist in Performance API
     }
     
@@ -139,8 +160,16 @@ export class PerformanceMonitor {
     
     this.metrics.push(metric);
     
-    // Notify observers
-    this.observers.forEach(observer => observer(metric));
+    // Notify observers — isolate each so one failure doesn't break others
+    // or propagate back through measureSync/measureAsync callers.
+    // CR-Apr24-G finding 301.
+    for (const observer of this.observers) {
+      try {
+        observer(metric);
+      } catch (e) {
+        if (DEV) console.warn('[PerfMonitor] Observer threw:', e);
+      }
+    }
     
     // Trim old metrics
     if (this.metrics.length > this.maxMetrics) {
@@ -254,7 +283,8 @@ export class PerformanceMonitor {
         }
       });
       observer.observe({ entryTypes: ['paint'] });
-    } catch (e) {
+      this.vitalObservers.push(observer);
+    } catch (_e) {
       // PerformanceObserver might not be available
     }
   }
@@ -269,11 +299,12 @@ export class PerformanceMonitor {
         }
       });
       observer.observe({ entryTypes: ['largest-contentful-paint'] });
-    } catch (e) {
+      this.vitalObservers.push(observer);
+    } catch (_e) {
       // Not available
     }
   }
-  
+
   private observeFID(): void {
     try {
       const observer = new PerformanceObserver((list) => {
@@ -285,11 +316,12 @@ export class PerformanceMonitor {
         }
       });
       observer.observe({ entryTypes: ['first-input'] });
-    } catch (e) {
+      this.vitalObservers.push(observer);
+    } catch (_e) {
       // Not available
     }
   }
-  
+
   private observeCLS(): void {
     let clsValue = 0;
     try {
@@ -302,7 +334,8 @@ export class PerformanceMonitor {
         }
       });
       observer.observe({ entryTypes: ['layout-shift'] });
-    } catch (e) {
+      this.vitalObservers.push(observer);
+    } catch (_e) {
       // Not available
     }
   }
@@ -324,28 +357,32 @@ export class PerformanceMonitor {
     
     const sorted = [...values].sort((a, b) => a - b);
     const index = Math.ceil((percentile / 100) * sorted.length) - 1;
-    return sorted[Math.max(0, index)];
+    // Phase 6 Slice 1i (rev 12 L6): `sorted[i]` is `number | undefined`
+    // under `noUncheckedIndexedAccess`. The length>0 check above
+    // guarantees presence at `Math.max(0, index)`; `?? 0` keeps the
+    // return type numeric for any unexpected edge case.
+    return sorted[Math.max(0, index)] ?? 0;
   }
-  
+
   /**
    * Calculate percentile asynchronously during idle time
    */
   private async calculatePercentileAsync(values: number[], percentile: number): Promise<number> {
     if (values.length === 0) return 0;
-    
+
     return new Promise((resolve) => {
       const idleCallback = (deadline: IdleDeadline) => {
         // If we have enough idle time, do the calculation
         if (deadline.timeRemaining() > 5 || deadline.didTimeout) {
           const sorted = [...values].sort((a, b) => a - b);
           const index = Math.ceil((percentile / 100) * sorted.length) - 1;
-          resolve(sorted[Math.max(0, index)]);
+          resolve(sorted[Math.max(0, index)] ?? 0);
         } else {
           // Not enough time, request another idle callback
           requestIdleCallback(idleCallback, { timeout: 100 });
         }
       };
-      
+
       if ('requestIdleCallback' in window) {
         requestIdleCallback(idleCallback, { timeout: 100 });
       } else {
@@ -353,7 +390,7 @@ export class PerformanceMonitor {
         setTimeout(() => {
           const sorted = [...values].sort((a, b) => a - b);
           const index = Math.ceil((percentile / 100) * sorted.length) - 1;
-          resolve(sorted[Math.max(0, index)]);
+          resolve(sorted[Math.max(0, index)] ?? 0);
         }, 0);
       }
     });
@@ -388,7 +425,12 @@ export class PerformanceMonitor {
     const calculations = [];
     for (const [name, metrics] of grouped) {
       const values = metrics.map(m => m.value);
-      const unit = metrics[0].unit;
+      // Phase 6 Slice 1i (rev 12 L6): `metrics[0]` is
+      // `PerformanceMetric | undefined` under
+      // `noUncheckedIndexedAccess`. An empty group is dropped on the
+      // map-key level, but narrow through an explicit optional chain
+      // plus a string fallback so `unit` stays `string`.
+      const unit = metrics[0]?.unit ?? '';
       
       // Start async calculations
       const calculation = Promise.all([
@@ -470,7 +512,12 @@ export class PerformanceMonitor {
     // Calculate statistics for each metric
     for (const [name, metrics] of grouped) {
       const values = metrics.map(m => m.value);
-      const unit = metrics[0].unit;
+      // Phase 6 Slice 1i (rev 12 L6): `metrics[0]` is
+      // `PerformanceMetric | undefined` under
+      // `noUncheckedIndexedAccess`. An empty group is dropped on the
+      // map-key level, but narrow through an explicit optional chain
+      // plus a string fallback so `unit` stays `string`.
+      const unit = metrics[0]?.unit ?? '';
       
       report.metrics[name] = {
         avg: values.reduce((a, b) => a + b, 0) / values.length,
@@ -622,12 +669,17 @@ export function measurePerformance(target: any, propertyName: string, descriptor
   descriptor.value = function(...args: any[]) {
     const className = target.constructor.name;
     const metricName = `${className}.${propertyName}`;
+    const start = performance.now();
     const result = originalMethod.apply(this, args);
 
     // Preserve sync/async behavior of the original method
     if (result instanceof Promise) {
       return perfMonitor.measureAsync(metricName, () => result);
     }
+    // CR-Apr24-I finding 292: measure synchronous methods too so the
+    // decorator fulfills its "automatic method measurement" contract.
+    const duration = performance.now() - start;
+    perfMonitor.recordMetric(metricName, duration, 'ms');
     return result;
   };
 
@@ -642,11 +694,16 @@ export function monitored<T extends (...args: any[]) => any>(
   name: string
 ): T {
   return ((...args: Parameters<T>) => {
+    const start = performance.now();
     // Detect async by checking return value (survives minification, unlike constructor.name)
     const result = fn(...args);
     if (result instanceof Promise) {
       return perfMonitor.measureAsync(name, () => result);
     }
+    // CR-Apr24-I finding 293: record timing for sync functions too,
+    // matching the fix pattern from findings 291/292.
+    const duration = performance.now() - start;
+    perfMonitor.recordMetric(name, duration, 'ms');
     return result;
   }) as T;
 }

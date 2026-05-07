@@ -10,7 +10,7 @@
 'use strict';
 
 import { html, type TemplateResult } from '../core/lit-helpers.js';
-import { announcer } from '../core/accessibility.js';
+import { localeService } from '../core/locale-service.js';
 
 // ==========================================
 // SETTINGS MODAL
@@ -31,8 +31,10 @@ export function renderSettingsModal(): TemplateResult {
       }).__APP_RUNTIME_INFO__ ?? null)
     : null;
 
+  // Use the app's configured locale so the build-timestamp display is
+  // consistent with the rest of the app (previously hardcoded 'en-US').
   const buildTimeLabel = runtimeInfo?.buildTime
-    ? new Date(runtimeInfo.buildTime).toLocaleString('en-US', {
+    ? new Date(runtimeInfo.buildTime).toLocaleString(localeService.getLocale(), {
         month: 'short',
         day: 'numeric',
         year: 'numeric',
@@ -46,25 +48,29 @@ export function renderSettingsModal(): TemplateResult {
 
   return html`
     <div id="settings-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
-      <div class="rounded-2xl p-6 max-w-lg w-full card-shadow" style="background: var(--bg-card-section); border: 1px solid var(--border-section); max-height: 85vh; overflow-y: auto;">
-        <h3 id="settings-modal-title" class="text-xl font-black mb-4 text-primary">⚙️ Settings</h3>
+      <div class="rounded-2xl p-6 max-w-lg w-full card-shadow modal-panel modal-panel--scroll">
+        <div class="flex justify-between items-center mb-4">
+          <h3 id="settings-modal-title" class="text-xl font-black text-primary">⚙️ Settings</h3>
+          <button id="close-settings-x" class="w-8 h-8 flex items-center justify-center rounded-lg text-lg form-input-secondary" aria-label="Close settings">✕</button>
+        </div>
 
         <!-- Appearance -->
-        <p class="text-xs font-black mb-3 mt-1" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Appearance</p>
-        <div class="mb-4 pl-3 border-l-2" style="border-color: var(--border-input);">
-          <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Theme</label>
-          <div class="flex gap-2">
-            <button class="theme-btn flex-1 py-2 rounded-lg text-sm font-bold" data-theme="dark" data-modal-initial-focus="true" style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);" aria-pressed="false">🌙 Dark</button>
-            <button class="theme-btn flex-1 py-2 rounded-lg text-sm font-bold" data-theme="light" style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);" aria-pressed="false">☀️ Light</button>
-            <button class="theme-btn flex-1 py-2 rounded-lg text-sm font-bold" data-theme="system" style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);" aria-pressed="false">🖥️ System</button>
-          </div>
+        <p class="text-xs font-black mb-3 mt-1 section-header">Appearance</p>
+        <div class="mb-4 pl-3 border-l-2 settings-section-border">
+          <fieldset class="border-0 p-0 m-0">
+            <legend class="block text-xs font-bold mb-2 text-secondary-uppercase">Theme</legend>
+            <div class="flex gap-2" role="group" aria-label="Theme selection">
+              <button class="theme-btn flex-1 py-2 rounded-lg text-sm font-bold form-input" data-theme="dark" data-modal-initial-focus="true" aria-pressed="false">🌙 Dark</button>
+              <button class="theme-btn flex-1 py-2 rounded-lg text-sm font-bold form-input" data-theme="light" aria-pressed="false">☀️ Light</button>
+              <button class="theme-btn flex-1 py-2 rounded-lg text-sm font-bold form-input" data-theme="system" aria-pressed="false">🖥️ System</button>
+            </div>
+          </fieldset>
         </div>
 
         <!-- Currency -->
-        <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
-          <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Default Currency</label>
-          <select id="settings-currency" class="w-full px-3 py-2 rounded-lg text-sm cursor-pointer"
-            style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
+        <div class="mb-5 pl-3 border-l-2 settings-section-border">
+          <label for="settings-currency" class="block text-xs font-bold mb-2 text-secondary-uppercase">Default Currency</label>
+          <select id="settings-currency" class="w-full px-3 py-2 rounded-lg text-sm cursor-pointer form-input">
             <option value="USD">$ USD - US Dollar</option>
             <option value="EUR">€ EUR - Euro</option>
             <option value="GBP">£ GBP - British Pound</option>
@@ -81,14 +87,17 @@ export function renderSettingsModal(): TemplateResult {
         </div>
 
         <!-- Dashboard Sections -->
-        <p class="text-xs font-black mb-3" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Dashboard Sections</p>
-        <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
-          <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Show Sections</label>
-          <div class="space-y-2">
-            <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" id="show-envelope" checked class="w-4 h-4"> <span class="text-sm text-primary">Envelope Budget</span></label>
-          </div>
-          <label class="block text-xs font-bold mt-3 mb-2 text-secondary-uppercase">Insight Tone</label>
-          <select id="insight-personality" aria-label="Insight tone" class="w-full px-3 py-2 rounded-lg text-sm" style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
+        <p class="text-xs font-black mb-3 section-header">Dashboard Sections</p>
+        <div class="mb-5 pl-3 border-l-2 settings-section-border">
+          <fieldset class="border-0 p-0 m-0">
+            <legend class="block text-xs font-bold mb-2 text-secondary-uppercase">Show Sections</legend>
+            <div class="space-y-2">
+              <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" id="show-envelope" checked class="w-4 h-4"> <span class="text-sm text-primary">Envelope Budget</span></label>
+              <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" id="show-templates" checked class="w-4 h-4"> <span class="text-sm text-primary">Transaction Templates</span></label>
+            </div>
+          </fieldset>
+          <label for="insight-personality" class="block text-xs font-bold mt-3 mb-2 text-secondary-uppercase">Insight Tone</label>
+          <select id="insight-personality" class="w-full px-3 py-2 rounded-lg text-sm form-input">
             <option value="serious">📊 Serious</option>
             <option value="friendly">😊 Friendly</option>
             <option value="roast">🔥 Roast Me</option>
@@ -96,27 +105,25 @@ export function renderSettingsModal(): TemplateResult {
         </div>
 
         <!-- Budget Rollover -->
-        <p class="text-xs font-black mb-3" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Budget Rollover</p>
-        <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
+        <p class="text-xs font-black mb-3 section-header">Budget Rollover</p>
+        <div class="mb-5 pl-3 border-l-2 settings-section-border">
           <label class="flex items-center gap-3 cursor-pointer mb-3">
             <input type="checkbox" id="rollover-enabled" class="w-4 h-4">
-            <span class="text-sm" style="color: var(--text-primary);">Enable budget rollover</span>
+            <span class="text-sm text-primary">Enable budget rollover</span>
           </label>
 
           <div id="rollover-options" class="space-y-3 hidden">
             <div>
-              <label class="block text-xs font-bold mb-1" style="color: var(--text-secondary);">Rollover Mode</label>
-              <select id="rollover-mode" class="w-full px-3 py-2 rounded-lg text-sm"
-                style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
+              <label for="rollover-mode" class="block text-xs font-bold mb-1 text-secondary">Rollover Mode</label>
+              <select id="rollover-mode" class="w-full px-3 py-2 rounded-lg text-sm form-input">
                 <option value="all">All categories</option>
                 <option value="selected">Selected categories only</option>
               </select>
             </div>
 
             <div>
-              <label class="block text-xs font-bold mb-1" style="color: var(--text-secondary);">Negative Balance Handling</label>
-              <select id="negative-handling" class="w-full px-3 py-2 rounded-lg text-sm"
-                style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
+              <label for="negative-handling" class="block text-xs font-bold mb-1 text-secondary">Negative Balance Handling</label>
+              <select id="negative-handling" class="w-full px-3 py-2 rounded-lg text-sm form-input">
                 <option value="zero">Reset to zero (forgive overspending)</option>
                 <option value="carry">Carry forward (reduce next month)</option>
                 <option value="ignore">Ignore negatives</option>
@@ -124,63 +131,72 @@ export function renderSettingsModal(): TemplateResult {
             </div>
 
             <div>
-              <label class="block text-xs font-bold mb-1" style="color: var(--text-secondary);">Max Rollover Per Category</label>
+              <label for="max-rollover" class="block text-xs font-bold mb-1 text-secondary">Max Rollover Per Category</label>
               <input type="number" id="max-rollover" min="0" step="10" placeholder="Unlimited"
-                class="w-full px-3 py-2 rounded-lg text-sm"
-                style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">
-              <p class="text-xs mt-1" style="color: var(--text-tertiary);">Leave empty for unlimited rollover</p>
+                aria-describedby="max-rollover-hint"
+                class="w-full px-3 py-2 rounded-lg text-sm form-input">
+              <p id="max-rollover-hint" class="text-xs mt-1 text-tertiary">Leave empty for unlimited rollover</p>
             </div>
           </div>
         </div>
 
         <!-- Categories -->
-        <p class="text-xs font-black mb-3" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Categories</p>
-        <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
-          <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Custom Categories</label>
-          <div id="custom-categories-list" class="space-y-2 mb-2"></div>
-          <button id="add-custom-cat-btn" class="w-full py-2 rounded-lg text-sm font-semibold" style="background: var(--bg-input); color: var(--text-secondary); border: 1px dashed var(--border-input);">+ Add Custom Category</button>
+        <p class="text-xs font-black mb-3 section-header">Categories</p>
+        <div class="mb-5 pl-3 border-l-2 settings-section-border">
+          <div id="category-manager-mount"></div>
         </div>
 
         <!-- Alerts & Notifications -->
-        <p class="text-xs font-black mb-3" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Alerts & Notifications</p>
-        <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
-          <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Budget Alerts</label>
-          <label class="flex items-center gap-3 cursor-pointer mb-2"><input type="checkbox" id="alert-budget-exceed" checked class="w-4 h-4"> <span class="text-sm text-primary">In-app alert when budget exceeds 80%</span></label>
-          <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" id="browser-budget-notifications" class="w-4 h-4"> <span class="text-sm text-primary">Browser notifications for new budget alerts</span></label>
-          <p class="text-xs mt-2" style="color: var(--text-tertiary);">Browser notifications are local-only, require permission, and work only while the app or installed PWA is open.</p>
+        <p class="text-xs font-black mb-3 section-header">Alerts & Notifications</p>
+        <div class="mb-5 pl-3 border-l-2 settings-section-border">
+          <fieldset class="border-0 p-0 m-0">
+            <legend class="block text-xs font-bold mb-2 text-secondary-uppercase">Budget Alerts</legend>
+            <label class="flex items-center gap-3 cursor-pointer mb-2"><input type="checkbox" id="alert-budget-exceed" checked class="w-4 h-4"> <span class="text-sm text-primary">In-app alert when budget exceeds 80%</span></label>
+            <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" id="browser-budget-notifications" class="w-4 h-4"> <span class="text-sm text-primary">Browser notifications for new budget alerts</span></label>
+          </fieldset>
+          <p class="text-xs mt-2 text-tertiary">Browser notifications are local-only, require permission, and work only while the app or installed PWA is open.</p>
         </div>
 
         <!-- Security -->
-        <p class="text-xs font-black mb-3" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Security</p>
-        <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
-          <label class="block text-xs font-bold mb-2 text-secondary-uppercase">PIN Lock</label>
+        <p class="text-xs font-black mb-3 section-header">Security</p>
+        <div class="mb-5 pl-3 border-l-2 settings-section-border">
+          <label for="settings-pin" class="block text-xs font-bold mb-2 text-secondary-uppercase">PIN Lock</label>
           <form class="flex items-center gap-3">
-            <input type="password" id="settings-pin" maxlength="6" inputmode="numeric" pattern="[0-9]*" class="w-32 px-3 py-2 rounded-lg text-sm"
-              style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);" placeholder="Set PIN">
-            <button type="button" id="save-pin-btn" class="px-3 py-2 rounded-lg text-sm font-bold btn-primary">Set PIN</button>
-            <button type="button" id="clear-pin-btn" class="px-3 py-2 rounded-lg text-sm font-bold" style="background: var(--color-expense); color: white;">Remove</button>
+            <input type="password" id="settings-pin" maxlength="6" inputmode="numeric" pattern="[0-9]*" autocomplete="new-password" class="w-32 px-3 py-2 rounded-lg text-sm form-input" placeholder="Set PIN">
+            <button type="button" id="save-pin-btn" class="px-3 py-2 rounded-lg text-sm font-bold btn btn-primary">Set PIN</button>
+            <button type="button" id="clear-pin-btn" class="px-3 py-2 rounded-lg text-sm font-bold btn btn-danger" hidden>Turn Off PIN</button>
           </form>
         </div>
 
         <!-- Keyboard Shortcuts -->
+        <!--
+          NOTE: Not a form control, so no <label>. Render as a heading
+          with the same visual treatment the labels use. (Fixes a11y
+          review P1: standalone <label> with no 'for' target.)
+        -->
         <div class="mb-4">
-          <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Keyboard Shortcuts</label>
+          <h4 class="block text-xs font-bold mb-2 text-secondary-uppercase">Keyboard Shortcuts</h4>
           <div class="text-xs space-y-1 text-secondary">
-            <p><kbd class="px-1 rounded" style="background: var(--bg-input);">D</kbd> Dashboard &nbsp; <kbd class="px-1 rounded" style="background: var(--bg-input);">N</kbd> New transaction &nbsp; <kbd class="px-1 rounded" style="background: var(--bg-input);">B</kbd> Budget</p>
-            <p><kbd class="px-1 rounded" style="background: var(--bg-input);">E</kbd> Expense &nbsp; <kbd class="px-1 rounded" style="background: var(--bg-input);">I</kbd> Income &nbsp; <kbd class="px-1 rounded" style="background: var(--bg-input);">Esc</kbd> Close &nbsp; <kbd class="px-1 rounded" style="background: var(--bg-input);">?</kbd> Settings</p>
+            <p><kbd class="kbd">D</kbd> Dashboard &nbsp; <kbd class="kbd">N</kbd> New transaction &nbsp; <kbd class="kbd">B</kbd> Budget</p>
+            <p><kbd class="kbd">E</kbd> Expense &nbsp; <kbd class="kbd">I</kbd> Income &nbsp; <kbd class="kbd">Esc</kbd> Close &nbsp; <kbd class="kbd">?</kbd> Settings</p>
           </div>
         </div>
 
         <!-- Help -->
-        <p class="text-xs font-black mb-3" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Help</p>
-        <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
-          <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Getting Started</label>
-          <button id="restart-onboarding" class="w-full py-2 rounded-lg text-sm font-semibold" style="background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);">🎯 Restart App Tour</button>
+        <!--
+          "Getting Started" is a heading for the restart-onboarding button,
+          not a form-control label. The button has its own visible/accessible
+          name, so the correct element is a heading, not a <label>.
+        -->
+        <p class="text-xs font-black mb-3 section-header">Help</p>
+        <div class="mb-5 pl-3 border-l-2 settings-section-border">
+          <h4 class="block text-xs font-bold mb-2 text-secondary-uppercase">Getting Started</h4>
+          <button id="restart-onboarding" class="w-full py-2 rounded-lg text-sm font-semibold form-input">🎯 Restart App Tour</button>
         </div>
 
         <!-- Runtime -->
-        <p class="text-xs font-black mb-3" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">App Runtime</p>
-        <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
+        <p class="text-xs font-black mb-3 section-header">App Runtime</p>
+        <div class="mb-5 pl-3 border-l-2 settings-section-border">
           <div class="text-xs space-y-2 text-secondary">
             <p><span class="font-bold text-primary">Version:</span> ${runtimeInfo?.version || 'Unknown'}</p>
             <p><span class="font-bold text-primary">Built:</span> ${buildTimeLabel}</p>
@@ -190,45 +206,67 @@ export function renderSettingsModal(): TemplateResult {
         </div>
 
         <!-- Data -->
-        <p class="text-xs font-black mb-3" style="color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Data</p>
-        <div class="mb-5 pl-3 border-l-2" style="border-color: var(--border-input);">
-          <label class="block text-xs font-bold mb-2 text-secondary-uppercase">Data Management</label>
-          <p class="text-xs mb-3" style="color: var(--text-tertiary);">
+        <!--
+          "Data Management" is a section heading, not a form-control label.
+          The controls (sample-data / clear-all-data buttons) are named
+          individually.
+        -->
+        <p class="text-xs font-black mb-3 section-header">Data</p>
+        <div class="mb-5 pl-3 border-l-2 settings-section-border">
+          <h4 class="block text-xs font-bold mb-2 text-secondary-uppercase">Data Management</h4>
+          <p class="text-xs mb-3 text-tertiary">
             Clears transactions, budgets, goals, debts, templates, recurring templates, categories, and settings on this device.
             Backup retention is chosen in the confirmation step.
           </p>
+        </div>
+
+        <div class="space-y-2">
           <div class="flex gap-2">
-            <button id="load-sample-data" class="flex-1 py-2 rounded-lg text-xs font-semibold" style="background: var(--bg-input); color: var(--text-secondary); border: 1px solid var(--border-input);">📊 Load Sample Data</button>
-            <button id="clear-all-data" class="flex-1 py-2 rounded-lg text-xs font-semibold" style="background: color-mix(in srgb, var(--color-expense) 15%, transparent); color: var(--color-expense);">🗑️ Clear All App Data</button>
+            <button id="load-sample-data" class="btn btn-secondary btn-sm flex-1">📊 Load Sample Data</button>
+            <button id="clear-all-data" class="btn btn-secondary btn-sm flex-1 text-expense border-danger">🗑️ Clear All App Data</button>
           </div>
         </div>
 
-        <div class="flex gap-3">
-          <button id="cancel-settings" class="flex-1 py-3 rounded-lg font-bold btn-secondary">Cancel</button>
-          <button id="close-settings" class="flex-1 py-3 rounded-lg font-bold btn-primary">Save Settings</button>
+        <!-- Sticky footer for save/cancel -->
+        <div class="settings-modal__footer">
+          <div class="flex gap-2">
+            <button id="cancel-settings" class="btn btn-secondary btn-sm flex-1">Cancel</button>
+            <button id="close-settings" class="btn btn-primary btn-sm flex-1">Save Settings</button>
+          </div>
         </div>
       </div>
     </div>
-    <div id="reset-app-data-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="reset-app-data-title" style="z-index: 80;">
-      <div class="rounded-2xl p-6 max-w-md w-full card-shadow" style="background: var(--bg-card-section); border: 1px solid var(--border-section);">
+    <div id="reset-app-data-modal" class="modal-overlay modal-overlay--priority hidden" role="dialog" aria-modal="true" aria-labelledby="reset-app-data-title">
+      <div class="rounded-2xl p-6 max-w-md w-full card-shadow modal-panel">
         <h3 id="reset-app-data-title" class="text-xl font-black mb-2 text-primary">Clear App Data</h3>
         <p class="text-sm mb-3 text-secondary">
           This is irreversible. App data will be reset to a first-use state on this device.
         </p>
-        <div class="p-3 rounded-xl mb-4" style="background: color-mix(in srgb, var(--color-expense) 8%, var(--bg-input)); border: 1px solid color-mix(in srgb, var(--color-expense) 25%, var(--border-input));">
-          <p class="text-xs font-bold mb-1" style="color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.05em;">Choose Backup Behavior</p>
+        <div class="p-3 rounded-xl mb-4 settings-danger-box">
+          <p class="text-xs font-bold mb-1 settings-danger-box__title">Choose Backup Behavior</p>
           <p class="text-sm text-secondary">
             You can keep stored backups for later restore, or wipe backups too for a full local reset.
           </p>
         </div>
         <div class="space-y-2">
-          <button id="confirm-reset-keep-backups" class="w-full py-3 rounded-lg font-bold text-sm btn-primary">
+          <button id="confirm-reset-keep-backups" class="btn btn-danger-outline w-full text-sm">
             Clear App Data Only
           </button>
-          <button id="confirm-reset-clear-backups" class="w-full py-3 rounded-lg font-bold text-sm" style="background: var(--color-expense); color: white;">
+          <button id="confirm-reset-clear-backups" class="btn btn-danger w-full text-sm">
             Clear App Data + Backups
           </button>
-          <button id="cancel-reset-app-data" class="w-full py-3 rounded-lg font-bold text-sm btn-secondary">
+          <!--
+            Design-Review-Apr21 P3 (batch 6 follow-up): the shared
+            modal opener's focus-resolver picks the first focusable
+            control unless one is tagged with
+            data-modal-initial-focus. With no tag, keyboard users
+            open this dialog focused on "Clear App Data Only" — one
+            Space/Enter away from an irreversible reset. Route
+            initial focus to Cancel so a reflexive activation is
+            the safe, non-destructive outcome. Both destructive
+            buttons still require a deliberate move.
+          -->
+          <button id="cancel-reset-app-data" data-modal-initial-focus="true" class="btn btn-secondary w-full text-sm">
             Cancel
           </button>
         </div>

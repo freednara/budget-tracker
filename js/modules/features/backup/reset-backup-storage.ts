@@ -7,10 +7,10 @@ export interface ClearBackupStorageOptions {
   clearMetadata: boolean;
 }
 
-const LOCAL_BACKUP_PAYLOAD_KEY = 'budget_tracker_auto_backups';
-const BACKUP_SCHEDULE_KEY = 'budget_tracker_backup_schedule';
-const BACKUP_STATUS_KEY = 'budget_tracker_backup_status';
-const LEGACY_BACKUP_PREFIX = 'budget_tracker_backup_';
+const LOCAL_BACKUP_PAYLOAD_KEY = 'harbor_auto_backups';
+const BACKUP_SCHEDULE_KEY = 'harbor_backup_schedule';
+const BACKUP_STATUS_KEY = 'harbor_backup_status';
+const LEGACY_BACKUP_PREFIX = 'harbor_backup_';
 
 function removeLegacyBackupKeys(): void {
   const keysToRemove: string[] = [];
@@ -33,19 +33,28 @@ function removeLegacyBackupKeys(): void {
  */
 export async function clearBackupStorage(options: ClearBackupStorageOptions): Promise<boolean> {
   try {
-    if (options.clearMetadata) {
-      localStorage.removeItem(BACKUP_SCHEDULE_KEY);
-      localStorage.removeItem(BACKUP_STATUS_KEY);
-    }
-
     if (options.clearPayloads) {
-      localStorage.removeItem(LOCAL_BACKUP_PAYLOAD_KEY);
-      removeLegacyBackupKeys();
-
+      // Prior-batch P2: the earlier ordering deleted localStorage
+      // payloads FIRST and then attempted `clearAllBackups()`. If the
+      // IndexedDB clear failed, we returned `false` but the LS payloads
+      // were already gone — a partial wipe that the caller could not
+      // distinguish from "nothing happened" and that the user saw as
+      // half their recoverable backup history vanishing on a reported
+      // failure. Fix: attempt the IDB clear first; only drop the LS
+      // payloads once IDB has confirmed the wipe. On IDB failure the
+      // LS fallback stays intact and the user can retry without losing
+      // state.
       const cleared = await clearAllBackups();
       if (!cleared) {
         return false;
       }
+      localStorage.removeItem(LOCAL_BACKUP_PAYLOAD_KEY);
+      removeLegacyBackupKeys();
+    }
+
+    if (options.clearMetadata) {
+      localStorage.removeItem(BACKUP_SCHEDULE_KEY);
+      localStorage.removeItem(BACKUP_STATUS_KEY);
     }
 
     return true;

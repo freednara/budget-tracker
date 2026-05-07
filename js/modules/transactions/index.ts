@@ -21,7 +21,6 @@ export {
   applyTemplate,
   deleteTemplate,
   renderTemplates,
-  setTemplateFmtCurFn,
   setTemplateRenderCategoriesFn,
   setTemplateSwitchTabFn
 } from './template-manager.js';

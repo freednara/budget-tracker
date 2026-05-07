@@ -1,51 +1,39 @@
 /**
- * Global Error Handler (Legacy Wrapper)
- * 
- * Provides consistent error tracking, reporting, and recovery.
- * Now delegates to the more comprehensive ErrorTracker.ts.
- * 
+ * Global Error Handler — minimal adapter over error-tracker.ts
+ *
+ * Phase 5g-3 (Inline-Behavior-Review rev 12, L50 — re-scoped):
+ * L50's original premise was "zero external importers — delete the whole
+ * 157-LOC module." Re-verification during Phase 5g-3 found one live
+ * importer (`form-events.ts`'s `handleError` call established by Phase
+ * 5g-2 / L34 and already present before that slice). L50's deeper
+ * concern — that the `logDebug`/`logInfo`/`logWarning`/`logError` shims
+ * route level-tagged messages through the error queue (so a future
+ * `logDebug('x')` call would pollute error telemetry) — remains valid,
+ * and all of those shims plus `createLogger`, `tryOperation`, the
+ * `installGlobalHandlers` re-export, and the `errorTracker` re-export
+ * const were grep-verified zero-caller. The re-scoped fix: delete the
+ * misleading level-tagged API surface and the unused internal types,
+ * keep only the `handleError` adapter that `form-events.ts` depends on.
+ * Module shrunk from 156 LOC to ~35 LOC.
+ *
  * @module global-error-handler
  */
 
-import { 
-  trackError, 
-  displayError, 
-  initialize as installGlobalHandlers,
-  onError as onTrackerError,
-  clearErrorLog as clearTrackerLog
-} from './error-tracker.js';
+import { displayError } from './error-tracker.js';
 
-// ==========================================
-// TYPE DEFINITIONS (Backward Compatibility)
-// ==========================================
-
-export type ErrorLevel = 'debug' | 'info' | 'warning' | 'error' | 'critical';
-export type ErrorCategory = 'network' | 'storage' | 'validation' | 'rendering' | 'business' | 'unknown';
-
+// Phase 6 Slice 1j (rev 12 L6): optional fields widened for
+// `exactOptionalPropertyTypes` — `handleError()` callers commonly pass
+// `{ module: someVar }` where `someVar` is typed as `string | undefined`.
 export interface ErrorContext {
-  category?: ErrorCategory;
-  level?: ErrorLevel;
-  module?: string;
-  operation?: string;
-  userId?: string;
-  metadata?: Record<string, unknown>;
-  stackTrace?: string;
-  timestamp?: number;
+  module?: string | undefined;
+  operation?: string | undefined;
 }
-
-export interface ErrorReport {
-  message: string;
-  context: ErrorContext;
-  error?: Error;
-  id: string;
-}
-
-// ==========================================
-// ERROR HANDLING FUNCTIONS
-// ==========================================
 
 /**
- * Main error handler - delegates to ErrorTracker
+ * Route a caught error through trackError (telemetry) + displayError
+ * (user-facing toast). For narrower telemetry-only or toast-only paths,
+ * call `trackError` / `displayError` directly instead of using this
+ * adapter.
  */
 export function handleError(
   message: string,
@@ -53,104 +41,15 @@ export function handleError(
   context?: ErrorContext
 ): void {
   const err = error instanceof Error ? error : new Error(message);
-  
-  // Track error centrally
-  trackError(err, {
-    module: context?.module || 'GlobalErrorHandler',
-    action: context?.operation || 'error'
+
+  // CR-Apr24-G finding 267: removed direct trackError call because
+  // displayError already calls trackError internally. Calling both
+  // double-tracked every failure in telemetry.
+  displayError(err, {
+    userMessage: message,
+    context: {
+      module: context?.module || 'GlobalErrorHandler',
+      action: context?.operation || 'error',
+    },
   });
-
-  // Display error to user if appropriate (level >= error and not validation)
-  const level = context?.level || 'error';
-  const category = context?.category || 'unknown';
-
-  if ((level === 'error' || level === 'critical') && category !== 'validation') {
-    displayError(err, {
-      userMessage: message,
-      context: { module: context?.module }
-    });
-  }
 }
-
-/**
- * Log error (shorthand)
- */
-export function logError(error: Error | unknown, context?: ErrorContext): void {
-  const message = error instanceof Error ? error.message : String(error);
-  handleError(message, error, context);
-}
-
-/**
- * Log warning
- */
-export function logWarning(message: string, context?: ErrorContext): void {
-  handleError(message, undefined, { ...context, level: 'warning' });
-}
-
-/**
- * Log info
- */
-export function logInfo(message: string, context?: ErrorContext): void {
-  handleError(message, undefined, { ...context, level: 'info' });
-}
-
-/**
- * Log debug
- */
-export function logDebug(message: string, context?: ErrorContext): void {
-  handleError(message, undefined, { ...context, level: 'debug' });
-}
-
-/**
- * Create module-specific logger
- */
-export function createLogger(module: string): {
-  error: (message: string, error?: unknown) => void;
-  warn: (message: string) => void;
-  info: (message: string) => void;
-  debug: (message: string) => void;
-} {
-  return {
-    error: (message: string, error?: unknown) => 
-      handleError(message, error, { module }),
-    warn: (message: string) => 
-      logWarning(message, { module }),
-    info: (message: string) => 
-      logInfo(message, { module }),
-    debug: (message: string) => 
-      logDebug(message, { module })
-  };
-}
-
-// ==========================================
-// ERROR RECOVERY
-// ==========================================
-
-/**
- * Try operation with error handling
- */
-export async function tryOperation<T>(
-  operation: () => T | Promise<T>,
-  context: ErrorContext & { fallback?: T }
-): Promise<T | undefined> {
-  try {
-    return await operation();
-  } catch (error) {
-    handleError('Operation failed', error, context);
-    return context.fallback;
-  }
-}
-
-// ==========================================
-// EXPORTS & INITIALIZATION
-// ==========================================
-
-export { installGlobalHandlers };
-
-// Re-export tracker-like methods for backward compatibility
-export const errorTracker = {
-  clear: clearTrackerLog,
-  onError: onTrackerError
-};
-
-// Automatic initialization is already handled in ErrorTracker.ts

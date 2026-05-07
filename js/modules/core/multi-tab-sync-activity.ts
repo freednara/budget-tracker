@@ -7,7 +7,7 @@
  * @module multi-tab-sync-activity
  */
 
-import { debounce } from './utils.js';
+import { debounce } from './utils-pure.js';
 import type { UserActivityState } from './multi-tab-sync-conflicts.js';
 
 // ==========================================
@@ -192,10 +192,13 @@ export function monitorIdleState(callback: (isIdle: boolean) => void): () => voi
     const timeSinceActivity = now - currentActivity.lastActivity;
     const isIdle = timeSinceActivity > IDLE_TIMEOUT && !currentActivity.unsavedChanges;
     
-    callback(isIdle);
-    
-    // Schedule next check
+    // Round 7 fix: Schedule next check BEFORE calling callback.
+    // If the consumer calls cleanup() from within the callback, it will clear
+    // the correct timer ID. If we scheduled after the callback, cleanup would
+    // clear the old timer while the new one would be permanently leaked.
     idleTimer = window.setTimeout(checkIdle, IDLE_TIMEOUT / 2);
+    
+    callback(isIdle);
   };
   
   // Start monitoring
@@ -219,7 +222,7 @@ export function monitorIdleState(callback: (isIdle: boolean) => void): () => voi
 export function saveActivityState(): void {
   try {
     sessionStorage.setItem('userActivity', JSON.stringify(currentActivity));
-  } catch (e) {
+  } catch (_e) {
     // Ignore quota errors
   }
 }
@@ -230,16 +233,24 @@ export function saveActivityState(): void {
 export function restoreActivityState(): void {
   try {
     const saved = sessionStorage.getItem('userActivity');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      const now = Date.now();
-      
-      // Only restore if recent (within 5 minutes)
-      if (now - parsed.lastActivity < 300000) {
-        currentActivity = parsed;
-      }
+    if (!saved) return;
+    // Phase 6 cleanup (no-explicit-any sweep): JSON.parse returns `any`.
+    // Validate the shape before assigning into the typed module state.
+    const parsed: unknown = JSON.parse(saved);
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      typeof (parsed as { lastActivity?: unknown }).lastActivity !== 'number'
+    ) {
+      return;
     }
-  } catch (e) {
+    const candidate = parsed as UserActivityState;
+    const now = Date.now();
+    // Only restore if recent (within 5 minutes)
+    if (now - candidate.lastActivity < 300000) {
+      currentActivity = candidate;
+    }
+  } catch (_e) {
     // Ignore parse errors
   }
 }

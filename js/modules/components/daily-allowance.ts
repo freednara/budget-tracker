@@ -14,19 +14,12 @@
 
 import { effect, computed } from '@preact/signals-core';
 import * as signals from '../core/signals.js';
-import { html, render, mountAll } from '../core/lit-helpers.js';
+import { html, render } from '../core/lit-helpers.js';
 import { mountEffects, unmountEffects } from '../core/effect-manager.js';
+import { fmtCur, parseMonthKey, getMonthKey, getPrevMonthKey, toCents, toDollars } from '../core/utils-pure.js';
+import { formatViewedMonthPhrase, formatViewedMonthLabel, formatMonth } from '../core/locale-service.js';
+import type { SpendingPaceData } from '../../types/index.js';
 import {
-  fmtCur,
-  parseMonthKey,
-  getMonthKey,
-  getPrevMonthKey,
-  getTodayStr,
-  toCents,
-  toDollars
-} from '../core/utils.js';
-import {
-  getEffectiveIncome,
   calcTotals,
   getMonthTx,
   getMonthlySavings
@@ -110,17 +103,14 @@ const dailyMetrics = computed((): DailyMetrics => {
 });
 
 /**
- * Progress percentage for the month
- */
-const progressPercent = computed(() => {
-  const m = dailyMetrics.value;
-  return (m.daysElapsed / m.daysInMonth) * 100;
-});
-
-/**
  * Spending percent shown in the hero pace label.
  * This is intentionally based on expenses as a share of income for the month.
  */
+/** Cap a percentage at 999 for display readability */
+function capPercent(pct: number, cap = 999): string {
+  return pct > cap ? `>${cap}` : String(pct);
+}
+
 const spendingPercent = computed(() => {
   const m = dailyMetrics.value;
   return m.income > 0 ? Math.round((m.expenses / m.income) * 100) : 0;
@@ -169,43 +159,44 @@ function mountHeroCard(): () => void {
   const heroCardEl = DOM.get('hero-dashboard-card');
   const heroDailyEl = DOM.get('hero-daily-amount');
   const heroAmountCaption = DOM.get('hero-amount-caption');
-  const heroLeftEl = DOM.get('hero-left-to-spend');
-  const heroTodayEl = DOM.get('hero-today-spent');
   const heroDaysEl = DOM.get('hero-days-remaining');
-  const heroProgressBar = DOM.get('hero-progress-bar');
-  const heroProgressPct = DOM.get('hero-progress-pct');
+  const heroDaysLabelEl = DOM.get('hero-days-label');
   const heroMotivation = DOM.get('hero-motivation');
   const heroBadge = DOM.get('hero-pace-badge');
-  const heroPrimaryAction = DOM.get('hero-primary-action') as HTMLButtonElement | null;
-  const heroSecondaryAction = DOM.get('hero-secondary-action') as HTMLButtonElement | null;
-  const incomeCard = DOM.get('dashboard-income-card') as HTMLButtonElement | null;
-  const expenseCard = DOM.get('dashboard-expense-card') as HTMLButtonElement | null;
-  const balanceCard = DOM.get('dashboard-balance-card') as HTMLButtonElement | null;
+  const heroPrimaryAction = DOM.get('hero-primary-action');
+  const heroSecondaryAction = DOM.get('hero-secondary-action');
+  const incomeCard = DOM.get('dashboard-income-card');
+  const expenseCard = DOM.get('dashboard-expense-card');
+  const balanceCard = DOM.get('dashboard-balance-card');
   const incomeBadge = DOM.get('income-badge');
   const expenseBadge = DOM.get('expense-badge');
   const balanceEl = DOM.get('total-balance');
   const balanceBadge = DOM.get('balance-badge');
+  const heroGuidance = DOM.get('hero-guidance');
 
   if (!heroDailyEl) {
     return () => {}; // Hero card not present
   }
 
-  let lastAllowance = 0;
-  let lastBalance = 0;
-
   const navigateFromHero = (action: string): void => {
     if (action === 'budget') {
-      (DOM.get('tab-budget-btn') as HTMLButtonElement | null)?.click();
+      (DOM.get('tab-budget-btn'))?.click();
+      // CR-Apr24-I finding 125: guard deferred scroll/focus — bail if the
+      // user navigated away from the budget tab before the timer fires.
       window.setTimeout(() => {
-        const section = DOM.get('envelope-section') as HTMLElement | null;
+        if (signals.activeMainTab.value !== 'budget') return;
+        const section = DOM.get('envelope-section');
         section?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        (DOM.get('open-plan-budget') as HTMLButtonElement | null)?.focus();
+        (DOM.get('open-plan-budget'))?.focus();
       }, 80);
       return;
     }
     if (action === 'transactions') {
-      (DOM.get('tab-transactions-btn') as HTMLButtonElement | null)?.click();
+      (DOM.get('tab-transactions-btn'))?.click();
+      // CR-Apr24-I finding 125: guard deferred reveal — bail if the user
+      // navigated away from the transactions tab before the timer fires.
       window.setTimeout(() => {
+        if (signals.activeMainTab.value !== 'transactions') return;
         revealTransactionsForm('amount', true);
       }, 80);
     }
@@ -230,41 +221,78 @@ function mountHeroCard(): () => void {
   balanceCard?.addEventListener('click', handleBalanceCardClick);
 
   const cleanup = effect(() => {
+    const _cur = signals.currency.value;  // subscribe to currency changes
     const m = dailyMetrics.value;
     const dailyBudget = m.income / m.daysInMonth;
     const noActivity = m.income === 0 && m.expenses === 0;
     const noBudget = signals.dailyAllowanceData.value.status === 'no-budget';
     const previousMonthKey = getPrevMonthKey(signals.currentMonth.value);
     const previousIncome = calcTotals(getMonthTx(previousMonthKey)).income;
-    const monthLabel = parseMonthKey(signals.currentMonth.value).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+    // CR-Apr22-G slice 2: route the "long month + year" formatting through
+    // the canonical locale service so the label honors the user's chosen
+    // locale (`de-DE` → "April 2026" unchanged, `ja-JP` → "2026年4月")
+    // rather than resolving to the browser default via
+    // `toLocaleDateString(undefined, …)`.
+    const monthLabel = formatMonth(parseMonthKey(signals.currentMonth.value));
+    // Design-Review-Apr21 P3 (batch 6 follow-up wave L): caption and
+    // guidance branches below used to hardcode "this month", but the
+    // hero card reactively updates when `signals.currentMonth` moves.
+    // `formatViewedMonthPhrase` keeps "this month" at current-view
+    // default and swaps in an "in April 2026"-style label when a
+    // user navigates to another month — so captions like "Daily
+    // room for the rest of this month" become "Daily room for the
+    // rest of in April 2026" -> phrased as "Daily room for the rest
+    // of April 2026" by inlining without the leading preposition
+    // where the carrier sentence already supplies it. See per-line
+    // applications below (some use the phrase directly, a few past-
+    // /future-month branches use the bare `monthLabel` so the copy
+    // stays grammatical ("Set April 2026 up now..." is right where
+    // "Set this month up now..." is wrong for the viewed-elsewhere
+    // case).
+    const monthPhrase = formatViewedMonthPhrase(signals.currentMonth.value);
+    // Bare label variant (no "in" preposition) for carrier sentences
+    // that already supply their own preposition — "for the rest of
+    // {label}" / "categories driving {label}" — where the phrase
+    // helper's prepended "in" would produce double-preposition
+    // phrasing ("for the rest of in April 2026" ✗).
+    const monthLabelOrThis = formatViewedMonthLabel(signals.currentMonth.value);
 
-    // Daily allowance with animation
+    // Daily allowance with animation (always re-format on currency change)
     if (noActivity && noBudget) {
       heroDailyEl.textContent = '—';
-      lastAllowance = 0;
-    } else if (m.dailyAllowance !== lastAllowance) {
+    } else {
       animateValue(heroDailyEl, m.dailyAllowance);
-      lastAllowance = m.dailyAllowance;
     }
 
     // Style based on allowance status
     heroDailyEl.classList.remove('negative', 'warning');
-    heroDailyEl.style.color = 'var(--color-income)';
     if (noActivity && noBudget) {
       heroDailyEl.style.color = 'var(--text-tertiary)';
     } else if (m.dailyAllowance < 0) {
+      heroDailyEl.style.color = 'var(--color-expense)';
       heroDailyEl.classList.add('negative');
     } else if (m.dailyAllowance < dailyBudget * 0.5) {
+      heroDailyEl.style.color = 'var(--color-warning)';
       heroDailyEl.classList.add('warning');
+    } else {
+      heroDailyEl.style.color = 'var(--color-income)';
     }
 
     if (heroAmountCaption) {
       if (m.isFutureMonth) {
-        heroAmountCaption.textContent = 'Projected daily room for the upcoming month';
+        // Design-Review-Apr21 P3 (batch 6 follow-up wave O): copy
+        // used to read "Projected daily room for the upcoming
+        // month", but the month picker lets users browse
+        // arbitrarily far ahead — July 2027 is not "the upcoming
+        // month". `monthLabel` is already computed above and
+        // resolves to "May 2026", "July 2027", etc., keeping the
+        // caption accurate regardless of how far out the user is
+        // planning.
+        heroAmountCaption.textContent = `Projected daily room for ${monthLabel}`;
       } else if (noActivity && noBudget && m.savings > 0) {
         heroAmountCaption.textContent = `${fmtCur(m.savings)} is already set aside, but you still need income or a budget for a daily target`;
       } else if (m.isPastMonth) {
-        heroAmountCaption.textContent = 'What this month could have supported per day';
+        heroAmountCaption.textContent = `What ${monthLabel} could have supported per day`;
       } else if (noActivity && noBudget) {
         heroAmountCaption.textContent = 'Set a budget or add income to turn this into a real daily target';
       } else if (noBudget) {
@@ -272,9 +300,9 @@ function mountHeroCard(): () => void {
           ? `Estimate based on income, spending, and ${fmtCur(m.savings)} moved to savings`
           : 'Estimate based on income and spending because no budget is set';
       } else if (m.savings > 0) {
-        heroAmountCaption.textContent = `Daily room after ${fmtCur(m.savings)} moved to savings this month`;
+        heroAmountCaption.textContent = `Daily room after ${fmtCur(m.savings)} moved to savings ${monthPhrase}`;
       } else {
-        heroAmountCaption.textContent = 'Daily room for the rest of this month';
+        heroAmountCaption.textContent = `Daily room for the rest of ${monthLabelOrThis}`;
       }
     }
 
@@ -289,53 +317,49 @@ function mountHeroCard(): () => void {
       heroCardEl.dataset.heroState = state;
     }
 
-    // Secondary metrics
-    if (heroLeftEl) {
-      heroLeftEl.textContent = fmtCur(Math.abs(m.remaining));
-      heroLeftEl.style.color = m.remaining >= 0 ? 'var(--color-income)' : 'var(--color-expense)';
-    }
-    // Update label to reflect over-budget state
-    const heroLeftLabel = heroLeftEl?.previousElementSibling as HTMLElement | null;
-    if (heroLeftLabel) {
-      heroLeftLabel.textContent = m.remaining >= 0 ? 'LEFT TO SPEND' : 'OVER BUDGET';
-    }
-
-    if (heroTodayEl) {
-      heroTodayEl.textContent = fmtCur(m.todayExpenses);
-    }
-
     if (heroDaysEl) {
       heroDaysEl.textContent = String(m.daysRemaining);
     }
-
-    // Progress bar
-    const pct = progressPercent.value;
-    if (heroProgressBar) {
-      heroProgressBar.style.width = `${pct}%`;
-      heroProgressBar.setAttribute('aria-valuenow', pct.toFixed(0));
+    // Design-Review-Apr21 P2 (batch 6 follow-up wave O): `daysRemaining`
+    // switches meaning across month states — for a future month it
+    // returns the total `daysInMonth`, not a countdown. With a
+    // hardcoded "days left in month" suffix, a future-month view
+    // read like "30 days left in month" as if a countdown were in
+    // progress. For past/future views the value represents the
+    // month's calendar length, so flip the suffix to "days in
+    // month"; current-month keeps the countdown phrasing.
+    if (heroDaysLabelEl) {
+      heroDaysLabelEl.textContent = m.isCurrentMonth
+        ? 'days left in month'
+        : 'days in month';
     }
-    if (heroProgressPct) {
-      heroProgressPct.textContent = `${pct.toFixed(0)}% complete`;
-    }
 
-    // Badge status
+    // Badge status — synchronized with spending pace indicator
     if (heroBadge) {
+      const pace = signals.spendingPaceData.value;
       if (m.isFutureMonth) setBadge(heroBadge, 'New', 'neutral');
       else if (m.isPastMonth && m.income === 0 && m.expenses === 0) setBadge(heroBadge, 'New', 'neutral');
-      else if (m.isPastMonth) setBadge(heroBadge, 'On Track', 'neutral');
+      else if (m.isPastMonth && m.income > 0 && m.expenses > m.income) setBadge(heroBadge, 'Over Budget', 'negative');
+      else if (m.isPastMonth && m.income > 0 && m.expenses >= m.income * 0.9) setBadge(heroBadge, 'Tight', 'warning');
+      else if (m.isPastMonth) setBadge(heroBadge, 'On Track', 'positive');
       else if (m.income === 0 && m.expenses === 0) setBadge(heroBadge, 'New', 'neutral');
-      else if (m.remaining < 0) setBadge(heroBadge, 'Over', 'negative');
+      else if (m.remaining < 0) setBadge(heroBadge, 'Over Budget', 'negative');
+      else if (pace.status === 'over') setBadge(heroBadge, 'Over Pace', 'warning');
       else if (m.dailyAllowance < dailyBudget * 0.3) setBadge(heroBadge, 'Caution', 'warning');
       else setBadge(heroBadge, 'On Track', 'positive');
     }
 
-    // Motivational messages
+    // Motivational messages + integrated pace status in guidance callout
     if (heroMotivation) {
+      const pace = signals.spendingPaceData.value;
       let message = '';
       if (m.isFutureMonth) {
-        message = 'Set this month up now so the first few transactions land inside a real plan.';
+        // isFutureMonth gates on "not current", so `monthLabel` is
+        // always a specific month — "Set May 2026 up now..."
+        message = `Set ${monthLabel} up now so the first few transactions land inside a real plan.`;
       } else if (m.isPastMonth && noActivity) {
-        message = 'No activity landed in this month, so there is nothing to review yet.';
+        // isPastMonth likewise guarantees a specific month.
+        message = `No activity landed in ${monthLabel}, so there is nothing to review yet.`;
       } else if (noActivity && noBudget && m.savings > 0) {
         message = `Add income or a budget so ${fmtCur(m.savings)} in savings progress turns into a usable plan.`;
       } else if (noActivity && noBudget) {
@@ -351,13 +375,40 @@ function mountHeroCard(): () => void {
       } else if (m.daysRemaining <= 3) {
         message = 'Finish the month cleanly by keeping the last few spending decisions intentional.';
       } else if (m.dailyAllowance > dailyBudget * 1.5) {
-        message = 'You have room this month. Keep it intentional instead of letting the extra room disappear.';
+        message = `You have room ${monthPhrase}. Keep it intentional instead of letting the extra room disappear.`;
       } else if (m.dailyAllowance < dailyBudget * 0.5) {
         message = 'Open Budget or Transactions now to find the pressure point while there is still time to react.';
       } else {
-        message = 'Stay consistent: keep logging spending and check the categories driving this month.';
+        message = `Stay consistent: keep logging spending and check the categories driving ${monthLabelOrThis}.`;
       }
       heroMotivation.textContent = message;
+
+      // Integrate pace status into guidance callout styling
+      if (heroGuidance) {
+        heroGuidance.classList.remove('hero-guidance--positive', 'hero-guidance--warning', 'hero-guidance--danger');
+        // Remove any existing pace status element
+        const existingPace = heroGuidance.querySelector('.hero-guidance__pace');
+        if (existingPace) existingPace.remove();
+
+        const isActiveMonth = !m.isFutureMonth && !m.isPastMonth;
+
+        if (isActiveMonth && pace.status === 'over') {
+          heroGuidance.classList.add(m.remaining < 0 ? 'hero-guidance--danger' : 'hero-guidance--warning');
+          const paceStatusEl = document.createElement('p');
+          paceStatusEl.className = 'hero-guidance__pace';
+          const iconSpan = document.createElement('span');
+          iconSpan.className = 'hero-guidance__pace-icon';
+          iconSpan.textContent = '!';
+          paceStatusEl.appendChild(iconSpan);
+          paceStatusEl.appendChild(document.createTextNode(` ${capPercent(Math.round(pace.difference))}% over pace`));
+          heroGuidance.insertBefore(paceStatusEl, heroGuidance.firstChild);
+        } else if (isActiveMonth && m.remaining < 0) {
+          heroGuidance.classList.add('hero-guidance--danger');
+        } else if (isActiveMonth && !noBudget && m.remaining > 0 && (pace.status === 'under' || pace.status === 'on-track')) {
+          // All-clear state: budget set, under/on pace, positive balance
+          heroGuidance.classList.add('hero-guidance--positive');
+        }
+      }
     }
 
     if (heroPrimaryAction && heroSecondaryAction) {
@@ -397,10 +448,7 @@ function mountHeroCard(): () => void {
     // Balance card
     if (balanceEl) {
       const balance = m.income - m.expenses - m.savings;
-      if (balance !== lastBalance) {
-        animateValue(balanceEl, balance);
-        lastBalance = balance;
-      }
+      animateValue(balanceEl, balance);
       balanceEl.style.color = balance >= 0 ? 'var(--color-income)' : 'var(--color-expense)';
 
       if (balanceBadge) {
@@ -413,7 +461,9 @@ function mountHeroCard(): () => void {
 
     if (incomeBadge) {
       if (m.income === 0) setBadge(incomeBadge, 'New', 'neutral');
+      else if (m.expenses > 0 && m.income < m.expenses * 0.5) setBadge(incomeBadge, 'Low', 'negative');
       else if (previousIncome > 0 && m.income < previousIncome * 0.85) setBadge(incomeBadge, 'Caution', 'warning');
+      else if (m.expenses > 0 && m.income < m.expenses) setBadge(incomeBadge, 'Caution', 'warning');
       else setBadge(incomeBadge, 'Healthy', 'positive');
     }
 
@@ -421,7 +471,7 @@ function mountHeroCard(): () => void {
       if (m.income === 0 && m.expenses === 0) setBadge(expenseBadge, 'New', 'neutral');
       else if (m.income > 0 && m.expenses > m.income) setBadge(expenseBadge, 'Over', 'negative');
       else if (m.income > 0 && m.expenses >= m.income * 0.8) setBadge(expenseBadge, 'Caution', 'warning');
-      else setBadge(expenseBadge, 'On Track', 'positive');
+      else setBadge(expenseBadge, 'Healthy', 'positive');
     }
 
     if (incomeCard) {
@@ -459,9 +509,8 @@ function mountTodayBudget(): () => void {
     return () => {};
   }
 
-  let lastTodayRemaining = 0;
-
   const cleanup = effect(() => {
+    const _cur = signals.currency.value;  // subscribe to currency changes
     const m = dailyMetrics.value;
     const todayRemaining = m.dailyAllowance - m.todayExpenses;
     const noActivity = m.income === 0 && m.expenses === 0;
@@ -470,13 +519,10 @@ function mountTodayBudget(): () => void {
     // Animate today's remaining
     if (m.isFutureMonth) {
       todayEl.textContent = fmtCur(Math.max(0, m.dailyAllowance));
-      lastTodayRemaining = 0;
     } else if (noActivity && noBudget) {
       todayEl.textContent = '—';
-      lastTodayRemaining = 0;
-    } else if (todayRemaining !== lastTodayRemaining) {
+    } else {
       animateValue(todayEl, todayRemaining);
-      lastTodayRemaining = todayRemaining;
     }
     todayEl.style.color = m.isFutureMonth
       ? 'var(--color-accent)'
@@ -512,6 +558,7 @@ function mountMonthlyPace(): () => void {
   const barEl = DOM.get('pace-bar');
   const labelEl = DOM.get('pace-label');
   const markerEl = DOM.get('pace-day-marker');
+  const endLabelEl = DOM.get('pace-end-label');
 
   if (!barEl) {
     return () => {};
@@ -523,11 +570,12 @@ function mountMonthlyPace(): () => void {
     const spendPct = spendingPercent.value;
 
     barEl.style.width = calPct + '%';
-    barEl.style.background = spendPct > calPct ? 'var(--color-expense)' : 'var(--color-income)';
+    barEl.style.background = spendPct > calPct ? 'var(--color-warning)' : 'var(--color-income)';
     barEl.setAttribute('aria-valuenow', String(calPct));
 
-    if (labelEl) labelEl.textContent = `${spendPct}% of income spent`;
+    if (labelEl) labelEl.textContent = `${capPercent(spendPct)}% of income spent`;
     if (markerEl) markerEl.textContent = `Day ${m.dayOfMonth} of ${m.daysInMonth}`;
+    if (endLabelEl) endLabelEl.textContent = `Day ${m.daysInMonth}`;
   });
 
   return cleanup;
@@ -546,9 +594,8 @@ function mountSidebarAllowance(): () => void {
     return () => {};
   }
 
-  let lastAllowance = 0;
-
   const cleanup = effect(() => {
+    const _cur = signals.currency.value;  // subscribe to currency changes
     const data = signals.dailyAllowanceData.value;
 
     if (data.status === 'no-budget') {
@@ -562,10 +609,7 @@ function mountSidebarAllowance(): () => void {
       if (subtitleEl) subtitleEl.textContent = 'Month ended';
       if (badgeEl) setBadge(badgeEl, 'Closed', 'neutral');
     } else {
-      if (data.dailyAllowance !== lastAllowance) {
-        animateValue(amountEl, data.dailyAllowance);
-        lastAllowance = data.dailyAllowance;
-      }
+      animateValue(amountEl, data.dailyAllowance);
 
       if (data.status === 'over') {
         amountEl.style.color = 'var(--color-expense)';
@@ -587,6 +631,58 @@ function mountSidebarAllowance(): () => void {
 }
 
 /**
+ * CR-Apr22-D slice 2 [P1] — pure visual derivation for the spending-pace
+ * indicator. Extracted from `mountSpendingPaceIndicator`'s effect body so
+ * the primary defect (className always contained the literal `hidden`
+ * token) has an explicit test lock: the returned `className` must never
+ * include `hidden`, across all four `SpendingPaceStatus` values plus the
+ * defensive default branch.
+ *
+ * Layout note: `mb-3` is carried through from `index.html` (the HTML
+ * starts with `class="spending-pace-indicator pace-neutral mb-3 hidden"`)
+ * so when the indicator transitions from hidden-by-default to visible via
+ * the effect, the surrounding hero-card layout doesn't collapse.
+ */
+export function computePaceIndicatorVisual(
+  pace: SpendingPaceData
+): { className: string; icon: string; text: string } {
+  let statusClass: string;
+  let statusIcon: string;
+  let statusText: string;
+  switch (pace.status) {
+    case 'no-budget':
+      statusClass = 'pace-neutral';
+      statusIcon = '—';
+      statusText = 'No budget set';
+      break;
+    case 'under':
+      statusClass = 'pace-under';
+      statusIcon = '✓';
+      statusText = `${capPercent(Math.round(Math.abs(pace.difference)))}% under pace`;
+      break;
+    case 'on-track':
+      statusClass = 'pace-on-track';
+      statusIcon = '•';
+      statusText = 'On track';
+      break;
+    case 'over':
+      statusClass = 'pace-over';
+      statusIcon = '!';
+      statusText = `${capPercent(Math.round(pace.difference))}% over pace`;
+      break;
+    default:
+      statusClass = 'pace-neutral';
+      statusIcon = '—';
+      statusText = 'Unknown';
+  }
+  return {
+    className: `spending-pace-indicator ${statusClass} mb-3`,
+    icon: statusIcon,
+    text: statusText
+  };
+}
+
+/**
  * Mount the reactive spending pace indicator
  */
 function mountSpendingPaceIndicator(): () => void {
@@ -598,37 +694,14 @@ function mountSpendingPaceIndicator(): () => void {
 
   const cleanup = effect(() => {
     const pace = signals.spendingPaceData.value;
-
-    let statusClass: string, statusIcon: string, statusText: string;
-    switch (pace.status) {
-      case 'no-budget':
-        statusClass = 'pace-neutral';
-        statusIcon = '—';
-        statusText = 'No budget set';
-        break;
-      case 'under':
-        statusClass = 'pace-under';
-        statusIcon = '✓';
-        statusText = `${Math.abs(pace.difference).toFixed(0)}% under pace`;
-        break;
-      case 'on-track':
-        statusClass = 'pace-on-track';
-        statusIcon = '•';
-        statusText = 'On track';
-        break;
-      case 'over':
-        statusClass = 'pace-over';
-        statusIcon = '!';
-        statusText = `${pace.difference.toFixed(0)}% over pace`;
-        break;
-      default:
-        statusClass = 'pace-neutral';
-        statusIcon = '—';
-        statusText = 'Unknown';
-    }
-
-    paceEl.className = `spending-pace-indicator ${statusClass}`;
-    render(html`<span class="pace-icon">${statusIcon}</span><span class="pace-text">${statusText}</span>`, paceEl);
+    const { className, icon, text } = computePaceIndicatorVisual(pace);
+    // CR-Apr22-D slice 2 [P1]: `className` from the helper intentionally
+    // omits `hidden`. The prior implementation hardcoded `hidden` into
+    // this assignment, so the effect re-ran on every pace change but the
+    // element stayed display:none — a rich, fully-styled dashboard
+    // indicator was dead throughout.
+    paceEl.className = className;
+    render(html`<span class="pace-icon">${icon}</span><span class="pace-text">${text}</span>`, paceEl);
   });
 
   return cleanup;

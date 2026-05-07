@@ -10,23 +10,28 @@
 import { generateId } from './utils-dom.js';
 import { emit } from './event-bus.js';
 import { getTabId } from './tab-id.js';
+import { trackError } from './error-tracker.js';
 
 // ==========================================
 // TYPE DEFINITIONS
 // ==========================================
 
+// Phase 6 Slice 1j (rev 12 L6): optional fields widened to `field?: T | undefined`
+// so callers can pass explicit `undefined` values under
+// `exactOptionalPropertyTypes`. Sync payloads are assembled from remote
+// sources where any of these fields may be legitimately absent.
 export interface BroadcastMessage {
   type: 'state_update' | 'full_sync' | 'ping' | 'reload_request' | 'atomic_sync' | 'conflict_warning';
-  key?: string;
+  key?: string | undefined;
   value?: unknown;
-  revision?: number;
-  changedIds?: string[];
-  changeType?: string;
+  revision?: number | undefined;
+  changedIds?: string[] | undefined;
+  changeType?: string | undefined;
   timestamp: number;
   tabId: string;
-  messageId?: string;
-  atomicBundle?: AtomicSyncBundle;
-  userActivity?: any;
+  messageId?: string | undefined;
+  atomicBundle?: AtomicSyncBundle | undefined;
+  userActivity?: unknown;
 }
 
 export interface AtomicSyncBundle {
@@ -40,26 +45,38 @@ export interface AtomicSyncBundle {
   coupledKeys: string[];
 }
 
+const VALID_MESSAGE_TYPES = new Set<BroadcastMessage['type']>([
+  'state_update',
+  'full_sync',
+  'ping',
+  'reload_request',
+  'atomic_sync',
+  'conflict_warning'
+]);
+
 // ==========================================
 // BROADCAST CHANNEL MANAGEMENT
 // ==========================================
 
 export class BroadcastChannelManager {
   private channel: BroadcastChannel | null = null;
-  private readonly channelName = 'budget_tracker_sync';
+  private readonly channelName = 'harbor_sync';
   private readonly tabId = getTabId();
   private messageHandlers = new Map<string, Set<(msg: BroadcastMessage) => void>>();
   private isInitialized = false;
-  private processedMessages = new Set<string>();
-  private readonly MESSAGE_CACHE_SIZE = 100;
+  private processedMessages = new Map<string, number>();
+  private readonly MESSAGE_TTL_MS = 30000; // 30 seconds
+  private readonly MAX_MESSAGE_AGE_MS = 5 * 60 * 1000;
+  private readonly MAX_FUTURE_SKEW_MS = 10 * 1000;
 
   /**
    * Initialize the broadcast channel
    */
   init(): boolean {
-    if (this.isInitialized || !('BroadcastChannel' in window)) {
-      return false;
-    }
+    // CR-Apr24-I finding 339: return true for idempotent re-init
+    // so callers can distinguish "already live" from "failed".
+    if (this.isInitialized) return true;
+    if (!('BroadcastChannel' in window)) return false;
 
     try {
       this.channel = new BroadcastChannel(this.channelName);
@@ -70,6 +87,12 @@ export class BroadcastChannelManager {
       
       this.channel.onmessageerror = (event) => {
         if (import.meta.env.DEV) console.error('BroadcastChannel message error:', event);
+        // SYNC-02: surface in production so dropped messages are observable
+        trackError(
+          new Error('BroadcastChannel message deserialization failed'),
+          { module: 'MultiTabSync', action: 'onmessageerror' },
+          'error'
+        );
       };
       
       this.isInitialized = true;
@@ -108,20 +131,28 @@ export class BroadcastChannelManager {
   /**
    * Handle incoming message
    */
-  private handleMessage(message: BroadcastMessage): void {
+  private handleMessage(message: unknown): void {
+    if (!this.isValidMessage(message)) {
+      if (import.meta.env.DEV) console.warn('Ignoring invalid BroadcastChannel payload', message);
+      return;
+    }
+
     // Ignore our own messages
     if (message.tabId === this.tabId) {
       return;
     }
 
-    // Ignore already processed messages (deduplication)
-    if (message.messageId && this.processedMessages.has(message.messageId)) {
+    // Validate that messageId exists before processing
+    if (!message.messageId) {
       return;
     }
 
-    if (message.messageId) {
-      this.addToProcessed(message.messageId);
+    // Ignore already processed messages (deduplication)
+    if (this.processedMessages.has(message.messageId)) {
+      return;
     }
+
+    this.addToProcessed(message.messageId);
 
     // Notify handlers
     const handlers = this.messageHandlers.get(message.type);
@@ -137,6 +168,110 @@ export class BroadcastChannelManager {
 
     // Emit generic event
     emit('broadcast:message', message);
+  }
+
+  private isValidMessage(message: unknown): message is BroadcastMessage {
+    if (!message || typeof message !== 'object') {
+      return false;
+    }
+
+    const candidate = message as Partial<BroadcastMessage>;
+    if (!VALID_MESSAGE_TYPES.has(candidate.type as BroadcastMessage['type'])) {
+      return false;
+    }
+
+    if (typeof candidate.tabId !== 'string' || candidate.tabId.trim().length === 0) {
+      return false;
+    }
+
+    if (typeof candidate.messageId !== 'string' || candidate.messageId.trim().length === 0) {
+      return false;
+    }
+
+    if (typeof candidate.timestamp !== 'number' || !Number.isFinite(candidate.timestamp)) {
+      return false;
+    }
+
+    const now = Date.now();
+    if (candidate.timestamp < now - this.MAX_MESSAGE_AGE_MS) {
+      return false;
+    }
+
+    if (candidate.timestamp > now + this.MAX_FUTURE_SKEW_MS) {
+      return false;
+    }
+
+    if (candidate.key !== undefined && typeof candidate.key !== 'string') {
+      return false;
+    }
+
+    if (candidate.revision !== undefined && !Number.isFinite(candidate.revision)) {
+      return false;
+    }
+
+    if (candidate.changedIds !== undefined) {
+      if (!Array.isArray(candidate.changedIds) || candidate.changedIds.some((id) => typeof id !== 'string')) {
+        return false;
+      }
+    }
+
+    if (candidate.atomicBundle !== undefined && !this.isValidAtomicBundle(candidate.atomicBundle)) {
+      return false;
+    }
+
+    switch (candidate.type) {
+      case 'state_update':
+      case 'conflict_warning':
+        return typeof candidate.key === 'string' && candidate.key.trim().length > 0;
+      case 'atomic_sync':
+        return this.isValidAtomicBundle(candidate.atomicBundle);
+      case 'full_sync':
+      case 'ping':
+      case 'reload_request':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  private isValidAtomicBundle(bundle: unknown): bundle is AtomicSyncBundle {
+    if (!bundle || typeof bundle !== 'object') {
+      return false;
+    }
+
+    const candidate = bundle as Partial<AtomicSyncBundle>;
+    if (typeof candidate.bundleId !== 'string' || candidate.bundleId.trim().length === 0) {
+      return false;
+    }
+
+    if (typeof candidate.bundleTimestamp !== 'number' || !Number.isFinite(candidate.bundleTimestamp)) {
+      return false;
+    }
+
+    if (!Array.isArray(candidate.coupledKeys) || candidate.coupledKeys.some((key) => typeof key !== 'string')) {
+      return false;
+    }
+
+    if (!Array.isArray(candidate.atomicUpdates)) {
+      return false;
+    }
+
+    return candidate.atomicUpdates.every((update) => {
+      if (!update || typeof update !== 'object') {
+        return false;
+      }
+
+      const candidateUpdate = update as Partial<AtomicSyncBundle['atomicUpdates'][number]>;
+      if (typeof candidateUpdate.key !== 'string' || candidateUpdate.key.trim().length === 0) {
+        return false;
+      }
+
+      if (candidateUpdate.checksum !== undefined && typeof candidateUpdate.checksum !== 'string') {
+        return false;
+      }
+
+      return true;
+    });
   }
 
   /**
@@ -207,7 +342,7 @@ export class BroadcastChannelManager {
   /**
    * Send conflict warning
    */
-  sendConflictWarning(key: string, userActivity?: any): void {
+  sendConflictWarning(key: string, userActivity?: unknown): void {
     this.send({
       type: 'conflict_warning',
       key,
@@ -216,20 +351,17 @@ export class BroadcastChannelManager {
   }
 
   /**
-   * Add message ID to processed cache
+   * Add message ID to processed cache with TTL-based cleanup
    */
   private addToProcessed(messageId: string): void {
-    this.processedMessages.add(messageId);
-    
-    // Cleanup old messages if cache is too large
-    if (this.processedMessages.size > this.MESSAGE_CACHE_SIZE) {
-      const toDelete = this.processedMessages.size - this.MESSAGE_CACHE_SIZE;
-      const iterator = this.processedMessages.values();
-      for (let i = 0; i < toDelete; i++) {
-        const result = iterator.next();
-        if (!result.done) {
-          this.processedMessages.delete(result.value);
-        }
+    const now = Date.now();
+    this.processedMessages.set(messageId, now);
+
+    // Cleanup expired messages (older than MESSAGE_TTL_MS)
+    const expireTime = now - this.MESSAGE_TTL_MS;
+    for (const [id, timestamp] of this.processedMessages.entries()) {
+      if (timestamp < expireTime) {
+        this.processedMessages.delete(id);
       }
     }
   }

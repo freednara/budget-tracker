@@ -78,27 +78,25 @@ vi.mock('../js/modules/core/data-sync-interface.js', () => ({
 import { DataManager } from '../js/modules/data/data-manager.js';
 import { lsGet, lsSet } from '../js/modules/core/state.js';
 import type { Transaction, DataHandler } from '../js/types/index.js';
+import { createTx as createBaseTx } from './helpers/fixtures.js';
 
-const SK_TX = 'budget_tracker_transactions';
+const SK_TX = 'harbor_transactions';
 
 // ==========================================
 // HELPERS
 // ==========================================
 
+/**
+ * Local wrapper around the shared fixture builder that sets this file's
+ * historical defaults: `reconciled: true` and the `2024-01-15` date that
+ * several of the chaos tests depend on.
+ */
 function createTx(overrides: Partial<Transaction> = {}): Transaction {
-  return {
-    __backendId: `tx_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-    type: 'expense',
-    amount: 50,
-    category: 'food',
-    description: 'Test',
-    date: '2024-01-15',
-    currency: 'USD',
-    recurring: false,
+  return createBaseTx({
     reconciled: true,
-    splits: false,
+    date: '2024-01-15',
     ...overrides,
-  };
+  });
 }
 
 function handler(): DataHandler {
@@ -184,7 +182,7 @@ describe('Atomic Rollback Chaos Tests', () => {
     // Verify original data is intact
     const finalStored = lsGet(SK_TX, []) as Transaction[];
     expect(finalStored).toHaveLength(3);
-    expect(finalStored[1].amount).toBe(100); // Unchanged
+    expect(finalStored[1]?.amount).toBe(100); // Unchanged
   });
 
   it('rolls back all changes when last operation in sequence fails', async () => {
@@ -261,7 +259,7 @@ describe('Atomic Rollback Chaos Tests', () => {
     // Make lsSet always fail (simulating quota exceeded)
     vi.mocked(lsSet).mockReturnValue(false);
 
-    const hugeBatch = Array.from({ length: 100 }, (_, i) =>
+    const hugeBatch = Array.from({ length: 100 }, () =>
       createTx({
         amount: Math.random() * 1000,
         date: '2024-01-15',

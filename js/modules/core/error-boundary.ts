@@ -6,22 +6,15 @@
  */
 'use strict';
 
-import { showToast } from '../ui/core/ui.js';
-import { logError } from './utils.js';
+import { emit, Events } from './event-bus.js';
+import { logError } from './utils-pure.js';
 // FIXED: Using centralized error tracker to eliminate duplication
-import { 
-  trackError,
+import {
   updateCircuitBreaker,
   resetCircuitBreaker,
   isCircuitOpen as isCircuitOpenFromTracker,
   getErrorRate as getErrorRateFromTracker
 } from './error-tracker.js';
-import { 
-  ErrorState,
-  createErrorState,
-  createSuccessState,
-  CriticalPath 
-} from './error-state.js';
 
 // ==========================================
 // TYPE DEFINITIONS
@@ -38,14 +31,18 @@ export interface ErrorContext {
   retry?: boolean;
   maxRetries?: number;
   userMessage?: string;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
+// Phase 6 Slice 1j (rev 12 L6): optional fields widened for
+// `exactOptionalPropertyTypes` — the failure branch constructs this
+// with `error: caughtErr | undefined` where `caughtErr` flows through
+// a `catch (e: unknown)` cast.
 export interface ErrorResult<T> {
   success: boolean;
-  data?: T;
-  error?: Error;
-  retries?: number;
+  data?: T | undefined;
+  error?: Error | undefined;
+  retries?: number | undefined;
 }
 
 // Re-export error state types for convenience
@@ -114,7 +111,9 @@ export class ErrorBoundary {
         
         return { success: true, data, retries: attempt };
       } catch (error) {
-        lastError = error as Error;
+        // CR-Apr24-I finding 265: normalize non-Error throws so circuit-
+        // breaker state and the returned `lastError` are always real Errors.
+        lastError = error instanceof Error ? error : new Error(String(error));
         updateCircuitBreaker(context.operation, lastError);
         
         // Don't retry on validation errors
@@ -166,20 +165,33 @@ export class ErrorBoundary {
     const { stopOnError = false, parallel = true } = options || {};
     const succeeded: R[] = [];
     const failed: Array<{ item: T; error: Error }> = [];
-    
-    if (parallel) {
-      // Parallel execution
+
+    // CR-Apr24-G finding 260: when stopOnError is requested, use sequential
+    // execution regardless of parallel flag. Promise.allSettled fires all
+    // operations up front, so "stop on error" after allSettled is misleading
+    // — all side effects have already run by the time we check results.
+    if (parallel && !stopOnError) {
+      // Parallel execution (no fail-fast needed)
       const results = await Promise.allSettled(
         items.map(item => operation(item))
       );
-      
+
       for (let i = 0; i < results.length; i++) {
+        // Phase 6 Slice 1i (rev 12 L6): both `results[i]` and
+        // `items[i]` are `T | undefined` under
+        // `noUncheckedIndexedAccess`. The arrays are index-aligned
+        // by construction (one result per item), so a missing entry
+        // means the iteration bounds are broken — skip defensively.
         const result = results[i];
+        const item = items[i];
+        if (!result || item === undefined) continue;
         if (result.status === 'fulfilled') {
           succeeded.push(result.value);
         } else {
-          failed.push({ item: items[i], error: result.reason });
-          if (stopOnError) break; // Stop collecting results but don't throw from inside iteration
+          // PromiseSettledResult.reason is typed `any`; narrow before storing.
+          const reason: unknown = result.reason;
+          const reasonError = reason instanceof Error ? reason : new Error(String(reason));
+          failed.push({ item, error: reasonError });
         }
       }
     } else {
@@ -188,7 +200,10 @@ export class ErrorBoundary {
         try {
           succeeded.push(await operation(item));
         } catch (error) {
-          failed.push({ item, error: error as Error });
+          // CR-Apr24-I finding 261: normalize non-Error throws the same
+          // way the parallel branch does, so failed[] always holds Errors.
+          const normalizedError = error instanceof Error ? error : new Error(String(error));
+          failed.push({ item, error: normalizedError });
           if (stopOnError) {
             this.handleError(error, context);
             break;
@@ -200,7 +215,7 @@ export class ErrorBoundary {
     // Report failures
     if (failed.length > 0 && !context.silent) {
       const message = `${context.operation}: ${succeeded.length} succeeded, ${failed.length} failed`;
-      showToast(message, 'info');
+      emit(Events.SHOW_TOAST, { message, type: 'info' });
     }
     
     return { succeeded, failed };
@@ -211,7 +226,7 @@ export class ErrorBoundary {
    * FIXED: Now returns ErrorState instead of undefined to prevent ghost data
    */
   private static handleError<T>(
-    error: any,
+    error: unknown,
     context: ErrorContext
   ): T | undefined {
     const err = error instanceof Error ? error : new Error(String(error));
@@ -237,17 +252,17 @@ export class ErrorBoundary {
       
       switch (severity) {
         case 'critical':
-          showToast(`⚠️ Critical: ${message}`, 'error');
+          emit(Events.SHOW_TOAST, { message, type: 'error' });
           // Re-throw critical errors to prevent silent failures
           if (isCritical && !context.metadata?.fallback) {
             throw err;
           }
           break;
         case 'high':
-          showToast(`❌ ${message}`, 'error');
+          emit(Events.SHOW_TOAST, { message, type: 'error' });
           break;
         case 'medium':
-          showToast(`⚠️ ${message}`, 'info');
+          emit(Events.SHOW_TOAST, { message, type: 'info' });
           break;
         case 'low':
           // Log only, no user notification
@@ -296,29 +311,29 @@ export class ErrorBoundary {
   private static getUserMessage(error: Error, context: ErrorContext): string {
     // Check for specific error types
     if (error.name === 'QuotaExceededError') {
-      return 'Storage full - please clear some data';
+      return 'Your storage is full \u2014 try clearing old data or backups in Settings.';
     }
-    
+
     if (error.message.includes('network')) {
-      return 'Connection issue - please check your internet';
+      return 'Couldn\u2019t connect \u2014 check your internet and try again.';
     }
-    
+
     if (error.message.includes('permission')) {
-      return 'Permission denied - please check your settings';
+      return 'Permission denied \u2014 check your browser settings and try again.';
     }
-    
+
     // Category-based messages
     switch (context.category) {
       case 'validation':
-        return 'Invalid input - please check your data';
+        return 'Something doesn\u2019t look right \u2014 double-check your input and try again.';
       case 'storage':
-        return 'Failed to save data';
+        return 'Couldn\u2019t save your data \u2014 storage may be full.';
       case 'calculation':
-        return 'Calculation error - please verify numbers';
+        return 'Something went wrong with that calculation \u2014 verify your numbers and try again.';
       case 'network':
-        return 'Network error - please try again';
+        return 'Couldn\u2019t connect \u2014 check your internet and try again.';
       default:
-        return `Operation failed: ${context.operation}`;
+        return 'Something went wrong. Try again, or refresh the page if the problem continues.';
     }
   }
   
@@ -327,8 +342,8 @@ export class ErrorBoundary {
    */
   private static reportError(error: Error, context: ErrorContext, severity: ErrorSeverity): void {
     // Integration point for error reporting service
-    if (typeof window !== 'undefined' && (window as any).errorReporter) {
-      (window as any).errorReporter.report({
+    if (typeof window !== 'undefined' && window.errorReporter) {
+      window.errorReporter.report({
         error: {
           name: error.name,
           message: error.message,
@@ -362,12 +377,15 @@ export async function withNetwork<T>(
   operation: () => Promise<T>,
   operationName: string
 ): Promise<T | undefined> {
-  return ErrorBoundary.wrapAsync(operation, {
+  // CR-Apr24-G finding 259: was calling wrapAsync which ignores retry/maxRetries.
+  // Use wrapWithRetry so the advertised retry behavior actually executes.
+  const result = await ErrorBoundary.wrapWithRetry(operation, {
     operation: operationName,
     category: 'network',
     retry: true,
     maxRetries: 3
   });
+  return result.success ? result.data : undefined;
 }
 
 /**
@@ -387,18 +405,24 @@ export async function withStorage<T>(
 /**
  * Calculation operation wrapper
  */
+// CR-Apr24-I finding 262: when `fallbackValue` is omitted the return
+// type must widen to `T | undefined` — the old non-null assertion hid
+// an `undefined` escape.  Overloads preserve the strict `T` return for
+// callers that do supply a fallback, keeping existing call-sites clean.
+export function withCalculation<T>(operation: () => T, operationName: string, fallbackValue: T): T;
+export function withCalculation<T>(operation: () => T, operationName: string): T | undefined;
 export function withCalculation<T>(
   operation: () => T,
   operationName: string,
   fallbackValue?: T
-): T {
+): T | undefined {
   const result = ErrorBoundary.wrap(operation, {
     operation: operationName,
     category: 'calculation',
     severity: 'high'
   });
-  
-  return result !== undefined ? result : fallbackValue!;
+
+  return result !== undefined ? result : fallbackValue;
 }
 
 /**
@@ -434,12 +458,20 @@ export function withValidation<T>(
 // GLOBAL ERROR HANDLERS
 // ==========================================
 
+// CR-Apr24-G finding 263: track installed listeners so setupGlobalErrorHandlers
+// is idempotent and can be torn down by cleanupGlobalErrorHandlers.
+let _globalRejectionHandler: ((event: PromiseRejectionEvent) => void) | null = null;
+let _globalErrorHandler: ((event: ErrorEvent) => void) | null = null;
+
 /**
  * Set up global error handlers
  */
 export function setupGlobalErrorHandlers(): void {
+  // CR-Apr24-G finding 263: guard against double-installation.
+  if (_globalRejectionHandler || _globalErrorHandler) return;
+
   // Handle unhandled promise rejections
-  window.addEventListener('unhandledrejection', (event) => {
+  _globalRejectionHandler = (event: PromiseRejectionEvent) => {
     ErrorBoundary.wrap(() => {
       throw event.reason;
     }, {
@@ -447,15 +479,17 @@ export function setupGlobalErrorHandlers(): void {
       severity: 'high',
       metadata: { promise: event.promise }
     });
-    
-    // Prevent default browser behavior
     event.preventDefault();
-  });
-  
+  };
+  window.addEventListener('unhandledrejection', _globalRejectionHandler);
+
   // Handle global errors
-  window.addEventListener('error', (event) => {
+  _globalErrorHandler = (event: ErrorEvent) => {
+    // CR-Apr24-G finding 264 (P3 bonus): use event.message when event.error
+    // is undefined (script/resource load failures).
+    const errorValue: unknown = event.error ?? event.message ?? 'Unknown global error';
     ErrorBoundary.wrap(() => {
-      throw event.error;
+      throw errorValue instanceof Error ? errorValue : new Error(String(errorValue));
     }, {
       operation: 'Global Error',
       severity: 'critical',
@@ -466,10 +500,23 @@ export function setupGlobalErrorHandlers(): void {
         column: event.colno
       }
     });
-    
-    // Prevent default browser behavior
     event.preventDefault();
-  });
+  };
+  window.addEventListener('error', _globalErrorHandler);
+}
+
+/**
+ * Tear down global error handlers installed by setupGlobalErrorHandlers.
+ */
+export function cleanupGlobalErrorHandlers(): void {
+  if (_globalRejectionHandler) {
+    window.removeEventListener('unhandledrejection', _globalRejectionHandler);
+    _globalRejectionHandler = null;
+  }
+  if (_globalErrorHandler) {
+    window.removeEventListener('error', _globalErrorHandler);
+    _globalErrorHandler = null;
+  }
 }
 
 // ==========================================

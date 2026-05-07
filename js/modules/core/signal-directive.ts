@@ -10,7 +10,7 @@
 'use strict';
 
 import { AsyncDirective, directive } from 'lit-html/async-directive.js';
-import type { DirectiveResult, PartInfo, PartType } from 'lit-html/directive.js';
+import type { DirectiveResult } from 'lit-html/directive.js';
 import { effect } from '@preact/signals-core';
 import type { Signal, ReadonlySignal } from '@preact/signals-core';
 
@@ -19,7 +19,9 @@ import type { Signal, ReadonlySignal } from '@preact/signals-core';
  * and updates the lit-html part when the signal value changes.
  */
 class SignalDirective extends AsyncDirective {
-  private cleanup?: () => void;
+  // Phase 6 Slice 1j (rev 12 L6): widened for `exactOptionalPropertyTypes`
+  // — `this.cleanup = undefined` is used after invoking the unsubscribe.
+  private cleanup?: (() => void) | undefined;
   private _connected = true;
 
   /**
@@ -120,7 +122,7 @@ export const sig = directive(SignalDirective);
 /**
  * Type helper for the sig directive result
  */
-export type SigDirectiveResult<T> = DirectiveResult<typeof SignalDirective>;
+export type SigDirectiveResult = DirectiveResult<typeof SignalDirective>;
 
 /**
  * Helper function to create a reactive text binding

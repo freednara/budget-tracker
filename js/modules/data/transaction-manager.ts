@@ -4,6 +4,8 @@
  * for multi-step operations that must succeed or fail as a unit
  */
 
+import { trackError } from '../core/error-tracker.js';
+
 // ==========================================
 // TYPES AND INTERFACES
 // ==========================================
@@ -16,16 +18,19 @@ export interface Operation<T> {
    * Execute the operation
    */
   execute(): Promise<T>;
-  
+
   /**
    * Rollback the operation if it was executed
    */
   rollback(): Promise<void>;
-  
+
   /**
    * Optional operation name for debugging
    */
-  name?: string;
+  // Phase 6 Slice 1j (rev 12 L6): widened for `exactOptionalPropertyTypes`
+  // — `createAtomicOperation(execute, rollback, name?)` forwards the
+  // optional `name` parameter straight into the payload.
+  name?: string | undefined;
 }
 
 /**
@@ -55,8 +60,13 @@ interface ExecutedOperation<T> {
  * Manages atomic transactions with rollback capability
  */
 export class TransactionManager {
-  private operations: Operation<any>[] = [];
-  private executed: ExecutedOperation<any>[] = [];
+  // Phase 6 cleanup (no-explicit-any sweep): the operations queue is
+  // heterogeneous — each entry is an `Operation<T>` for a different T.
+  // `Operation<unknown>` works as the storage shape because T appears
+  // only in covariant position (`execute(): Promise<T>`), so any
+  // `Operation<T>` is assignable to `Operation<unknown>`.
+  private operations: Operation<unknown>[] = [];
+  private executed: ExecutedOperation<unknown>[] = [];
   private committed = false;
   
   /**
@@ -80,26 +90,26 @@ export class TransactionManager {
     }
     
     this.committed = true;
-    const results: any[] = [];
+    const results: unknown[] = [];
     
     try {
-      // Execute all operations in sequence
+      // Execute all operations in sequence.
+      //
+      // Phase 5g-1 (Inline-Behavior-Review rev 12, L48 part 1): removed
+      // an unused `const startTime = performance.now();` local and its
+      // paired empty `if (operation.name) { /* timing metrics */ }`
+      // block. The per-op timing telemetry was never wired up — if
+      // instrumentation gets added back, reintroduce both deliberately.
       for (const operation of this.operations) {
-        const startTime = performance.now();
         const result = await operation.execute();
-        
+
         this.executed.push({
           operation,
           result,
           timestamp: Date.now()
         });
-        
+
         results.push(result);
-        
-        // Log operation success
-        if (operation.name) {
-          // Transaction operation completed with timing metrics
-        }
       }
       
       return {
@@ -107,16 +117,28 @@ export class TransactionManager {
         results
       };
     } catch (error) {
-      if (import.meta.env.DEV) console.error('Transaction failed, initiating rollback:', error);
-      
+      // rev 12 L48-partial (#32 observability): transaction failure and
+      // subsequent rollback were DEV-only-logged; surface via trackError so
+      // prod partial-failure isn't silent.
+      trackError(error instanceof Error ? error : new Error(String(error)), {
+        module: 'TransactionManager',
+        action: 'commit_failed_initiating_rollback',
+      });
+
+      // Snapshot already-executed results BEFORE rollback — rollbackAll()
+      // clears `this.executed` on exit, so the current post-rollback
+      // `this.executed.map(e => e.result)` always returned []. Capturing
+      // here preserves observability into what succeeded pre-failure.
+      const executedResults = this.executed.map(e => e.result);
+
       // Rollback all executed operations
       const rollbackResult = await this.rollbackAll();
-      
+
       return {
         success: false,
         error: error as Error,
         rolledBack: rollbackResult.success,
-        results: this.executed.map(e => e.result)
+        results: executedResults
       };
     }
   }
@@ -133,12 +155,20 @@ export class TransactionManager {
     for (const { operation } of toRollback) {
       try {
         await operation.rollback();
-        
-        if (operation.name) {
-          // Rollback operation completed
-        }
+        // Phase 5g-1 (Inline-Behavior-Review rev 12, L48 part 1): removed
+        // the symmetric `if (operation.name) { /* rollback success log */ }`
+        // empty-body block. Rollback *failures* are already surfaced via
+        // the trackError() call below — success path never needed a log.
       } catch (error) {
-        if (import.meta.env.DEV) console.error(`Rollback failed for operation ${operation.name}:`, error);
+        // rev 12 L48-partial (#32 observability): individual rollback
+        // failures previously DEV-only-logged then disappeared into the
+        // local `errors[]` (which the caller never sees — TransactionResult
+        // exposes only `rolledBack: boolean`). Route through trackError so
+        // every rollback failure is surfaced in prod telemetry.
+        trackError(error instanceof Error ? error : new Error(String(error)), {
+          module: 'TransactionManager',
+          action: `rollback_failed_${operation.name ?? 'unnamed'}`,
+        });
         errors.push(error as Error);
       }
     }
@@ -312,8 +342,8 @@ export function noOpOperation<T>(value: T): Operation<T> {
  * Execute operations with automatic rollback on failure
  */
 export async function withTransaction<T>(
-  operations: Operation<any>[],
-  handler: (results: any[]) => T
+  operations: Operation<unknown>[],
+  handler: (results: unknown[]) => T
 ): Promise<T> {
   const transaction = new TransactionManager();
   

@@ -9,7 +9,9 @@
 'use strict';
 
 import { html, render, nothing, styleMap, type LitTemplate } from '../core/lit-helpers.js';
-import { parseLocalDate } from '../core/utils.js';
+import { parseLocalDate } from '../core/utils-pure.js';
+import { formatDateShort } from '../core/locale-service.js';
+import { userCategoryConfig } from '../core/category-store.js';
 import type { Transaction, CategoryChild, TransactionType } from '../../types/index.js';
 
 // ==========================================
@@ -35,6 +37,16 @@ const catInfoCache = new Map<string, CategoryChild>();
 export function clearCatInfoCache(): void {
   catInfoCache.clear();
 }
+
+// Auto-invalidate on any userCategoryConfig write \u2014 catches all four writers
+// (category-store data actions, syncState.applyKeyUpdate, storage-events,
+// and the import-export atomic-write path). Fixes H14 (Inline-Behavior-Review
+// rev 12) without requiring a call-site for each writer, and stays correct as
+// new writers are added. The first invocation fires on module import with
+// `userCategoryConfig`'s initial value; clearing an empty cache is a no-op.
+userCategoryConfig.subscribe(() => {
+  catInfoCache.clear();
+});
 
 // ==========================================
 // TRANSACTION ROW TEMPLATE
@@ -92,7 +104,7 @@ export function transactionRowTemplate(
           <div class="flex items-center gap-2 mb-1">
             <p class="font-bold text-sm truncate" style="color: var(--text-primary);">${t.description || cat.name}</p>${t.recurring ? html`<span class="insight-badge insight-up text-xs">↻ ${t.recurring_type || ''}</span>` : nothing}${splitIcon}
           </div>
-          <p class="text-xs" style="color: var(--text-secondary);">${parseLocalDate(t.date).toLocaleDateString()} · ${cat.name}</p>
+          <p class="text-xs" style="color: var(--text-secondary);">${formatDateShort(parseLocalDate(t.date))} · ${cat.name}</p>
           <div class="flex gap-1 flex-wrap mt-1">${tagsList.map(tag => html`<span class="tag-badge">${tag}</span>`)}</div>
         </div>
         <div class="text-right shrink-0">
@@ -100,9 +112,9 @@ export function transactionRowTemplate(
         </div>
         <div class="desktop-actions flex gap-1">
           <button class="reconcile-btn min-w-11 min-h-11 p-2 rounded-lg hover:opacity-70 flex items-center justify-center text-xl font-bold" data-id=${t.__backendId} title=${t.reconciled ? 'Reconciled - click to unmark' : 'Click to mark as reconciled'} aria-label=${t.reconciled ? 'Mark as unreconciled' : 'Mark as reconciled'} style=${reconcileBtnStyle}>${t.reconciled ? '☑' : '☐'}</button>
-          <button class="split-btn min-w-11 min-h-11 p-2 rounded-lg hover:opacity-70 flex items-center justify-center" data-id=${t.__backendId} title="Split transaction" aria-label="Split this transaction into multiple categories" style="color: var(--color-purple);">✂️</button>
-          <button class="edit-btn min-w-11 min-h-11 p-2 rounded-lg hover:opacity-70 flex items-center justify-center" data-id=${t.__backendId} title="Edit" aria-label="Edit this transaction" style="color: var(--color-accent);">✏️</button>
-          <button class="delete-btn min-w-11 min-h-11 p-2 rounded-lg hover:opacity-70 flex items-center justify-center" data-id=${t.__backendId} title="Delete" aria-label="Delete this transaction" style="color: var(--color-expense);">✕</button>
+          <button class="split-btn min-w-11 min-h-11 p-2 rounded-lg hover:opacity-70 flex items-center justify-center text-purple" data-id=${t.__backendId} title="Split transaction" aria-label="Split this transaction into multiple categories">✂️</button>
+          <button class="edit-btn min-w-11 min-h-11 p-2 rounded-lg hover:opacity-70 flex items-center justify-center text-accent" data-id=${t.__backendId} title="Edit" aria-label="Edit this transaction">✏️</button>
+          <button class="delete-btn min-w-11 min-h-11 p-2 rounded-lg hover:opacity-70 flex items-center justify-center text-expense" data-id=${t.__backendId} title="Delete" aria-label="Delete this transaction">✕</button>
         </div>
       </div>
     </div>

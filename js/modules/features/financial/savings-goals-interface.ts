@@ -25,7 +25,10 @@ export interface SavingsContribution {
   id: string;
   goalId: string;
   amount: number;
+  /** User-chosen date in `YYYY-MM-DD` (drives transaction placement). */
   date: string;
+  /** Wall-clock ISO timestamp at time of entry — used for velocity/forecast math. Optional for legacy records. */
+  createdAt?: string;
   note?: string;
 }
 

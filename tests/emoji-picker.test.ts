@@ -44,21 +44,25 @@ describe('emoji-picker accessibility', () => {
     const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.emoji-tab'));
     expect(tabs.length).toBeGreaterThan(1);
 
-    tabs[0].focus();
-    tabs[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    const firstTab = tabs[0];
+    if (!firstTab) throw new Error('expected at least one emoji tab');
+    firstTab.focus();
+    firstTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
 
     const selectedTab = document.querySelector<HTMLButtonElement>('.emoji-tab[aria-selected="true"]');
     expect(selectedTab).not.toBeNull();
-    expect(selectedTab).not.toBe(tabs[0]);
+    expect(selectedTab).not.toBe(firstTab);
 
     const emojiButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.emoji-cell'));
     expect(emojiButtons.length).toBeGreaterThan(1);
 
-    emojiButtons[1].focus();
-    emojiButtons[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    const secondEmoji = emojiButtons[1];
+    if (!secondEmoji) throw new Error('expected at least two emoji cells');
+    secondEmoji.focus();
+    secondEmoji.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
 
     const hiddenInput = document.getElementById('custom-cat-emoji') as HTMLInputElement;
-    expect(hiddenInput.value).toBe(emojiButtons[1].dataset.emoji);
+    expect(hiddenInput.value).toBe(secondEmoji.dataset.emoji);
     expect(document.getElementById('emoji-picker-dropdown')?.classList.contains('hidden')).toBe(true);
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
   });

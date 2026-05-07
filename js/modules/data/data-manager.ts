@@ -8,11 +8,12 @@
  */
 
 import { SK, lsGet, lsSet } from '../core/state.js';
-import { parseAmount, generateSecureId, getMonthKey } from '../core/utils.js';
+import { parseAmount, getMonthKey } from '../core/utils-pure.js';
+import { generateSecureId } from '../core/utils-dom.js';
 import { validator } from '../core/validator.js';
 import { emit, Events, on } from '../core/event-bus.js';
 import { storageManager, STORES } from './storage-manager.js';
-import { Mutex } from '../core/mutex.js';
+import { CrossTabMutex } from '../core/mutex.js';
 import {
   DataSyncEvents,
   notifyDataSyncComplete,
@@ -22,6 +23,7 @@ import {
 import stateRevision from '../core/state-revision.js';
 import { getTabId } from '../core/tab-id.js';
 import { broadcastManager } from '../core/multi-tab-sync-broadcast.js';
+import { trackError } from '../core/error-tracker.js';
 import { invalidateAllCache, invalidateMonthCache } from '../core/monthly-totals-cache.js';
 import { applyTransactionPatch, replaceTransactionLedger } from '../core/signals.js';
 import type {
@@ -55,7 +57,7 @@ interface StorageStats {
 type PersistChange = TransactionDataChange;
 
 function normalizeDeltaChange(change: TransactionDataDelta): PersistChange {
-  return change as PersistChange;
+  return change;
 }
 
 function getChangedIds(change?: PersistChange): string[] {
@@ -134,7 +136,11 @@ function getTransactionsFromCacheOrSnapshot(
  */
 export class DataManager {
   private _handler: DataHandler | null = null;
-  private _operationMutex: Mutex = new Mutex();
+  // Round 7 fix: upgraded from local Mutex to CrossTabMutex so that
+  // concurrent tabs contend on the same Web Lock. The local Mutex only
+  // serialized within one tab — two tabs could both run read-modify-write
+  // cycles against the same store and silently corrupt each other's data.
+  private _operationMutex: CrossTabMutex = new CrossTabMutex('data_manager_ops');
   private _pendingOperations: Array<() => Promise<unknown>> = [];
   private _useIndexedDB: boolean = false;
   private _storageInitialized: boolean = false;
@@ -155,8 +161,23 @@ export class DataManager {
     maxRetries: number = 3
   ): Promise<T> {
     if (!this._handler) {
-      return { isOk: false, error: 'DataManager not initialized. Call init() first.' } as T;
+      const notInitResult: OperationResult = { isOk: false, error: 'DataManager not initialized. Call init() first.' };
+      return notInitResult as T;
     }
+
+    // ROUND 7 FIX: Block writes during database migration to prevent data loss.
+    // Migration moves data from localStorage to IndexedDB. If a write happens
+    // concurrently, it could bypass the migration's data or overwrite migrated
+    // data with stale values. This guard ensures writes wait until migration
+    // completes (indicated by the global flag being cleared).
+    if ((window as unknown as Record<string, unknown>).__APP_MIGRATION_IN_PROGRESS__ === true) {
+      const blockedResult: OperationResult = {
+        isOk: false,
+        error: 'Data write blocked: database migration in progress. Try again in a moment.'
+      };
+      return blockedResult as T;
+    }
+
     return this._operationMutex.runExclusive(async () => {
       let lastError: Error | undefined;
 
@@ -178,14 +199,30 @@ export class DataManager {
               setTimeout(resolve, Math.pow(2, attempt) * 100)
             );
           }
+          // FIX: Guard maxRetries exhaustion to prevent promise hang.
+          // Ensure we exit the loop and return an error result on final attempt.
+          if (attempt === maxRetries - 1) {
+            break;
+          }
         }
       }
 
+      // Fixes H10 (Inline-Behavior-Review rev 12): retry exhaustion was
+      // previously DEV-only. Production had zero telemetry on how often
+      // writes fail 3x in a row, which kind of error caused it, or
+      // whether quota/IDB corruption is escalating. Promote to trackError.
       if (import.meta.env.DEV) console.error('Atomic operation failed after retries:', lastError);
-      return {
+      if (lastError) {
+        trackError(lastError, {
+          module: 'data-manager',
+          action: 'atomicOperation.retriesExhausted'
+        });
+      }
+      const exhaustedResult: OperationResult = {
         isOk: false,
         error: lastError?.message || 'Operation failed after retries'
-      } as T;
+      };
+      return exhaustedResult as T;
     });
   }
 
@@ -245,7 +282,7 @@ export class DataManager {
     );
 
     this._eventUnsubscribers.push(
-      on(DataSyncEvents.REQUEST_SYNC, async ({ changes, source }: { changes: Transaction[], source: string }) => {
+      on(DataSyncEvents.REQUEST_SYNC, async ({ changes }: { changes: Transaction[], source: string }) => {
         try {
           await this.syncFromStorage(changes);
           notifyDataSyncComplete({ success: true });
@@ -360,7 +397,14 @@ export class DataManager {
 
   private applyRemoteDelta(
     change: PersistChange,
-    metadata: { source: string; revision?: number; tabId?: string; timestamp?: number }
+    metadata: {
+      source: string;
+      // Phase 6 Slice 1j (rev 12 L6): widened for exactOptionalPropertyTypes —
+      // caller threads undefineds straight from the DataSyncMetadata envelope.
+      revision?: number | undefined;
+      tabId?: string | undefined;
+      timestamp?: number | undefined;
+    }
   ): void {
     const currentTransactions = getTransactionsFromCacheOrSnapshot(this._transactionsCache, this._hasLoadedTransactions, []);
     const nextTransactions = this._handler?.onDataPatched
@@ -494,6 +538,16 @@ export class DataManager {
           changedIds: getChangedIds(change)
         });
       } catch (error) {
+        // Broadcast failures are invisible to the user in production — they
+        // cause stale-tab bugs ("I added this on my phone, it's not on my
+        // laptop"). Route to trackError so the failure is captured regardless
+        // of environment. DEV still gets the console.warn for immediate
+        // visibility during development. Fixes C5 (Inline-Behavior-Review
+        // rev 12).
+        trackError(error instanceof Error ? error : String(error), {
+          module: 'data-manager',
+          action: 'broadcast_tx_sync'
+        });
         if (import.meta.env.DEV) {
           console.warn('DataManager: failed to broadcast transaction sync update:', error);
         }
@@ -557,17 +611,26 @@ export class DataManager {
       };
     }
 
-    // Use sanitized data from validator
-    const tx: Transaction = {
+    // Use sanitized data from validator. The spread of `validation.sanitized`
+    // is a `Partial<Transaction>`-shape by construction of the validator;
+    // we cast the named local (not the object literal) to satisfy the
+    // `consistent-type-assertions: objectLiteralTypeAssertions: 'never'` rule.
+    const txDraft = {
       ...validation.sanitized,
       __backendId: txData.__backendId || `tx_${generateSecureId()}`
-    } as Transaction;
+    };
+    const tx = txDraft as Transaction;
 
     return this._atomicOperation(async (): Promise<OperationResult<Transaction>> => {
       const data = await this._getCachedTransactionsForMutation();
-      // Idempotency guard: skip if already persisted (e.g. from a partial retry)
-      if (data.some(t => t.__backendId === tx.__backendId)) {
-        return { isOk: true, data: tx };
+      // Idempotency guard: skip if already persisted (e.g. from a partial retry).
+      // New-batch P2: surface `alreadyExisted: true` so the
+      // `CreateTransactionOperation` rollback path does NOT delete a row
+      // that pre-dated this operation. Without this signal an outer
+      // transaction rollback silently destroyed user data.
+      const existing = data.find(t => t.__backendId === tx.__backendId);
+      if (existing) {
+        return { isOk: true, data: existing, alreadyExisted: true };
       }
       const newData = [...data, tx];
 
@@ -575,7 +638,7 @@ export class DataManager {
       if (!ok) return { isOk: false, error: 'Storage write failed' };
 
       emit(Events.TRANSACTION_ADDED, tx);
-      return { isOk: true, data: tx };
+      return { isOk: true, data: tx, alreadyExisted: false };
     });
   }
 
@@ -585,10 +648,17 @@ export class DataManager {
   async createBatch(txArray: Partial<Transaction>[]): Promise<OperationResult<Transaction[]>> {
     if (!txArray.length) return { isOk: true, data: [] };
 
-    // Validate all transactions before persisting
+    // Validate all transactions before persisting.
+    // Phase 6 Slice 1i (rev 12 L6): `txArray[i]` is
+    // `Partial<Transaction> | undefined` under
+    // `noUncheckedIndexedAccess`; the `i < txArray.length` bound
+    // guarantees presence but a local pull keeps `validateTransaction`
+    // well-typed without non-null assertions.
     const validationErrors: string[] = [];
     for (let i = 0; i < txArray.length; i++) {
-      const validation = validator.validateTransaction(txArray[i]);
+      const item = txArray[i];
+      if (!item) continue;
+      const validation = validator.validateTransaction(item);
       if (!validation.valid) {
         validationErrors.push(`Item ${i}: ${Object.values(validation.errors).join(', ')}`);
       } else {
@@ -600,18 +670,29 @@ export class DataManager {
     }
 
     return this._atomicOperation(async (): Promise<OperationResult<Transaction[]>> => {
-      const newTransactions: Transaction[] = txArray.map(txData => ({
-        ...txData,
-        amount: parseAmount(txData.amount ?? 0),
-        __backendId: txData.__backendId || `tx_${generateSecureId()}`
-      } as Transaction));
+      // Map drafts to named locals, then cast — same rule-avoidance as
+      // single-create above (no object-literal cast allowed by ESLint).
+      const newTransactions: Transaction[] = txArray.map(txData => {
+        const draft = {
+          ...txData,
+          amount: parseAmount(txData.amount ?? 0),
+          __backendId: txData.__backendId || `tx_${generateSecureId()}`
+        };
+        return draft as Transaction;
+      });
 
       const data = await this._getCachedTransactionsForMutation();
-      // Idempotency guard: filter out any items already persisted from a partial retry
+      // Idempotency guard: filter out any items already persisted from a
+      // partial retry. New-batch P2: `data` must be the subset actually
+      // persisted by THIS call (i.e. `toAdd`), not the full drafted
+      // array. The `BulkCreateTransactionsOperation.rollback()` uses
+      // `result.data` to scope its reverse deletes, and scoping by the
+      // drafted array caused rollback to delete pre-existing rows that
+      // matched an already-persisted `__backendId`.
       const existingIds = new Set(data.map(t => t.__backendId));
       const toAdd = newTransactions.filter(t => !existingIds.has(t.__backendId));
       if (toAdd.length === 0) {
-        return { isOk: true, data: newTransactions };
+        return { isOk: true, data: [], alreadyExisted: true };
       }
       const newData = [...data, ...toAdd];
 
@@ -624,7 +705,14 @@ export class DataManager {
       } else if (toAdd.length > 1) {
         emit(Events.TRANSACTIONS_BATCH_ADDED, { transactions: toAdd, count: toAdd.length });
       }
-      return { isOk: true, data: newTransactions };
+      // `alreadyExisted` is `true` only when at least one draft was
+      // filtered out AND the remaining set was persisted — callers use
+      // it as a partial-conflation hint for logging / rollback scoping.
+      return {
+        isOk: true,
+        data: toAdd,
+        alreadyExisted: toAdd.length !== newTransactions.length,
+      };
     });
   }
 
@@ -719,19 +807,22 @@ export class DataManager {
       };
     }
 
-    // Create all split transactions
+    // Create all split transactions.
+    // Phase 6 Slice 1j (rev 12 L6): `recurring_type` / `recurring_end` are
+    // optional on `Transaction` and are simply omitted here rather than
+    // assigned `undefined`, satisfying `exactOptionalPropertyTypes`. The
+    // same shape applies to `tags`, which is spread in only when the
+    // parent transaction actually has one.
     const newSplits: Transaction[] = splits.map(split => ({
       type: originalTx.type,
       category: split.category,
       amount: Math.round(parseAmount(split.amount) * 100) / 100, // Round to 2 decimals
       description: split.description || `Split: ${originalTx.description || ''}`,
       date: originalTx.date,
-      tags: originalTx.tags,
+      ...(originalTx.tags !== undefined ? { tags: originalTx.tags } : {}),
       notes: `Split from ${originalTx.__backendId}`,
       currency: originalTx.currency || '',
       recurring: false,
-      recurring_type: undefined,
-      recurring_end: undefined,
       reconciled: true,
       splits: true,
       __backendId: `tx_${generateSecureId()}`

@@ -7,8 +7,8 @@
 
 import { SK, lsSet } from './state.js';
 import { safeStorage } from './safe-storage.js';
-import { getTabId } from './tab-id.js';
-import type { Transaction, TransactionDataChange } from '../../types/index.js';
+import { trackError } from './error-tracker.js';
+import type { TransactionDataChange } from '../../types/index.js';
 
 const DEV = import.meta.env.DEV;
 
@@ -16,19 +16,28 @@ const DEV = import.meta.env.DEV;
 // TYPES
 // ==========================================
 
-interface StateRevision {
+// Phase 6 cleanup (no-explicit-any sweep): exported so multi-tab-sync.ts
+// can type the buildRemoteRevision return value directly instead of using
+// `as any` casts at the markKeySynced call sites.
+export interface StateRevision {
   revision: number;
   timestamp: number;
   logicalClock: number;  // Lamport clock for causality
   vectorClock?: Record<string, number>;  // Optional vector clock for complex scenarios
   tabId: string;
   key: string;
-  checksum?: string;
+  checksum?: string | undefined;
   atomicGroup?: string; // For tracking coupled state updates
   lastModifier?: string; // Tab that made the last change
 }
 
+// STATE-03: Schema version for the revision manifest. Bump when the
+// manifest shape changes so loadManifest() can detect stale formats
+// and migrate them forward instead of silently misinterpreting fields.
+const MANIFEST_SCHEMA_VERSION = 2; // v2: added schema_version, checksum algorithm prefix (STATE-06)
+
 interface RevisionManifest {
+  schema_version?: number; // STATE-03: absent in v1 manifests, present (≥2) going forward
   global_revision: number;
   logical_clock: number;  // Global logical clock
   key_revisions: Record<string, StateRevision>;
@@ -57,9 +66,9 @@ interface TransactionDeltaLogEntry {
 // CONSTANTS
 // ==========================================
 
-const REVISION_KEY = 'budget_tracker_state_revision';
+const REVISION_KEY = 'harbor_state_revision';
 const CHECKSUM_KEYS = [SK.TX]; // Keys requiring checksum validation
-const TRANSACTION_DELTA_LOG_KEY = 'budget_tracker_tx_delta_log';
+const TRANSACTION_DELTA_LOG_KEY = 'harbor_tx_delta_log';
 const MAX_TRANSACTION_DELTA_LOG_ENTRIES = 64;
 
 // ==========================================
@@ -68,6 +77,16 @@ const MAX_TRANSACTION_DELTA_LOG_ENTRIES = 64;
 
 let currentRevision = 0;
 let logicalClock = 0;
+// Phase 6 Slice 1d (Inline-Behavior-Review rev 12, L10): once-per-session
+// latch for the SubtleCrypto -> XXHash32 fallback telemetry. SHA-256 gives
+// 256 bits of collision resistance; xxHash32 gives ~77k revisions before
+// a ~1% birthday-bound collision risk, which is a real concern over a
+// multi-year app lifetime. Without telemetry the downgrade is silent —
+// the dashboard cannot distinguish "crypto.subtle works everywhere" from
+// "30% of installs are running on a 32-bit hash". First-fire-per-session
+// pattern mirrors getMonthAlloc (rev 12 / #39 M4): the downgrade reason
+// is platform-stable across a session, so reporting once is sufficient.
+let hasReportedXxHashFallback = false;
 let localManifest: RevisionManifest = {
   global_revision: 0,
   logical_clock: 0,
@@ -81,7 +100,7 @@ let localManifest: RevisionManifest = {
 const ATOMIC_STATE_GROUPS = {
   FINANCIAL_CORE: [SK.TX, SK.SAVINGS, SK.ALLOC],
   DEBT_CORE: [SK.DEBTS, SK.TX],
-  CATEGORY_CORE: [SK.CUSTOM_CAT, SK.TX]
+  CATEGORY_CORE: [SK.USER_CATS, SK.TX]
 };
 
 // ==========================================
@@ -101,12 +120,26 @@ export function initRevisionTracking(): void {
  */
 function loadManifest(): void {
   const stored = safeStorage.getJSON<RevisionManifest>(REVISION_KEY, {
+    schema_version: MANIFEST_SCHEMA_VERSION,
     global_revision: 0,
     logical_clock: 0,
     key_revisions: {},
     last_sync: Date.now(),
     atomic_groups: {}
   });
+
+  // STATE-03: Migrate v1 manifests (missing schema_version) to v2.
+  // v2 added algorithm-prefixed checksums (STATE-06); existing v1
+  // checksums are bare hex strings that won't match the new format,
+  // so strip them — they'll be recomputed on the next write.
+  if (!stored.schema_version || stored.schema_version < MANIFEST_SCHEMA_VERSION) {
+    for (const rev of Object.values(stored.key_revisions)) {
+      if (rev.checksum && !rev.checksum.includes(':')) {
+        rev.checksum = undefined;
+      }
+    }
+    stored.schema_version = MANIFEST_SCHEMA_VERSION;
+  }
 
   localManifest = stored;
   currentRevision = stored.global_revision;
@@ -118,6 +151,7 @@ function loadManifest(): void {
  */
 function saveManifest(): void {
   localManifest.last_sync = Date.now();
+  localManifest.schema_version = MANIFEST_SCHEMA_VERSION;
   safeStorage.setJSON(REVISION_KEY, localManifest);
 }
 
@@ -161,9 +195,26 @@ async function calculateChecksum(data: unknown): Promise<string> {
     const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    return hashHex;
+    // STATE-06: Prefix with algorithm so cross-device comparison can detect
+    // mismatched hash algorithms (SHA-256 vs xxHash32 fallback).
+    return `sha256:${hashHex}`;
   } catch (error) {
     if (DEV) console.error('Failed to calculate SHA-256 checksum:', error);
+    // Phase 6 Slice 1d (Inline-Behavior-Review rev 12, L10): surface the
+    // entropy downgrade to monitoring. SubtleCrypto is unavailable in a
+    // handful of WebView / Capacitor / legacy-browser contexts, and
+    // before this telemetry the fallback fired silently in production —
+    // we had no way to know whether any install was actually using it.
+    // Fire once per session; the condition is platform-stable within a
+    // running JS context so subsequent misses carry no new information.
+    if (!hasReportedXxHashFallback) {
+      hasReportedXxHashFallback = true;
+      trackError(
+        'calculateChecksum: SubtleCrypto unavailable; falling back to xxHash32 (checksum entropy downgraded from 256 bits to 32 bits)',
+        { module: 'state-revision', action: 'xxhash_fallback_engaged' },
+        'validationError'
+      );
+    }
     // Fallback to a more robust non-crypto hash (xxHash-like)
     return calculateXXHash(str);
   }
@@ -206,7 +257,8 @@ function calculateXXHash(str: string): string {
   h32 = Math.imul(h32, PRIME32_3) >>> 0;
   h32 ^= h32 >>> 16;
   
-  return h32.toString(16).padStart(8, '0');
+  // STATE-06: Prefix with algorithm identifier
+  return `xxh32:${h32.toString(16).padStart(8, '0')}`;
 }
 
 // ==========================================
@@ -216,17 +268,50 @@ function calculateXXHash(str: string): string {
 /**
  * Record a state change with revision tracking
  */
+/**
+ * CR-Apr24-I finding 211: lightweight per-key cache of the last value
+ * JSON. `recordStateChange` compares incoming values against this cache
+ * and short-circuits when nothing changed, preventing phantom revision
+ * bumps on no-op writes (e.g. a signal batcher flush after a reload
+ * where every value is still identical to storage). The cache is keyed
+ * by storage key and stores the JSON string; for large payloads like
+ * SK.TX this is bounded by the stringify cost which we're already paying
+ * for the checksum path.
+ */
+const lastValueJsonCache = new Map<string, string>();
+
 export async function recordStateChange(
-  key: string, 
-  value: unknown, 
+  key: string,
+  value: unknown,
   tabId: string,
   options: { skipChecksum?: boolean; remoteClock?: number } = {}
 ): Promise<StateRevision> {
+  // CR-Apr24-I finding 211: skip no-op writes that would mint a fresh
+  // revision for an unchanged value. Compare via JSON string — cheap
+  // enough for settings keys (small payloads), and bounded by the
+  // stringify cost we'd hit anyway for checksum computation on TX keys.
+  const valueJson = JSON.stringify(value);
+  const lastJson = lastValueJsonCache.get(key);
+  if (lastJson !== undefined && lastJson === valueJson) {
+    // Return the existing revision without incrementing
+    const existing = localManifest.key_revisions[key];
+    if (existing) return existing;
+  }
+  lastValueJsonCache.set(key, valueJson);
+
   const revision = nextRevision();
   const timestamp = Date.now();
   
-  // Update logical clock
-  const clock = options.remoteClock 
+  // Update logical clock.
+  //
+  // Use `!== undefined` rather than a truthy check: a peer's very first
+  // event legitimately carries `logicalClock: 0`, and a truthy check would
+  // treat that as "no remote clock supplied" and fall through to a local
+  // increment — violating the Lamport invariant `max(local, remote) + 1`.
+  // Latent today (no caller passes remoteClock), but lands before the
+  // Firestore Phase 3 integration that would surface the bug.
+  // Fixes L9 (Inline-Behavior-Review rev 12).
+  const clock = options.remoteClock !== undefined
     ? updateLogicalClock(options.remoteClock)
     : incrementLogicalClock();
   
@@ -286,7 +371,12 @@ export function getTransactionDeltaReplay(
   }
 
   for (let i = 0; i < entries.length; i++) {
-    if (entries[i].revision !== fromRevisionExclusive + i + 1) {
+    // Phase 6 Slice 1i (rev 12 L6): `entries[i]` is `T | undefined`
+    // under `noUncheckedIndexedAccess`; the `i < entries.length` bound
+    // guarantees presence, but a local narrow avoids a non-null
+    // assertion and returns `null` on any gap (same as a bad revision).
+    const entry = entries[i];
+    if (!entry || entry.revision !== fromRevisionExclusive + i + 1) {
       return null;
     }
   }
@@ -319,11 +409,18 @@ export function needsFullSync(): boolean {
       return true;
     }
     
-    // Checksum validation for critical data
-    if (storedRev.checksum && localRev.checksum && 
-        storedRev.checksum !== localRev.checksum) {
-      if (DEV) console.warn(`Checksum mismatch detected for ${key}`);
-      return true;
+    // STATE-06: Checksum validation for critical data.
+    // Only compare when both sides have checksums AND use the same algorithm
+    // (prefix before ':'). Mismatched algorithms (e.g. sha256 vs xxh32 across
+    // devices with different SubtleCrypto support) are not comparable and
+    // should not trigger a false-positive conflict.
+    if (storedRev.checksum && localRev.checksum) {
+      const storedAlgo = storedRev.checksum.split(':')[0];
+      const localAlgo = localRev.checksum.split(':')[0];
+      if (storedAlgo === localAlgo && storedRev.checksum !== localRev.checksum) {
+        if (DEV) console.warn(`Checksum mismatch detected for ${key}`);
+        return true;
+      }
     }
   }
   
@@ -360,6 +457,40 @@ export function getKeysNeedingSync(): string[] {
  */
 export function markKeySynced(key: string, revision: StateRevision): void {
   localManifest.key_revisions[key] = revision;
+  saveManifest();
+}
+
+/**
+ * Round 7 fix: advance the local global_revision to match the stored
+ * manifest after a full sync completes.
+ *
+ * Without this, `needsFullSync()` perpetually returns `true` on every
+ * visibility change because `performFullSync()` only calls
+ * `markKeySynced()` on individual keys — it never advances
+ * `localManifest.global_revision`. The stored manifest (written by
+ * whichever tab last modified state) has a higher `global_revision`,
+ * so the comparison `stored.global_revision > localManifest.global_revision`
+ * fires on every tab-switch, hammering localStorage with redundant
+ * reads and signal replays.
+ */
+export function advanceGlobalRevisionAfterSync(): void {
+  const stored = safeStorage.getJSON<RevisionManifest>(REVISION_KEY, {
+    global_revision: 0,
+    logical_clock: 0,
+    key_revisions: {},
+    last_sync: Date.now(),
+    atomic_groups: {}
+  });
+
+  if (stored.global_revision > localManifest.global_revision) {
+    localManifest.global_revision = stored.global_revision;
+    currentRevision = Math.max(currentRevision, stored.global_revision);
+  }
+  if (stored.logical_clock > localManifest.logical_clock) {
+    localManifest.logical_clock = stored.logical_clock;
+    logicalClock = Math.max(logicalClock, stored.logical_clock);
+  }
+  localManifest.last_sync = Date.now();
   saveManifest();
 }
 
@@ -416,8 +547,14 @@ export function resolveConflict(
     return 'remote';
   }
   
-  // Same timestamp, use tab ID as final tiebreaker
-  return localRev.tabId === getTabId() ? 'local' : 'remote';
+  // Same timestamp — commutative tiebreaker: both tabs must compute the
+  // same answer for this conflict pair or state silently diverges. The
+  // previous check `localRev.tabId === getTabId()` was evaluated from each
+  // tab's own perspective, so Tab A resolved to 'local' (A wins) and Tab B
+  // also resolved to 'local' (B wins) for the same conflict. Lexicographic
+  // comparison of the two tab IDs is a pure function of the pair, so both
+  // tabs converge on the same winner. Fixes C9 (Inline-Behavior-Review rev 12).
+  return localRev.tabId < remoteRev.tabId ? 'local' : 'remote';
 }
 
 /**
@@ -468,26 +605,6 @@ function cleanupOldRevisions(): void {
 }
 
 /**
- * Check if a revision is the latest for its key
- */
-function isLatestRevision(key: string, revision: StateRevision): boolean {
-  // Get all revisions for this key across all tabs
-  const stored = safeStorage.getJSON<RevisionManifest>(REVISION_KEY, {
-    global_revision: 0,
-    logical_clock: 0,
-    key_revisions: {},
-    last_sync: Date.now(),
-    atomic_groups: {}
-  });
-
-  const storedRev = stored.key_revisions[key];
-  if (!storedRev) return true;
-  
-  // Check if this is the latest by logical clock
-  return revision.logicalClock >= storedRev.logicalClock;
-}
-
-/**
  * Get revision statistics
  */
 export function getRevisionStats(): {
@@ -535,7 +652,7 @@ export function resetRevisionTracking(): void {
  */
 export function createDebouncedPersist(delay: number = 100) {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
-  let pendingUpdates = new Map<string, unknown>();
+  const pendingUpdates = new Map<string, unknown>();
   
   return function debouncedPersist(updates: Record<string, unknown>, tabId: string): void {
     // Accumulate updates
@@ -557,10 +674,38 @@ export function createDebouncedPersist(delay: number = 100) {
       // Persist data and record revisions for all changes in the batch
       for (const [key, value] of Object.entries(batch)) {
         lsSet(key, value);
-        recordStateChange(key, value, tabId);
+        void recordStateChange(key, value, tabId);
       }
     }, delay);
   };
+}
+
+/**
+ * STATE-02: Compare-And-Swap write — only persists if the key's current
+ * revision matches `expectedRevision`. Returns true if the write succeeded,
+ * false if a concurrent modification was detected (caller should re-read
+ * and retry or surface a conflict).
+ *
+ * This is the building block for safe multi-tab writes; callers that
+ * can tolerate last-writer-wins semantics can continue using lsSet directly.
+ */
+export function casWrite(
+  key: string,
+  value: unknown,
+  expectedRevision: number,
+  tabId: string
+): boolean {
+  if (detectConcurrentModification(key, expectedRevision)) {
+    trackError(
+      `CAS write rejected for ${key}: expected revision ${expectedRevision}, current is higher`,
+      { module: 'state-revision', action: 'cas_write_rejected' },
+      'validationError'
+    );
+    return false;
+  }
+  lsSet(key, value);
+  void recordStateChange(key, value, tabId);
+  return true;
 }
 
 // ==========================================
@@ -608,20 +753,45 @@ export function recordAtomicGroupChange(
 
     // Batch checksum calculations for critical data
     if (CHECKSUM_KEYS.includes(update.key)) {
+      const keyName = update.key;
       checksumPromises.push(
         calculateChecksum(update.value).then(checksum => {
           stateRevision.checksum = checksum;
-        }).catch(() => {
-          // Checksum computation failed — revision is still recorded without checksum
+        }).catch((err: unknown) => {
+          // STATE-05: Checksum computation failed. Set checksum to
+          // undefined so drift detection treats this key as "no checksum
+          // available" rather than storing a sentinel string that could
+          // false-positive against a real hash on the other side of a
+          // comparison. The error is still tracked below for visibility.
+          //
+          // Fixes C2 (Inline-Behavior-Review rev 12): previously the
+          // .catch() swallowed the error silently.
+          stateRevision.checksum = undefined;
+          trackError(err instanceof Error ? err : new Error(String(err)), {
+            module: 'state-revision',
+            action: `checksum:${keyName}@group:${groupId}`
+          });
         })
       );
     }
   }
 
-  // Await all checksums in parallel, then save manifest once
+  // Await all checksums in parallel, then save manifest once.
+  //
+  // Fixes C3 (Inline-Behavior-Review rev 12): the Promise.all result was
+  // unawaited and un-.catch()-ed, so even though individual checksum
+  // promises have their own .catch() above, any synchronous throw inside
+  // saveManifest() would produce an unhandled-rejection. Attach a final
+  // .catch() to route those failures through trackError instead of the
+  // global rejection handler.
   if (checksumPromises.length > 0) {
     Promise.all(checksumPromises).then(() => {
       saveManifest(); // Single re-save with all checksums
+    }).catch((err: unknown) => {
+      trackError(err instanceof Error ? err : new Error(String(err)), {
+        module: 'state-revision',
+        action: `finalizeChecksums@group:${groupId}`
+      });
     });
   }
 
@@ -698,15 +868,18 @@ export function areKeysInSameAtomicGroup(keys: string[]): boolean {
   const groupSets = keys.map(key => {
     const groups = new Set<string>();
     for (const [groupName, groupKeys] of Object.entries(ATOMIC_STATE_GROUPS)) {
-      if ((groupKeys as string[]).includes(key)) {
+      if ((groupKeys).includes(key)) {
         groups.add(groupName);
       }
     }
     return groups;
   });
 
-  // Check if there's any group that all keys share
+  // Check if there's any group that all keys share.
+  // Phase 6 Slice 1i (rev 12 L6): `groupSets[0]` is `Set<string> | undefined`
+  // under `noUncheckedIndexedAccess`; guard and bail out when empty.
   const firstGroups = groupSets[0];
+  if (!firstGroups) return false;
   for (const group of firstGroups) {
     if (groupSets.every(gs => gs.has(group))) return true;
   }
@@ -834,7 +1007,9 @@ export default {
   getKeysNeedingSync,
   getKeyRevision,
   markKeySynced,
+  advanceGlobalRevisionAfterSync,
   detectConcurrentModification,
+  casWrite,
   resolveConflict,
   createConflictMetadata,
   getRevisionStats,

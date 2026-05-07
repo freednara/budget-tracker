@@ -79,12 +79,12 @@ async function installDeterministicAppBootstrap(
     });
 
     if (completeOnboarding) {
-      localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, active: false, step: 0 }));
+      localStorage.setItem('harbor_onboarding', JSON.stringify({ completed: true, active: false, step: 0 }));
     }
-    localStorage.setItem('budget_tracker_migration_status', JSON.stringify({ completed: true, timestamp: fixedNow, version: '2.7', itemCount: 0 }));
-    localStorage.setItem('budget_tracker_theme', JSON.stringify(nextTheme));
+    localStorage.setItem('harbor_migration_status', JSON.stringify({ completed: true, timestamp: fixedNow, version: '2.7', itemCount: 0 }));
+    localStorage.setItem('harbor_theme', JSON.stringify(nextTheme));
     if (typeof alertThreshold === 'number') {
-      localStorage.setItem('budget_tracker_alert_prefs', JSON.stringify({
+      localStorage.setItem('harbor_alert_prefs', JSON.stringify({
         budgetThreshold: alertThreshold,
         browserNotificationsEnabled: false,
         lastNotifiedAlertKeys: [],
@@ -139,8 +139,8 @@ async function getShellAlertClip(page: import('@playwright/test').Page): Promise
   }
 
   return await page.evaluate((viewportWidth) => {
-    const shell = document.querySelector('.app-shell') as HTMLElement | null;
-    const alertBanner = document.getElementById('alert-banner') as HTMLElement | null;
+    const shell = document.querySelector('.app-shell');
+    const alertBanner = document.getElementById('alert-banner');
 
     if (!shell || !alertBanner) {
       throw new Error('Shell or alert banner host missing');
@@ -166,8 +166,11 @@ async function prepareShellBudgetAlert(page: import('@playwright/test').Page) {
   await waitForSampleImportToSettle(page);
   await page.locator('#tab-dashboard-btn').click();
   await expect(page.locator('#alert-banner .inline-alert-card')).toBeVisible({ timeout: 10000 });
-  await expect(page.locator('#dashboard-alerts .inline-alert-card')).toHaveCount(0);
-  await expect(page.locator('#budget-alerts .inline-alert-card')).toHaveCount(0);
+  // Phase 5g-4 Slice 2 (Inline-Behavior-Review rev 12, L30c — full closure):
+  // removed `#dashboard-alerts` / `#budget-alerts` .toHaveCount(0) guards —
+  // those host divs were deleted from `index.html` in the same slice after
+  // Phase 5g-1 retired the `renderAlertHost` path. Surviving `#alert-banner`
+  // visibility check covers the live shell host.
 }
 
 async function enableStandaloneLikeMode(page: import('@playwright/test').Page) {
@@ -206,7 +209,7 @@ async function swipeTransactionRow(
   direction: 'left' | 'right'
 ) {
   await rowLocator.evaluate((row, swipeDirection) => {
-    const target = (row.querySelector('.swipe-content') as HTMLElement | null) ?? (row as HTMLElement);
+    const target = (row.querySelector('.swipe-content')) ?? (row as HTMLElement);
     const rect = target.getBoundingClientRect();
     const startX = rect.left + rect.width * 0.55;
     const endX = swipeDirection === 'left'
@@ -431,7 +434,10 @@ test.describe('Visual Regression - Mobile Critical Surfaces', () => {
     await enableStandaloneLikeMode(page);
     await prepareShellBudgetAlert(page);
     await expect(page.locator('#alert-banner .inline-alert-card')).toBeVisible({ timeout: 10000 });
-    await expect(page.locator('#dashboard-alerts .inline-alert-card')).toHaveCount(0);
+    // Phase 5g-4 Slice 2 (Inline-Behavior-Review rev 12, L30c — full closure):
+    // removed `#dashboard-alerts` cross-tab guard — host div deleted from
+    // `index.html` in the same slice. Mobile screenshot below clips on the
+    // live shell-banner host (`#alert-banner`), unchanged by this slice.
     await page.waitForTimeout(250);
     const clip = await getShellAlertClip(page);
 

@@ -33,7 +33,7 @@ describe('Amortization Schedule', () => {
     const schedule = generateAmortizationSchedule(debt);
 
     expect(schedule.length).toBeGreaterThan(0);
-    expect(schedule[schedule.length - 1].balance).toBe(0);
+    expect(schedule[schedule.length - 1]?.balance).toBe(0);
   });
 
   it('should calculate correct interest and principal split', () => {
@@ -41,9 +41,9 @@ describe('Amortization Schedule', () => {
     const schedule = generateAmortizationSchedule(debt);
 
     // First month: interest = 1200 * 0.12/12 = 12.00
-    expect(schedule[0].interest).toBe(12);
-    expect(schedule[0].principal).toBe(188); // 200 - 12
-    expect(schedule[0].balance).toBe(1012); // 1200 - 188
+    expect(schedule[0]?.interest).toBe(12);
+    expect(schedule[0]?.principal).toBe(188); // 200 - 12
+    expect(schedule[0]?.balance).toBe(1012); // 1200 - 188
   });
 
   it('should return empty schedule for zero balance', () => {
@@ -62,7 +62,7 @@ describe('Amortization Schedule', () => {
 
     expect(schedule).toHaveLength(5); // 500/100 = 5 months
     schedule.forEach(entry => expect(entry.interest).toBe(0));
-    expect(schedule[schedule.length - 1].balance).toBe(0);
+    expect(schedule[schedule.length - 1]?.balance).toBe(0);
   });
 
   it('should stop when payment does not cover interest (negative amortization)', () => {
@@ -71,8 +71,14 @@ describe('Amortization Schedule', () => {
     const schedule = generateAmortizationSchedule(debt);
 
     expect(schedule).toHaveLength(1);
-    expect(schedule[0].principal).toBe(0);
-    expect(schedule[0].interest).toBe(300);
+    expect(schedule[0]?.principal).toBe(0);
+    // 7l (debt planner live item 4): the row identity
+    // `payment = principal + interest` now holds. `interest` reports what
+    // this payment actually covered ($10), not the full accrued interest
+    // ($300). The unpaid $290 capitalizes into the balance column instead.
+    expect(schedule[0]?.payment).toBe(10);
+    expect(schedule[0]?.interest).toBe(10);
+    expect(schedule[0]?.balance).toBe(10290); // 10000 + 300 - 10
   });
 
   it('should apply extra payments correctly', () => {
@@ -89,8 +95,8 @@ describe('Amortization Schedule', () => {
     const schedule = generateAmortizationSchedule(debt);
 
     expect(schedule).toHaveLength(3);
-    expect(schedule[2].payment).toBe(50); // Last payment is the remaining 50
-    expect(schedule[2].balance).toBe(0);
+    expect(schedule[2]?.payment).toBe(50); // Last payment is the remaining 50
+    expect(schedule[2]?.balance).toBe(0);
   });
 
   it('should respect maxMonths limit', () => {
@@ -194,5 +200,25 @@ describe('Payoff Date Calculation', () => {
 
     expect(info.totalInterest).toBeGreaterThan(0);
     expect(info.months).toBeGreaterThan(10); // More than 10 months due to interest
+  });
+
+  // 7l (debt planner live item 3): negative amortization should be
+  // detected on month 1, not after 12 wasted months. The prior guard
+  // accrued a full year of phantom interest into `totalInterest` before
+  // returning Infinity — which every surface downstream (debt card,
+  // dashboard, strategy summary) quoted back to the user.
+  it('should detect negative amortization immediately without accruing phantom interest', () => {
+    // $10,000 at 36% APR = $300/mo interest; payment of $10 can never
+    // cover that. Pre-fix, calculatePayoffDate looped 12 months and
+    // accumulated ~$3,600 in phantom totalInterest before bailing.
+    const debt = createDebt({ balance: 10000, interestRate: 0.36, minimumPayment: 10 });
+    const info = calculatePayoffDate(debt);
+
+    expect(info.months).toBe(Infinity);
+    expect(info.date).toBeNull();
+    expect(info.cannotPayOff).toBe(true);
+    // Crucially, totalInterest should also be Infinity (unpayable), not
+    // a finite "12 months of phantom accrual" number.
+    expect(info.totalInterest).toBe(Infinity);
   });
 });

@@ -7,8 +7,8 @@
  * @module form-binder
  */
 
-import { Signal, effect, batch } from '@preact/signals-core';
-import { debounce } from './utils.js';
+import { Signal, effect } from '@preact/signals-core';
+import { debounce, formatDateForInput, parseAmount, fmtCur } from './utils-pure.js';
 import DOM from './dom-cache.js';
 import { validator } from './validator.js';
 
@@ -22,11 +22,11 @@ interface BindingOptions {
   /** Debounce delay in ms for input events */
   debounce?: number;
   /** Transform value from DOM to signal */
-  parse?: (value: string) => any;
+  parse?: (value: string) => unknown;
   /** Transform value from signal to DOM */
-  format?: (value: any) => string;
+  format?: (value: unknown) => string;
   /** Validate on change */
-  validate?: (value: any) => boolean | string;
+  validate?: (value: unknown) => boolean | string;
   /** Event to listen for (default: 'input') */
   event?: 'input' | 'change' | 'blur';
   /** Two-way binding (default: true) */
@@ -35,7 +35,7 @@ interface BindingOptions {
 
 interface FormBinding {
   element: InputElement;
-  signal: Signal<any>;
+  signal: Signal<unknown>;
   options: BindingOptions;
   cleanup: () => void;
 }
@@ -89,10 +89,30 @@ export class FormBinder {
     if (bindingOptions.twoWay) {
       effectCleanup = effect(() => {
         const value = signal.value;
-        const formatted = bindingOptions.format 
+
+        // CR-Apr24-I finding 233: checkbox signal→DOM must write .checked,
+        // not .value, so two-way binding actually reflects the boolean.
+        if (element.getAttribute('type') === 'checkbox') {
+          (element as HTMLInputElement).checked = !!value;
+          return;
+        }
+
+        // CR-Apr24-I finding 252: <select multiple> signal→DOM must set
+        // selectedOptions, not .value (which only handles single selects).
+        if (element.tagName === 'SELECT' && (element as HTMLSelectElement).multiple) {
+          const selectedValues = Array.isArray(value) ? value.map(String) : [];
+          const options = (element as HTMLSelectElement).options;
+          for (let i = 0; i < options.length; i++) {
+            const opt = options[i];
+            if (opt) opt.selected = selectedValues.includes(opt.value);
+          }
+          return;
+        }
+
+        const formatted = bindingOptions.format
           ? bindingOptions.format(value)
           : String(value ?? '');
-        
+
         if (element.value !== formatted) {
           element.value = formatted;
         }
@@ -115,11 +135,24 @@ export class FormBinder {
     });
     
     // Initial sync from signal to element
+    // CR-Apr24-I findings 233+252: route initial sync through the same
+    // type-aware paths as the effect above.
     if (bindingOptions.twoWay) {
       const value = signal.value;
-      element.value = bindingOptions.format 
-        ? bindingOptions.format(value)
-        : String(value ?? '');
+      if (element.getAttribute('type') === 'checkbox') {
+        (element as HTMLInputElement).checked = !!value;
+      } else if (element.tagName === 'SELECT' && (element as HTMLSelectElement).multiple) {
+        const selectedValues = Array.isArray(value) ? value.map(String) : [];
+        const options = (element as HTMLSelectElement).options;
+        for (let i = 0; i < options.length; i++) {
+          const opt = options[i];
+          if (opt) opt.selected = selectedValues.includes(opt.value);
+        }
+      } else {
+        element.value = bindingOptions.format
+          ? bindingOptions.format(value)
+          : String(value ?? '');
+      }
     }
     
     return cleanup;
@@ -169,7 +202,7 @@ export class FormBinder {
    * Auto-parse value based on input type
    * FIXED: Uses attribute checks instead of instanceof for better cross-context reliability
    */
-  private autoParseValue(element: InputElement, value: string): any {
+  private autoParseValue(element: InputElement, value: string): unknown {
     const type = element.getAttribute('type');
     
     // Handle checkbox
@@ -222,7 +255,7 @@ export class FormBinder {
    */
   bindForm(
     formId: string,
-    bindings: Record<string, { signal: Signal<any>; options?: BindingOptions }>
+    bindings: Record<string, { signal: Signal<unknown>; options?: BindingOptions }>
   ): () => void {
     const form = DOM.get(formId) as HTMLFormElement;
     if (!form) {
@@ -257,6 +290,28 @@ export class FormBinder {
    * Check if form is valid
    */
   isValid(): boolean {
+    return this.validationErrors.size === 0;
+  }
+
+  /**
+   * CR-Apr24-I finding 247: actively run all bound validators and return
+   * true only if every binding passes. Unlike isValid(), this forces
+   * validation on untouched fields.
+   */
+  validateAll(): boolean {
+    for (const [, binding] of this.bindings) {
+      if (binding.options.validate) {
+        const value = binding.signal.value;
+        const result = binding.options.validate(value);
+        if (result === false) {
+          this.setError(binding.element, 'Invalid value');
+        } else if (typeof result === 'string') {
+          this.setError(binding.element, result);
+        } else {
+          this.clearError(binding.element);
+        }
+      }
+    }
     return this.validationErrors.size === 0;
   }
   
@@ -301,8 +356,8 @@ export function bindInput<T>(
 export function bindFormWithValidation(
   formId: string,
   bindings: Record<string, {
-    signal: Signal<any>;
-    validate?: (value: any) => boolean | string;
+    signal: Signal<unknown>;
+    validate?: (value: unknown) => boolean | string;
     options?: BindingOptions;
   }>
 ): {
@@ -331,7 +386,10 @@ export function bindFormWithValidation(
   
   return {
     cleanup,
-    validate: () => binder.isValid(),
+    // CR-Apr24-I finding 247: actively run validators on all bindings
+    // instead of just reading the stale error map. Without this, an
+    // untouched form with invalid required fields reports valid.
+    validate: () => binder.validateAll(),
     getErrors: () => binder.getErrors()
   };
 }
@@ -341,11 +399,16 @@ export function bindFormWithValidation(
 // ==========================================
 
 export const Parsers = {
-  /** Parse currency amount (removes $ and ,) */
+  /**
+   * Parse currency amount — locale-aware via `parseAmount` / localeService
+   * (M9, Inline-Behavior-Review rev 12). The prior inline `$,`-strip +
+   * `parseFloat` pattern assumed en-US formatting and silently mis-parsed
+   * "1,50" (de-DE) as 1 instead of 1.50. `parseAmount` routes through
+   * `localeService.parseCurrency`, handles configured decimal/thousands
+   * separators, rejects negatives, and rounds to cents precision.
+   */
   currency: (value: string): number => {
-    const cleaned = value.replace(/[$,]/g, '');
-    const num = parseFloat(cleaned);
-    return isNaN(num) ? 0 : num;
+    return parseAmount(value);
   },
   
   /** Parse integer */
@@ -377,7 +440,9 @@ export const Parsers = {
 export const Formatters = {
   /** Format currency */
   currency: (value: number): string => {
-    return `$${(value || 0).toFixed(2)}`;
+    // Route through fmtCur so form-binder's currency formatter respects the
+    // app's configured currency symbol + locale (was hardcoded '$' prefix).
+    return fmtCur(value || 0);
   },
   
   /** Format percentage */
@@ -388,8 +453,19 @@ export const Formatters = {
   /** Format date */
   date: (value: Date | string | null): string => {
     if (!value) return '';
-    const date = typeof value === 'string' ? new Date(value) : value;
-    return date.toISOString().split('T')[0];
+    // CR-Apr24-I finding 253: `new Date('YYYY-MM-DD')` parses as UTC midnight.
+    // In negative-UTC-offset timezones, local-time getters then roll back a day.
+    // Append 'T00:00:00' to date-only strings to force local-time parsing.
+    // See ADR-001 §9.5 Step 8.
+    let date: Date;
+    if (typeof value === 'string') {
+      // Only append for bare date strings (YYYY-MM-DD), not full ISO timestamps
+      const normalized = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00` : value;
+      date = new Date(normalized);
+    } else {
+      date = value;
+    }
+    return formatDateForInput(date);
   },
   
   /** Format tags array */

@@ -1,7 +1,7 @@
-# Budget Tracker Elite - Market Strategy & Deployment Guide 🚀
+# Harbor Ledger — Market Strategy & Deployment Guide
 
-## Executive Summary
-Strategic positioning and deployment plan for Budget Tracker Elite to enter the $1.2B personal finance app market as a privacy-focused, feature-rich alternative to existing solutions.
+## Executive summary
+Strategic positioning and deployment plan for Harbor Ledger to enter the personal finance app market as a privacy-first, local-first alternative to subscription-based competitors. The core differentiator is that user data never leaves the device by default; v3.0 will add an optional, fully client-side encrypted cloud sync layer for users who want cross-device access.
 
 ---
 
@@ -31,28 +31,27 @@ Strategic positioning and deployment plan for Budget Tracker Elite to enter the 
 
 ### Tier 1: Freemium Model (Recommended)
 
-#### Free Tier - "Budget Tracker Core"
-- 500 transactions/month
-- 3 months history
-- Basic categories
-- Single device
-- Community support
+#### Free — "Harbor Ledger Free"
+- Full local-first feature set on a single device
+- Unlimited transactions and history (constrained only by browser storage)
+- Core categories, envelope budgeting, debt planner, savings goals
+- Community support via GitHub Discussions
+- Open source (MIT license) — self-host anywhere
 
-#### Premium - "Budget Tracker Pro" ($4.99/month or $39.99/year)
-- Unlimited transactions
-- Unlimited history
-- Custom categories
-- Cloud sync (when implemented)
-- Priority support
-- Advanced analytics
-- AI insights
+#### Pro — "Harbor Ledger Pro" ($4.99/month or $39.99/year)
+- Everything in Free, plus:
+- Optional fully client-side encrypted cloud sync across devices (v3.0)
+- Managed hosting at harborledger.app
+- Priority support (email, 24h response)
+- Advanced analytics modules
+- AI-assisted insights (local-first, no data leaves the device)
 
-#### Lifetime - "Budget Tracker Elite" ($99.99 one-time)
+#### Lifetime — "Harbor Ledger Lifetime" ($99.99 one-time)
 - All Pro features
 - Lifetime updates
-- Early access features
-- White-label option
-- API access
+- Early access to new features
+- White-label option for small business use
+- API access (when the public API ships)
 
 ### Tier 2: Open Source with Paid Hosting
 
@@ -423,8 +422,8 @@ vercel --prod
 
 ### Differentiation Matrix
 
-| Feature | Your App | YNAB | Mint | PocketGuard |
-|---------|----------|------|------|-------------|
+| Feature | Harbor Ledger | YNAB | Mint | PocketGuard |
+|---------|---------------|------|------|-------------|
 | Privacy-First | ✅ | ❌ | ❌ | ❌ |
 | Offline Mode | ✅ | ⚠️ | ❌ | ❌ |
 | One-Time Purchase | ✅ | ❌ | N/A | ❌ |
@@ -481,8 +480,9 @@ vercel --prod
 
 ---
 
-*Market Strategy Version: 1.0*
+*Market Strategy Version: 1.1*
 *Created: March 11, 2026*
-*Next Review: Monthly*
+*Last updated: April 10, 2026 (rebrand + v3.0 alignment)*
+*Next review: Quarterly*
 
-**Ready to launch? Start with the minimal viable launch strategy and scale based on traction!**
+**Current status:** Harbor Ledger is live at [harborledger.app](https://harborledger.app). v2.6.2 is in production. v3.0 cloud-sync work is architected ([ADR-001](adr/ADR-001-firestore-cloud-sync.md)) and ready for Phase 1 kickoff.

@@ -56,6 +56,25 @@ export function getSavingsTransferGoalName(tx: Pick<TransferLikeTransaction, 'de
   return noteMatch?.[1]?.trim() || null;
 }
 
+/**
+ * Round 7 fix: Document assumption about savings detection and broaden category check.
+ * A "tracked expense" is an expense that is NOT a savings transfer.
+ * Savings transfers are identified by:
+ * 1. Category ID: SAVINGS_TRANSFER_CATEGORY_ID or LEGACY_SAVINGS_CATEGORY_ID
+ * 2. Tags: Contains 'savings_transfer' OR both 'savings' and 'goal'
+ * 3. Description/Notes: Contains markers like '[savings-transfer]' or 'Savings Transfer:' or 'Contribution to goal:'
+ *
+ * To broaden this check and prevent custom "Savings" categories from slipping through,
+ * also exclude expenses whose category name contains "savings" or "transfer" (case-insensitive).
+ */
 export function isTrackedExpenseTransaction(tx: TransferLikeTransaction): boolean {
-  return tx.type === 'expense' && !isSavingsTransferTransaction(tx);
+  if (tx.type !== 'expense') return false;
+
+  // Round 7 fix: Check if category name (not just ID) suggests it's a savings/transfer category
+  const categoryLower = (tx.category || '').toLowerCase();
+  if (categoryLower.includes('savings') || categoryLower.includes('transfer')) {
+    return false;
+  }
+
+  return !isSavingsTransferTransaction(tx);
 }

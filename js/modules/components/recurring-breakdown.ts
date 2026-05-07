@@ -3,7 +3,7 @@
 import { computed, effect } from '@preact/signals-core';
 import * as signals from '../core/signals.js';
 import { html, render } from '../core/lit-helpers.js';
-import { fmtCur, toCents, toDollars } from '../core/utils.js';
+import { fmtCur, toCents, toDollars } from '../core/utils-pure.js';
 import { getMonthBadge } from '../core/utils-dom.js';
 import { isTrackedExpenseTransaction } from '../core/transaction-classification.js';
 import DOM from '../core/dom-cache.js';
@@ -52,6 +52,7 @@ export function mountRecurringBreakdown(): () => void {
   }
 
   const cleanup = effect(() => {
+    const _cur = signals.currency.value;  // subscribe to currency changes
     const data = recurringBreakdownData.value;
 
     if (badgeEl) {
@@ -85,7 +86,7 @@ export function mountRecurringBreakdown(): () => void {
           <span class="text-tertiary">${fmtCur(data.total)} total</span>
         </div>
         <div class="budget-meter__bar" role="img" aria-label="Recurring vs variable spending share">
-          <div class="budget-meter__fill" style="width: ${data.recurringPercent}%; background: linear-gradient(90deg, var(--color-warning), var(--color-income));"></div>
+          <div class="budget-meter__fill" style="width: ${data.recurringPercent}%;"></div>
         </div>
         <div class="flex items-center justify-between mt-3 text-xs text-tertiary">
           <span>Recurring is your fixed baseline.</span>

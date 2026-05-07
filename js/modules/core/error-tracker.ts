@@ -5,7 +5,7 @@
  * automatic error aggregation, stack trace parsing, and user feedback.
  */
 
-import { showToast } from '../ui/core/ui.js';
+import { emit, Events } from './event-bus.js';
 import { lsGet, lsSet } from './state.js';
 import { generateId } from './utils-dom.js';
 
@@ -13,20 +13,27 @@ import { generateId } from './utils-dom.js';
 // TYPES
 // ==========================================
 
+// Phase 6 Slice 1j (rev 12 L6): optional fields widened for
+// `exactOptionalPropertyTypes` — callers pass `Partial<ErrorContext>`
+// with `module: errorInfo.source` where source is typed as
+// `string | undefined` (optional on ErrorInfo).
 interface ErrorContext {
-  module?: string;
-  action?: string;
-  userId?: string;
-  sessionId?: string;
+  module?: string | undefined;
+  action?: string | undefined;
+  userId?: string | undefined;
+  sessionId?: string | undefined;
   timestamp: number;
   url: string;
   userAgent: string;
 }
 
-interface TrackedError {
+// Phase 6 Slice 1j (rev 12 L6): `stack` widened for
+// `exactOptionalPropertyTypes` — constructed from `err.stack` which is
+// `string | undefined` on native `Error` per lib.dom.
+export interface TrackedError {
   id: string;
   message: string;
-  stack?: string;
+  stack?: string | undefined;
   type: 'error' | 'unhandledRejection' | 'networkError' | 'validationError';
   context: ErrorContext;
   count: number;
@@ -34,6 +41,10 @@ interface TrackedError {
   lastSeen: number;
   resolved: boolean;
   fingerprint: string;
+  // Fixes M28: surfaces the "silenced burst" count so dashboards can
+  // distinguish a single failure from a 60-per-minute storm even when the
+  // sampler dropped the intermediate calls.
+  droppedSinceLastEmit?: number;
 }
 
 interface ErrorReport {
@@ -53,8 +64,8 @@ interface ErrorReport {
 const SESSION_ID = generateId();
 const SESSION_START_TIME = Date.now();
 const MAX_ERRORS_STORED = 100;
-const ERROR_STORAGE_KEY = 'budget_tracker_error_log';
-const ERROR_REPORT_KEY = 'budget_tracker_error_reports';
+const ERROR_STORAGE_KEY = 'harbor_error_log';
+const ERROR_REPORT_KEY = 'harbor_error_reports';
 const ERROR_WINDOW = 60000; // 1 minute for rate calculation
 
 let errorQueue: TrackedError[] = [];
@@ -63,11 +74,36 @@ const fingerprintIndex = new Map<string, TrackedError>();
 let isInitialized = false;
 let errorListeners: Array<(error: TrackedError) => void> = [];
 
+// Fixes M28 (Inline-Behavior-Review rev 12): per-fingerprint burst sampling.
+// Previous implementation dropped every console.error after the first one
+// inside a rolling 1-second window, which meant a 60-error storm reported
+// as a single event. The new scheme tracks the first occurrence of every
+// unique fingerprint immediately, then samples subsequent occurrences at
+// exponentially-decaying intervals (1, 2, 4, 8, ...) so bursts are visible
+// without the tracker flooding its own pipeline. The `dropped` field on
+// the emit makes the storm visible even through the sample.
+interface FingerprintSampler {
+  count: number;            // Total occurrences observed
+  dropped: number;           // Occurrences since last emit
+  lastEmitCount: number;     // `count` value at the last emit
+  nextEmitThreshold: number; // `count` must reach this to trigger next emit
+}
+const fingerprintSamplers = new Map<string, FingerprintSampler>();
+const CONSOLE_ERROR_SAMPLER_MAX = 500;
+
+// Cleanup handles for global listeners installed by initialize().
+// These let tests (and app-reset, in the future) tear down the tracker
+// without leaving dangling listeners attached to window.
+let installedWindowErrorHandler: ((event: ErrorEvent) => void) | null = null;
+let installedRejectionHandler: ((event: PromiseRejectionEvent) => void) | null = null;
+let originalConsoleError: typeof console.error | null = null;
+
 // MERGED: Circuit breaker tracking from error-boundary.ts
+// ERR-03: Rolling window — store individual timestamps instead of a single
+// count, so getErrorRate() only considers errors within the window.
 const circuitBreakerState = new Map<string, {
-  count: number;
+  timestamps: number[];  // ERR-03: individual error timestamps for rolling window
   lastError: Error;
-  timestamp: Date;
   isOpen: boolean;
 }>();
 
@@ -80,7 +116,7 @@ export interface OperationContext {
   severity?: 'low' | 'medium' | 'high' | 'critical';
   silent?: boolean;
   userMessage?: string;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -116,7 +152,7 @@ export async function wrapAsync<T>(
 /**
  * Internal error handler for wrapped operations
  */
-function handleOpError(error: any, context: OperationContext): void {
+function handleOpError(error: unknown, context: OperationContext): void {
   const err = error instanceof Error ? error : new Error(String(error));
   
   // Track the error
@@ -132,7 +168,7 @@ function handleOpError(error: any, context: OperationContext): void {
   if (!context.silent) {
     const message = context.userMessage || `Error in ${context.module}: ${err.message}`;
     const type = (context.severity === 'high' || context.severity === 'critical') ? 'error' : 'info';
-    showToast(message, type);
+    emit(Events.SHOW_TOAST, { message, type });
   }
 }
 
@@ -168,7 +204,29 @@ function generateErrorFingerprint(error: Error | string, context?: Partial<Error
 /**
  * Track an error with context
  */
+// Round 7 fix: recursion guard prevents infinite loop when trackError →
+// saveErrors → lsSet → QuotaExceeded → errorHandler → trackError.
+let _isTrackingError = false;
+
 export function trackError(
+  error: Error | string,
+  context?: Partial<ErrorContext>,
+  type: TrackedError['type'] = 'error'
+): void {
+  // Guard against recursive calls from storage failure handlers
+  if (_isTrackingError) {
+    if (import.meta.env.DEV) console.warn('[ErrorTracker] Recursive call blocked:', error);
+    return;
+  }
+  _isTrackingError = true;
+  try {
+    _trackErrorInner(error, context, type);
+  } finally {
+    _isTrackingError = false;
+  }
+}
+
+function _trackErrorInner(
   error: Error | string,
   context?: Partial<ErrorContext>,
   type: TrackedError['type'] = 'error'
@@ -262,6 +320,71 @@ export function trackValidationError(
   trackError(message, { ...context, action: 'validation' }, 'validationError');
 }
 
+/**
+ * Load a module dynamically and invoke a callback with it, routing any
+ * loader failure through `trackError` (M6, Inline-Behavior-Review rev 12).
+ *
+ * The DI wiring in `app-init-di.ts` and one lazy-chart branch in
+ * `chart-renderers.ts` used to drop the promise returned by
+ * `import().then(fn)`. A network blip, a broken chunk after a mid-session
+ * deploy, or a parse error in the lazy module produced an unhandled
+ * rejection — the triggering button click did nothing and the user saw
+ * no error. The legacy inconsistency where some call sites had `void`
+ * and some didn't made the failure-mode silent either way (unhandled
+ * rejection with `void`, unhandled rejection without — neither surfaced
+ * to telemetry).
+ *
+ * `loadAndCall` restores observability: the loader error is captured by
+ * `trackError` with module + action context, and the call site stays
+ * fire-and-forget by design (the function returns `void`). Callers that
+ * need the promise handle should use `await import()` directly instead.
+ *
+ * The callback is *not* wrapped — if it throws synchronously or returns
+ * a rejected promise, that is still the caller's responsibility. This
+ * helper owns the loader boundary only, matching the lint rule
+ * `@typescript-eslint/no-floating-promises` that motivated the fix.
+ *
+ * @param loader The dynamic-import factory, e.g. `() => import('./foo.js')`.
+ * @param fn Callback invoked with the resolved module.
+ * @param context Optional telemetry context forwarded to `trackError` on
+ *   loader failure. The `action` key defaults to `'dynamic_import_failed'`
+ *   and is overridable via the context parameter.
+ */
+export function loadAndCall<T>(
+  loader: () => Promise<T>,
+  fn: (module: T) => void | Promise<void>,
+  context?: Partial<ErrorContext>
+): void {
+  // CR-Apr24-I finding 357: separate import failures from callback
+  // failures so they land in different telemetry buckets.
+  void loader()
+    .then((mod) => {
+      try {
+        const result = fn(mod);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- thenable duck-typing
+        if (result != null && typeof (result as any).catch === 'function') {
+          (result as Promise<void>).catch((err: unknown) => {
+            trackError(
+              err instanceof Error ? err : new Error(String(err)),
+              { action: 'callback_failed', ...context }
+            );
+          });
+        }
+      } catch (err: unknown) {
+        trackError(
+          err instanceof Error ? err : new Error(String(err)),
+          { action: 'callback_failed', ...context }
+        );
+      }
+    })
+    .catch((err: unknown) => {
+      trackError(
+        err instanceof Error ? err : new Error(String(err)),
+        { action: 'dynamic_import_failed', ...context }
+      );
+    });
+}
+
 // ==========================================
 // ERROR RECOVERY
 // ==========================================
@@ -353,15 +476,20 @@ export function exportErrorReport(): Blob {
 export function getErrorRate(operation: string): number {
   const state = circuitBreakerState.get(operation);
   if (!state) return 0;
-  
-  const age = Date.now() - state.timestamp.getTime();
-  if (age > ERROR_WINDOW) {
-    // Reset old entries
+
+  // ERR-03: Rolling window — prune timestamps older than ERROR_WINDOW,
+  // then compute errors-per-second from the remaining count.
+  const now = Date.now();
+  const cutoff = now - ERROR_WINDOW;
+  state.timestamps = state.timestamps.filter(t => t > cutoff);
+
+  if (state.timestamps.length === 0) {
     circuitBreakerState.delete(operation);
     return 0;
   }
-  
-  return state.count / (age / 1000); // errors per second
+
+  // Rate = errors within the window / window duration in seconds
+  return state.timestamps.length / (ERROR_WINDOW / 1000);
 }
 
 /**
@@ -391,24 +519,32 @@ export function isCircuitOpen(operation: string, threshold: number = 0.5): boole
  */
 export function updateCircuitBreaker(operation: string, error: Error): void {
   const existing = circuitBreakerState.get(operation);
-  
+  const now = Date.now();
+
   if (existing) {
-    existing.count++;
+    // ERR-03: Push timestamp into rolling window array
+    existing.timestamps.push(now);
     existing.lastError = error;
-    // Don't reset timestamp — it tracks the start of the error window for rate calculation
+    // Cap array to prevent unbounded growth (keep last 100 timestamps)
+    if (existing.timestamps.length > 100) {
+      existing.timestamps = existing.timestamps.slice(-100);
+    }
   } else {
     circuitBreakerState.set(operation, {
-      count: 1,
+      timestamps: [now],
       lastError: error,
-      timestamp: new Date(),
       isOpen: false
     });
   }
-  
-  // Clean up old entries
+
+  // Clean up old entries by staleness
   if (circuitBreakerState.size > MAX_ERRORS_STORED) {
     const oldest = Array.from(circuitBreakerState.entries())
-      .sort((a, b) => a[1].timestamp.getTime() - b[1].timestamp.getTime())[0];
+      .sort((a, b) => {
+        const aLast = a[1].timestamps[a[1].timestamps.length - 1] ?? 0;
+        const bLast = b[1].timestamps[b[1].timestamps.length - 1] ?? 0;
+        return aLast - bLast;
+      })[0];
     if (oldest) circuitBreakerState.delete(oldest[0]);
   }
 }
@@ -438,7 +574,7 @@ export function getCircuitBreakerStatus(): Array<{
   return Array.from(circuitBreakerState.entries()).map(([operation, state]) => ({
     operation,
     isOpen: state.isOpen || isCircuitOpen(operation),
-    errorCount: state.count,
+    errorCount: state.timestamps.length,
     errorRate: getErrorRate(operation),
     lastError: state.lastError.message
   }));
@@ -451,22 +587,26 @@ export function getCircuitBreakerStatus(): Array<{
 /**
  * Display error to user with recovery options
  */
+// Phase 6 Slice 1j (rev 12 L6): option fields widened for
+// `exactOptionalPropertyTypes` — error-handler.ts forwards
+// `userMessage: errorInfo.userMessage` and `context: { module: errorInfo.source }`
+// with both sources typed `T | undefined` (optional on ErrorInfo).
 export function displayError(
   error: Error | string,
   options?: {
-    recoverable?: boolean;
-    context?: Partial<ErrorContext>;
-    userMessage?: string;
+    recoverable?: boolean | undefined;
+    context?: Partial<ErrorContext> | undefined;
+    userMessage?: string | undefined;
   }
 ): void {
-  const { recoverable = false, context, userMessage } = options || {};
+  const { context, userMessage } = options || {};
   
   // Track the error
   trackError(error, context);
   
   // Show user-friendly message
   const message = userMessage || 'An error occurred. Please try again.';
-  showToast(message, 'error');
+  emit(Events.SHOW_TOAST, { message, type: 'error' });
   
   // Recovery is handled at call sites where context-specific actions are possible
 }
@@ -511,6 +651,11 @@ export function getStoredErrors(): TrackedError[] {
 export function clearErrorLog(): void {
   errorQueue = [];
   fingerprintIndex.clear();
+  // CR-Apr24-G finding 257: also clear fingerprintSamplers so console.error
+  // burst sampling resets when the user clears the log. Previously samplers
+  // survived the clear, causing the next occurrence of the same fingerprint
+  // to be throttled as if the old burst history still existed.
+  fingerprintSamplers.clear();
   saveErrors();
 }
 
@@ -519,54 +664,178 @@ export function clearErrorLog(): void {
 // ==========================================
 
 /**
+ * Convert any console.error argument shape into an `Error` instance.
+ *
+ * Fixes M28a: the prior implementation only captured `typeof args[0] === 'string'`.
+ * Idiomatic JS code calls `console.error(new Error(...))` or `console.error(errorObj)`,
+ * and third-party libraries (Preact, Lit, Firebase SDK) routinely throw through
+ * `console.error` with non-string payloads. The string-only filter silently
+ * dropped every one of those, leaving production telemetry blind to the
+ * largest source of errors. Now every shape is normalized to an Error.
+ */
+function normalizeConsoleErrorArg(arg: unknown): Error {
+  if (arg instanceof Error) return arg;
+  if (typeof arg === 'string') return new Error(arg);
+  // Capture the whole argument array's first element via String() so the
+  // message remains useful even for plain objects ("[object Object]" is
+  // still a load-bearing signal that something happened, and the
+  // fingerprint will dedupe duplicates anyway).
+  try {
+    return new Error(String(arg));
+  } catch {
+    return new Error('console.error: <unrepresentable argument>');
+  }
+}
+
+/**
+ * Per-fingerprint sampler that decides whether the current occurrence
+ * should be reported to `trackError` and, if so, how many silent
+ * occurrences to attribute to the burst.
+ *
+ * Fixes M28b: replaces the 1-second module-wide hard rate-limit. Previously
+ * a 60-error burst within a minute reported as 1 event and 59 silent drops.
+ * Now each unique fingerprint is sampled on its own schedule — first
+ * occurrence emits immediately; subsequent occurrences emit at a doubling
+ * cadence (count = 2, 4, 8, 16, 32 ...) so a real storm always surfaces
+ * within a small constant number of emits. The `droppedSinceLastEmit`
+ * field on each emit captures the silenced count for the dashboard.
+ */
+function sampleFingerprint(fingerprint: string): { emit: boolean; dropped: number } {
+  const sampler = fingerprintSamplers.get(fingerprint);
+  if (!sampler) {
+    fingerprintSamplers.set(fingerprint, {
+      count: 1,
+      dropped: 0,
+      lastEmitCount: 1,
+      nextEmitThreshold: 2
+    });
+    // Bound the sampler map so a very long-running tab with many unique
+    // fingerprints doesn't accumulate forever. Drop the oldest if we cross
+    // the cap; the next call from that fingerprint will simply re-emit
+    // and re-seed (correct, just slightly noisier under prolonged storms).
+    if (fingerprintSamplers.size > CONSOLE_ERROR_SAMPLER_MAX) {
+      const oldestKey = fingerprintSamplers.keys().next().value;
+      if (oldestKey !== undefined) fingerprintSamplers.delete(oldestKey);
+    }
+    return { emit: true, dropped: 0 };
+  }
+
+  sampler.count++;
+  if (sampler.count >= sampler.nextEmitThreshold) {
+    const dropped = sampler.dropped;
+    sampler.dropped = 0;
+    sampler.lastEmitCount = sampler.count;
+    // Exponential backoff: next emit at 2x current count.
+    sampler.nextEmitThreshold = sampler.count * 2;
+    return { emit: true, dropped };
+  }
+
+  sampler.dropped++;
+  return { emit: false, dropped: sampler.dropped };
+}
+
+/**
  * Initialize error tracking
  */
 export function initialize(): void {
   if (isInitialized) return;
-  
+
   // Load existing errors
   errorQueue = loadErrors();
-  
-  // Setup global error handlers
-  window.addEventListener('error', (event) => {
+
+  // CR-Apr24-G finding 256: rebuild fingerprintIndex from persisted queue.
+  // Previously, loaded errors were not indexed, so the next occurrence of
+  // an already-stored fingerprint was treated as a brand-new error instead
+  // of incrementing the existing aggregate count.
+  //
+  // ERR-02: Build into a local map first, then swap — avoids a window where
+  // fingerprintIndex is empty if loadErrors() returned a partial/corrupt list.
+  const rebuilt = new Map<string, TrackedError>();
+  for (const err of errorQueue) {
+    if (err.fingerprint) {
+      rebuilt.set(err.fingerprint, err);
+    }
+  }
+  fingerprintIndex.clear();
+  for (const [fp, err] of rebuilt) {
+    fingerprintIndex.set(fp, err);
+  }
+
+  // Setup global error handlers (capture handles so cleanup() can detach)
+  installedWindowErrorHandler = (event: ErrorEvent) => {
     trackError(event.error || event.message, {
       module: 'global',
       action: 'uncaught_error'
     });
-  });
-  
-  window.addEventListener('unhandledrejection', (event) => {
+  };
+  window.addEventListener('error', installedWindowErrorHandler);
+
+  installedRejectionHandler = (event: PromiseRejectionEvent) => {
     trackError(event.reason, {
       module: 'global',
       action: 'unhandled_promise'
     }, 'unhandledRejection');
-  });
-  
-  // Track console errors (rate-limited to avoid performance degradation from frequent logging)
-  const originalError = console.error;
+  };
+  window.addEventListener('unhandledrejection', installedRejectionHandler);
+
+  // Fixes M28 (Inline-Behavior-Review rev 12): widen capture + per-fingerprint
+  // burst sampling. See normalizeConsoleErrorArg / sampleFingerprint above.
+  originalConsoleError = console.error;
   let isTrackingConsoleError = false;
-  let lastConsoleErrorTrackTime = 0;
-  const CONSOLE_ERROR_TRACK_INTERVAL = 1000; // Max one track per second
 
   console.error = function(...args) {
-    const now = Date.now();
-    if (!isTrackingConsoleError && args[0] && typeof args[0] === 'string'
-        && now - lastConsoleErrorTrackTime > CONSOLE_ERROR_TRACK_INTERVAL) {
+    if (!isTrackingConsoleError && args.length > 0) {
       isTrackingConsoleError = true;
-      lastConsoleErrorTrackTime = now;
       try {
-        trackError(args[0], {
+        const normalizedError = normalizeConsoleErrorArg(args[0]);
+        const context: Partial<ErrorContext> = {
           module: 'console',
           action: 'console_error'
-        });
+        };
+        const fingerprint = generateErrorFingerprint(normalizedError, context);
+        const { emit, dropped } = sampleFingerprint(fingerprint);
+        if (emit) {
+          trackError(normalizedError, context);
+          // Attach drop metadata to the just-tracked error for dashboard visibility.
+          const tracked = fingerprintIndex.get(fingerprint);
+          if (tracked && dropped > 0) {
+            tracked.droppedSinceLastEmit = dropped;
+          }
+        }
       } finally {
         isTrackingConsoleError = false;
       }
     }
-    originalError.apply(console, args);
+    if (originalConsoleError) originalConsoleError.apply(console, args);
   };
-  
+
   isInitialized = true;
+}
+
+/**
+ * Tear down all global listeners and reset module state.
+ *
+ * Fixes L39 / L41-partial (Inline-Behavior-Review rev 12): tests that import
+ * the module need a way to detach the global error/rejection handlers and
+ * restore the original `console.error` so subsequent test cases run in
+ * isolation. Idempotent: safe to call before initialize() or twice in a row.
+ */
+export function cleanup(): void {
+  if (installedWindowErrorHandler) {
+    window.removeEventListener('error', installedWindowErrorHandler);
+    installedWindowErrorHandler = null;
+  }
+  if (installedRejectionHandler) {
+    window.removeEventListener('unhandledrejection', installedRejectionHandler);
+    installedRejectionHandler = null;
+  }
+  if (originalConsoleError) {
+    console.error = originalConsoleError;
+    originalConsoleError = null;
+  }
+  fingerprintSamplers.clear();
+  errorListeners = [];
+  isInitialized = false;
 }
 
 /**
@@ -626,7 +895,10 @@ export function getErrorStats(): {
   };
 }
 
-// Auto-initialize on import
-if (typeof window !== 'undefined') {
-  initialize();
-}
+// Fixes L39 (Inline-Behavior-Review rev 12): the module no longer auto-initializes
+// on import. Boot code is responsible for calling `initialize()` explicitly so
+// (a) tests can import the module for `trackError`-only use without inheriting
+// the global listeners, and (b) the side-effect timing is observable rather than
+// hidden inside module evaluation. As a defense-in-depth, `trackError()` itself
+// still calls `initialize()` lazily on first use, so a missed boot wiring degrades
+// gracefully into the prior auto-init behavior instead of dropping errors silently.

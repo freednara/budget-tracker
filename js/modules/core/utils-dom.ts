@@ -7,7 +7,15 @@
  * @module utils-dom
  */
 
-import { esc as escPure, sanitize } from './utils-pure.js';
+// Phase 5g-1 (Inline-Behavior-Review rev 12, L7): dropped the `sanitize`
+// import alongside the `safeSetHTML` deletion below. Phase 5g-4 Slice 3
+// then deleted `sanitize()` from utils-pure entirely after the last
+// consumer (`validator.sanitizeText`) was retired — the regex
+// sanitizer is no longer part of the codebase. Lit-html's render-time
+// auto-escaping of interpolated values is now the sole XSS defense at
+// the view boundary.
+import { esc as escPure, monthKeyParts } from './utils-pure.js';
+import { formatMonthShortYear } from './locale-service.js';
 
 // ==========================================
 // FILE/DOWNLOAD UTILITIES
@@ -35,8 +43,10 @@ export function downloadBlob(blob: Blob, filename: string): void {
  * Get the month badge label text.
  */
 export function getMonthBadge(monthKey: string): string {
-  const [y, m] = monthKey.split('-');
-  return new Date(parseInt(y), parseInt(m) - 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+  // Route through locale-service so the month-badge label respects
+  // the app's configured locale (was hardcoded 'en-US').
+  const [y, m] = monthKeyParts(monthKey);
+  return formatMonthShortYear(new Date(y, m - 1));
 }
 
 // ==========================================
@@ -61,22 +71,20 @@ export function esc(str: string): string {
 // Alias for backwards compatibility
 export { esc as escapeHtml };
 
-/**
- * Safely set innerHTML with additional XSS protection
- * Use this instead of direct innerHTML assignment for user-generated content
- */
-export function safeSetHTML(element: HTMLElement | null, html: string): void {
-  if (!element || typeof html !== 'string') return;
-
-  // Use robust sanitizer before setting innerHTML
-  const cleanHtml = sanitize(html);
-  
-  if (cleanHtml !== html) {
-    if (import.meta.env.DEV) console.warn('[Security] Stripped potentially dangerous content from HTML string');
-  }
-
-  element.innerHTML = cleanHtml;
-}
+// Phase 5g-1 (Inline-Behavior-Review rev 12, L7): deleted the
+// `safeSetHTML(element, html)` helper. Grep across js/ + tests/ confirms
+// zero callers — all user-visible rendering goes through lit-html
+// templates (`html\`...\``), which auto-escape interpolated values. The
+// regex `sanitize()` this helper depended on had documented limits
+// (DOM clobbering, mutation XSS, namespace tricks) that made it a
+// misleading "safe" facade.
+//
+// Phase 5g-4 Slice 3 (Inline-Behavior-Review rev 12, L7) then deleted
+// the standalone `sanitize()` in utils-pure.ts after retiring its last
+// consumer (`validator.sanitizeText`). The regex sanitizer is fully
+// gone from the codebase. If a future need arises for rendering
+// untrusted HTML (nothing currently does), install DOMPurify rather
+// than resurrecting either shape.
 
 // ==========================================
 // ID GENERATION (CRYPTO-SECURE)
@@ -95,7 +103,10 @@ export function generateSecureId(): string {
   // Fallback for older browsers using crypto.getRandomValues()
   if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-      const r = (crypto.getRandomValues(new Uint8Array(1))[0] & 15) | 0;
+      // Phase 6 Slice 1i (rev 12 L6): `[0]` on the freshly-allocated
+      // Uint8Array is `number | undefined` under
+      // `noUncheckedIndexedAccess`; `?? 0` keeps the bit ops typed.
+      const r = ((crypto.getRandomValues(new Uint8Array(1))[0] ?? 0) & 15) | 0;
       const v = c === 'x' ? r : (r & 0x3 | 0x8);
       return v.toString(16);
     });
@@ -128,18 +139,21 @@ export async function copyToClipboard(text: string): Promise<boolean> {
       return true;
     } else {
       // Fallback for older browsers
+      // CR-Apr24-I finding 317: wrap in try/finally so the textarea is
+      // always removed, even if execCommand throws.
       const textArea = document.createElement('textarea');
       textArea.value = text;
       textArea.style.position = 'fixed';
       textArea.style.left = '-999999px';
       textArea.style.top = '-999999px';
       document.body.appendChild(textArea);
-      textArea.focus();
-      textArea.select();
-      
-      const successful = document.execCommand('copy');
-      document.body.removeChild(textArea);
-      return successful;
+      try {
+        textArea.focus();
+        textArea.select();
+        return document.execCommand('copy');
+      } finally {
+        document.body.removeChild(textArea);
+      }
     }
   } catch (err) {
     if (import.meta.env.DEV) console.error('Failed to copy to clipboard:', err);
@@ -184,7 +198,9 @@ export function scrollIntoViewSmooth(element: Element, options?: ScrollIntoViewO
  */
 export function trapFocus(container: HTMLElement): () => void {
   const focusableElements = container.querySelectorAll<HTMLElement>(
-    'a[href], button, textarea, input[type="text"], input[type="radio"], input[type="checkbox"], select'
+    // CR-Apr24-I finding 318: added input[type="number"], input[type="date"],
+    // and [tabindex]:not([tabindex="-1"]) so all interactive elements are trapped.
+    'a[href], button, textarea, input[type="text"], input[type="radio"], input[type="checkbox"], input[type="number"], input[type="date"], select, [tabindex]:not([tabindex="-1"])'
   );
   
   const firstFocusable = focusableElements[0];

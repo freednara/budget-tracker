@@ -319,7 +319,7 @@ export async function bootSecondaryPage(
         localStorage.clear();
       }
       if (shouldSkipOnboarding) {
-        localStorage.setItem('budget_tracker_onboarding', JSON.stringify({ completed: true, step: 6 }));
+        localStorage.setItem('harbor_onboarding', JSON.stringify({ completed: true, step: 6 }));
       }
     },
     { shouldClearStorage: clearStorage, shouldSkipOnboarding: skipOnboarding }

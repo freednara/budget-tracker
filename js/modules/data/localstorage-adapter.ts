@@ -10,7 +10,7 @@
 
 import { StorageAdapter, STORES, SETTINGS_KEYS } from './storage-adapter.js';
 import { safeStorage } from '../core/safe-storage.js';
-import { SK } from '../core/state.js';
+import { SK, BACKUP_REMINDER_TX_COUNT_KEY } from '../core/state.js';
 import type {
   StorageResult,
   StorageType,
@@ -30,6 +30,11 @@ interface StorageUsage {
   limit: number;
   usage: Record<string, number>;
   percentUsed: number;
+}
+
+interface StorageSnapshotEntry {
+  key: string;
+  value: string | null;
 }
 
 interface CountFilters extends TransactionFilters {
@@ -54,7 +59,7 @@ const STORE_KEY_MAP: Partial<Record<StoreName, string>> = {
   [STORES.DEBTS]: SK.DEBTS,
   [STORES.FILTER_PRESETS]: SK.FILTER_PRESETS,
   [STORES.TX_TEMPLATES]: SK.TX_TEMPLATES,
-  [STORES.METADATA]: 'budget_tracker_metadata'
+  [STORES.METADATA]: 'harbor_metadata'
 };
 
 /**
@@ -70,8 +75,24 @@ const SETTINGS_KEY_MAP: Partial<Record<SettingKey, string>> = {
   [SETTINGS_KEYS.ROLLOVER_SETTINGS]: SK.ROLLOVER_SETTINGS,
   [SETTINGS_KEYS.ONBOARDING]: SK.ONBOARD,
   [SETTINGS_KEYS.LAST_BACKUP]: SK.LAST_BACKUP,
-  [SETTINGS_KEYS.FILTER_EXPANDED]: SK.FILTER_EXPANDED
+  [SETTINGS_KEYS.FILTER_EXPANDED]: SK.FILTER_EXPANDED,
+  // CR-Apr24-I finding 174: add explicit mapping so exportAll/importAll/
+  // clearAll use the real `backup_reminder_last_tx_count` key instead of
+  // the fabricated `harbor_lastBackupTxCount`.
+  [SETTINGS_KEYS.LAST_BACKUP_TX_COUNT]: BACKUP_REMINDER_TX_COUNT_KEY
 };
+
+const OBJECT_BACKED_STORES = new Set<StoreName>([
+  STORES.SAVINGS_GOALS,
+  STORES.MONTHLY_ALLOCATIONS,
+  STORES.ACHIEVEMENTS,
+  STORES.STREAK,
+  STORES.METADATA
+]);
+
+function hasWebLocks(): boolean {
+  return typeof navigator !== 'undefined' && typeof navigator.locks?.request === 'function';
+}
 
 // ==========================================
 // LOCALSTORAGE ADAPTER CLASS
@@ -79,9 +100,9 @@ const SETTINGS_KEY_MAP: Partial<Record<SettingKey, string>> = {
 
 export class LocalStorageAdapter extends StorageAdapter {
   private _cache: Map<string, unknown>;
-  private readonly LOCK_PREFIX = 'budget_tracker_lock_';
+  private readonly LOCK_PREFIX = 'harbor_lock_';
   private readonly LOCK_TIMEOUT = 5000; // 5 seconds max lock duration
-  private readonly WEB_LOCK_PREFIX = 'budget_tracker_web_lock_';
+  private readonly WEB_LOCK_PREFIX = 'harbor_web_lock_';
 
   constructor() {
     super();
@@ -123,14 +144,21 @@ export class LocalStorageAdapter extends StorageAdapter {
    * Get the localStorage key for a store
    */
   private _getStoreKey(store: StoreName): string {
-    return STORE_KEY_MAP[store] || `budget_tracker_${store}`;
+    return STORE_KEY_MAP[store] || `harbor_${store}`;
   }
 
   /**
    * Get the localStorage key for a settings key
    */
   private _getSettingsKey(settingsKey: string): string {
-    return SETTINGS_KEY_MAP[settingsKey as SettingKey] || `budget_tracker_${settingsKey}`;
+    const mapped = SETTINGS_KEY_MAP[settingsKey as SettingKey];
+    // CR-Apr24-I finding 179: throw on unmapped keys rather than silently
+    // fabricating `harbor_*` keys that no production code reads. The old
+    // fallback masked the lastBackupTxCount miskeying for months.
+    if (!mapped) {
+      throw new Error(`_getSettingsKey: no SETTINGS_KEY_MAP entry for "${settingsKey}"`);
+    }
+    return mapped;
   }
 
   // ==========================================
@@ -164,7 +192,7 @@ export class LocalStorageAdapter extends StorageAdapter {
     // Use Web Locks API for cross-tab atomic operations
     const lockName = `${this.LOCK_PREFIX}${store}`;
 
-    if ('locks' in navigator) {
+    if (hasWebLocks()) {
       // Use Web Locks API with AbortController timeout to prevent deadlocks
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.LOCK_TIMEOUT);
@@ -241,7 +269,7 @@ export class LocalStorageAdapter extends StorageAdapter {
     // Use Web Locks API for cross-tab atomic operations
     const lockName = `${this.LOCK_PREFIX}${store}`;
 
-    if ('locks' in navigator) {
+    if (hasWebLocks()) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.LOCK_TIMEOUT);
       try {
@@ -351,23 +379,19 @@ export class LocalStorageAdapter extends StorageAdapter {
   }
 
   async countTransactions(filters: TransactionFilters = {}): Promise<number> {
-    let transactions = await this.getAll(STORES.TRANSACTIONS) as Transaction[];
-    const countFilters = filters as CountFilters;
+    const transactions = await this.getAll(STORES.TRANSACTIONS) as Transaction[];
+    const f = filters as CountFilters;
 
-    if (countFilters.type && countFilters.type !== 'all') {
-      transactions = transactions.filter(t => t.type === countFilters.type);
+    // Single-pass filter instead of chained O(n) passes
+    let count = 0;
+    for (const t of transactions) {
+      if (f.type && f.type !== 'all' && t.type !== f.type) continue;
+      if (f.category && f.category !== 'all' && t.category !== f.category) continue;
+      if (f.reconciled !== undefined && t.reconciled !== f.reconciled) continue;
+      if (f.monthKey && !t.date?.startsWith(f.monthKey)) continue;
+      count++;
     }
-    if (countFilters.category && countFilters.category !== 'all') {
-      transactions = transactions.filter(t => t.category === countFilters.category);
-    }
-    if (countFilters.reconciled !== undefined) {
-      transactions = transactions.filter(t => t.reconciled === countFilters.reconciled);
-    }
-    if (countFilters.monthKey) {
-      transactions = transactions.filter(t => t.date?.startsWith(countFilters.monthKey!));
-    }
-
-    return transactions.length;
+    return count;
   }
 
   // ==========================================
@@ -378,7 +402,7 @@ export class LocalStorageAdapter extends StorageAdapter {
     // Use Web Locks API for cross-tab atomic batch operations
     const lockName = `${this.LOCK_PREFIX}${store}`;
 
-    if ('locks' in navigator) {
+    if (hasWebLocks()) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.LOCK_TIMEOUT);
       try {
@@ -419,7 +443,7 @@ export class LocalStorageAdapter extends StorageAdapter {
     // Use Web Locks API for cross-tab atomic batch operations
     const lockName = `${this.LOCK_PREFIX}${store}`;
 
-    if ('locks' in navigator) {
+    if (hasWebLocks()) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.LOCK_TIMEOUT);
       try {
@@ -450,14 +474,21 @@ export class LocalStorageAdapter extends StorageAdapter {
       const existing = safeStorage.getJSON(storeKey, []);
 
       // If existing data is not an array (e.g., object-shaped stores like SAVINGS_GOALS),
-      // merge items as object properties or replace entirely
+      // merge either exported object payloads or keyed item arrays.
       if (!Array.isArray(existing)) {
-        // For object-shaped stores, merge items into the existing object
         const merged = { ...(existing as Record<string, unknown>) };
-        for (const item of items as Record<string, unknown>[]) {
-          const key = this._getItemKey(store, item);
-          if (key) merged[key] = item;
+
+        if (Array.isArray(items)) {
+          for (const item of items as Record<string, unknown>[]) {
+            const key = this._getItemKey(store, item);
+            if (key) merged[key] = item;
+          }
+        } else if (items && typeof items === 'object') {
+          Object.assign(merged, items as Record<string, unknown>);
+        } else {
+          return false;
         }
+
         return safeStorage.setJSON(storeKey, merged);
       }
 
@@ -488,7 +519,7 @@ export class LocalStorageAdapter extends StorageAdapter {
       const updated = existingArr.map(item => {
         const key = this._getItemKey(store, item);
         return itemMap.has(key) ? itemMap.get(key) : item;
-      }) as unknown[];
+      });
 
       // Add any new items that weren't in the existing array
       const existingKeys = new Set(existingArr.map(item => this._getItemKey(store, item)));
@@ -541,7 +572,10 @@ export class LocalStorageAdapter extends StorageAdapter {
 
     // Export all stores
     for (const storeName of Object.values(STORES)) {
-      data[storeName] = await this.getAll(storeName as StoreName);
+      const typedStoreName = storeName as StoreName;
+      const storeKey = this._getStoreKey(typedStoreName);
+      const fallback = OBJECT_BACKED_STORES.has(typedStoreName) ? {} : [];
+      data[storeName] = safeStorage.getJSON(storeKey, fallback);
     }
 
     // Export settings
@@ -560,23 +594,40 @@ export class LocalStorageAdapter extends StorageAdapter {
   async importAll(data: Record<string, unknown>, overwrite: boolean = false): Promise<boolean> {
     try {
       if (overwrite) {
-        // Snapshot current data for rollback in case of failure (only stores being written)
-        const backupKeys: Array<{ key: string; value: string | null }> = [];
+        // Snapshot current data for rollback in case of failure (only keys being written)
+        const backupKeys: StorageSnapshotEntry[] = [];
         for (const storeName of Object.values(STORES)) {
           if (data[storeName] !== undefined) {
             const storeKey = this._getStoreKey(storeName as StoreName);
             backupKeys.push({ key: storeKey, value: localStorage.getItem(storeKey) });
           }
         }
+        if (data.settings && typeof data.settings === 'object') {
+          for (const settingsKey of Object.keys(data.settings as Record<string, unknown>)) {
+            const lsKey = this._getSettingsKey(settingsKey);
+            backupKeys.push({ key: lsKey, value: localStorage.getItem(lsKey) });
+          }
+        }
 
         try {
-          // Clear and write only stores that have data in the payload —
+          // Clear and write only stores that have data in the payload -
           // do NOT remove unrelated stores (e.g. don't wipe savings when only updating transactions)
           for (const storeName of Object.values(STORES)) {
             const items = data[storeName];
             if (items !== undefined) {
               const storeKey = this._getStoreKey(storeName as StoreName);
-              safeStorage.setJSON(storeKey, items);
+              if (!safeStorage.setJSON(storeKey, items)) {
+                throw new Error(`Failed to write store '${storeName}' during import`);
+              }
+            }
+          }
+
+          if (data.settings && typeof data.settings === 'object') {
+            for (const [key, value] of Object.entries(data.settings as Record<string, unknown>)) {
+              const lsKey = this._getSettingsKey(key);
+              if (!safeStorage.setJSON(lsKey, value)) {
+                throw new Error(`Failed to write setting '${key}' during import`);
+              }
             }
           }
         } catch (writeErr) {
@@ -595,16 +646,20 @@ export class LocalStorageAdapter extends StorageAdapter {
         for (const storeName of Object.values(STORES)) {
           const items = data[storeName];
           if (items) {
-            await this.updateBatch(storeName as StoreName, items as unknown[]);
+            const ok = await this.updateBatch(storeName as StoreName, items as unknown[]);
+            if (!ok) {
+              throw new Error(`Failed to merge store '${storeName}' during import`);
+            }
           }
         }
-      }
 
-      // Import settings
-      if (data.settings && typeof data.settings === 'object') {
-        for (const [key, value] of Object.entries(data.settings as Record<string, unknown>)) {
-          const lsKey = this._getSettingsKey(key);
-          safeStorage.setJSON(lsKey, value);
+        if (data.settings && typeof data.settings === 'object') {
+          for (const [key, value] of Object.entries(data.settings as Record<string, unknown>)) {
+            const lsKey = this._getSettingsKey(key);
+            if (!safeStorage.setJSON(lsKey, value)) {
+              throw new Error(`Failed to merge setting '${key}' during import`);
+            }
+          }
         }
       }
 

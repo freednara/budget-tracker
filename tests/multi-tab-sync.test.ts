@@ -209,7 +209,7 @@ describe('State Revision Tracking', () => {
       expect(stateRevision.needsFullSync()).toBe(false);
       
       // Simulate another tab making changes
-      mockStorage.set('budget_tracker_state_revision', JSON.stringify({
+      mockStorage.set('harbor_state_revision', JSON.stringify({
         global_revision: 5,
         key_revisions: {
           [SK.TX]: { revision: 5, timestamp: Date.now(), tabId: 'other_tab', key: SK.TX }
@@ -226,7 +226,7 @@ describe('State Revision Tracking', () => {
       await stateRevision.recordStateChange(SK.SAVINGS, {}, 'tab1');
       
       // Simulate remote changes
-      mockStorage.set('budget_tracker_state_revision', JSON.stringify({
+      mockStorage.set('harbor_state_revision', JSON.stringify({
         global_revision: 5,
         key_revisions: {
           [SK.TX]: { revision: 3, timestamp: Date.now(), tabId: 'other_tab', key: SK.TX },
@@ -259,12 +259,12 @@ describe('State Revision Tracking', () => {
       const rev1 = await stateRevision.recordStateChange(SK.TX, transactions1, 'tab1');
 
       // Simulate remote state with same revision but different checksum
-      mockStorage.set('budget_tracker_state_revision', JSON.stringify({
+      mockStorage.set('harbor_state_revision', JSON.stringify({
         global_revision: 1,
         key_revisions: {
           [SK.TX]: {
             ...rev1,
-            checksum: 'different_checksum'
+            checksum: 'sha256:different_checksum'
           }
         },
         last_sync: Date.now()
@@ -316,33 +316,47 @@ describe('Conflict Resolution', () => {
       expect(resolution).toBe('remote'); // Remote wins due to higher logical clock
     });
 
-    it('should use tab ID as tiebreaker for same timestamps', () => {
+    it('should use lexicographic tab-ID comparison as commutative tiebreaker (C9, rev 12)', () => {
+      // Both tabs evaluating the same conflict pair MUST compute the same
+      // answer, otherwise state silently diverges (split-brain). Previous
+      // behavior used `localRev.tabId === getTabId()` which evaluated to
+      // true on both tabs ("I am local"), so both kept their own value
+      // and tabs swapped state. The commutative replacement is a pure
+      // function of the pair: lexicographic comparison of tabIds.
       const timestamp = Date.now();
-      
-      const localData = {
-        value: 'local',
+
+      const aData = {
+        value: 'value-a',
         revision: {
           revision: 1,
           timestamp,
-          logicalClock: 5, // Same logical clock
-          tabId: 'test-tab-id', // Matches getTabId() mock — this tab wins ties
+          logicalClock: 5,
+          tabId: 'aaaa-tab',
           key: SK.TX
         }
       };
 
-      const remoteData = {
-        value: 'remote',
+      const bData = {
+        value: 'value-b',
         revision: {
           revision: 2,
           timestamp,
-          logicalClock: 5, // Same logical clock
-          tabId: 'other-tab', // Different tab
+          logicalClock: 5,
+          tabId: 'bbbb-tab',
           key: SK.TX
         }
       };
 
-      const resolution = stateRevision.resolveConflict(localData, remoteData);
-      expect(resolution).toBe('local'); // Local wins because localRev.tabId === getTabId()
+      // From Tab A's perspective: local='aaaa-tab', remote='bbbb-tab'
+      // 'aaaa-tab' < 'bbbb-tab' → 'local' wins → A's value
+      const aPerspective = stateRevision.resolveConflict(aData, bData);
+      expect(aPerspective).toBe('local');
+
+      // From Tab B's perspective: local='bbbb-tab', remote='aaaa-tab'
+      // 'bbbb-tab' > 'aaaa-tab' → 'remote' wins → A's value
+      // Both perspectives converge on the same winner (A's value).
+      const bPerspective = stateRevision.resolveConflict(bData, aData);
+      expect(bPerspective).toBe('remote');
     });
   });
 
@@ -351,7 +365,7 @@ describe('Conflict Resolution', () => {
       const tabId = 'tab1';
 
       // Initial state
-      const rev1 = await stateRevision.recordStateChange(SK.TX, [], tabId);
+      const _rev1 = await stateRevision.recordStateChange(SK.TX, [], tabId);
 
       // Simulate concurrent modification
       const hasConcurrentMod = stateRevision.detectConcurrentModification(SK.TX, 0);
@@ -405,8 +419,8 @@ describe('Multi-Tab Scenarios', () => {
 
   describe('Basic Multi-Tab Operations', () => {
     it('should handle state changes from multiple tabs', async () => {
-      const tab1 = tabSim.createTab('tab1');
-      const tab2 = tabSim.createTab('tab2');
+      const _tab1 = tabSim.createTab('tab1');
+      const _tab2 = tabSim.createTab('tab2');
 
       // Tab 1 makes a change
       const rev1 = await tabSim.simulateStateChange('tab1', SK.TX, [createTestTransaction()]);
@@ -423,8 +437,8 @@ describe('Multi-Tab Scenarios', () => {
     });
 
     it('should handle rapid sequential changes', async () => {
-      const tab1 = tabSim.createTab('tab1');
-      const tab2 = tabSim.createTab('tab2');
+      const _tab1 = tabSim.createTab('tab1');
+      const _tab2 = tabSim.createTab('tab2');
 
       // Simulate rapid changes from both tabs
       const changes = [];
@@ -437,7 +451,7 @@ describe('Multi-Tab Scenarios', () => {
       }
 
       expect(changes).toHaveLength(10);
-      expect(changes[changes.length - 1].revision).toBe(10);
+      expect(changes[changes.length - 1]?.revision).toBe(10);
     });
   });
 
@@ -497,8 +511,8 @@ describe('Multi-Tab Scenarios', () => {
     });
 
     it('should handle concurrent changes from different tabs', async () => {
-      const tab1 = tabSim.createTab('tab1');
-      const tab2 = tabSim.createTab('tab2');
+      const _tab1 = tabSim.createTab('tab1');
+      const _tab2 = tabSim.createTab('tab2');
 
       // Simultaneous changes to same key
       const tx1 = createTestTransaction({ description: 'Tab 1 change' });
@@ -571,7 +585,7 @@ describe('Multi-Tab Performance', () => {
       };
     }
     
-    mockStorage.set('budget_tracker_state_revision', JSON.stringify({
+    mockStorage.set('harbor_state_revision', JSON.stringify({
       global_revision: 210,
       key_revisions: remoteRevisions,
       last_sync: Date.now()

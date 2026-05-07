@@ -1,7 +1,13 @@
 import { chromium } from 'playwright';
-// @ts-ignore - express types not needed for this test script
+// @ts-expect-error: express types not needed for this throwaway dev-only test script
 import express from 'express';
 
+// Phase 6 cleanup (no-explicit-any sweep): express has no types here (see
+// ts-expect-error above), so every value off the module is typed `any`.
+// This is a one-off dev script that lives outside the app bundle; disable
+// the unsafe-assignment rule for the two downstream lines rather than
+// pulling in @types/express for a throwaway.
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 const app = express();
 app.use(express.static('dist'));
 const server = app.listen(3000, async () => {

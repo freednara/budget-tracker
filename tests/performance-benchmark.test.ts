@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import * as signals from '../js/modules/core/signals.js';
-import { calculateMonthlyTotalsWithCacheSync, invalidateAllCache } from '../js/modules/core/monthly-totals-cache.js';
+// M33 (Phase 5f): `...Sync` suffix dropped — monthly-totals-cache is now sync-only.
+import { calculateMonthlyTotalsWithCache, invalidateAllCache } from '../js/modules/core/monthly-totals-cache.js';
 import { filterTransactionsSync } from '../js/modules/orchestration/worker-manager.js';
 import { createDeterministicLedger } from './test-data-factory.js';
 
@@ -34,7 +35,7 @@ describePerf('performance benchmark baseline', () => {
       });
 
       const monthlyCacheMs = measureMs(() => {
-        calculateMonthlyTotalsWithCacheSync('2026-03');
+        calculateMonthlyTotalsWithCache('2026-03');
       });
 
       const filterMs = measureMs(() => {
@@ -60,8 +61,8 @@ describePerf('performance benchmark baseline', () => {
     }));
 
     expect(results).toHaveLength(3);
-    expect(results[0].monthTotalsMs).toBeGreaterThanOrEqual(0);
-    expect(results[1].monthlyCacheMs).toBeGreaterThanOrEqual(0);
-    expect(results[2].filterMs).toBeGreaterThanOrEqual(0);
+    expect(results[0]?.monthTotalsMs).toBeGreaterThanOrEqual(0);
+    expect(results[1]?.monthlyCacheMs).toBeGreaterThanOrEqual(0);
+    expect(results[2]?.filterMs).toBeGreaterThanOrEqual(0);
   });
 });

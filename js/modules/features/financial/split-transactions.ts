@@ -8,30 +8,23 @@
 import * as signals from '../../core/signals.js';
 import { modal } from '../../core/state-actions.js';
 import { dataSdk } from '../../data/data-manager.js';
-import { showToast, closeModal } from '../../ui/core/ui.js';
-import { parseAmount, generateId, toCents, toDollars } from '../../core/utils.js';
+import { emit, Events } from '../../core/event-bus.js';
+import { parseAmount, generateId, toCents, toDollars, fmtCur } from '../../core/utils-pure.js';
 import { getAllCats } from '../../core/categories.js';
+// CR-Apr22-D slice 6 (finding 64, [P3]): `addSplitRow` previously seeded
+// a missing-category split as the hardcoded literal `'other'`. That id
+// only exists on the DEFAULT preset — under `household`, `freelance`, or
+// `business` the id-space is different (`home_supplies`,
+// `contract_income`, etc.), so the fallback itself became a phantom id
+// and the split row rendered with a dangling category option value.
+// Reuse the shared `pickFallbackCategoryId` helper added in CR-Apr22-B
+// slice 1 so the fallback is always a real category id under the user's
+// active preset (tier 1 visible `other*`, tier 2 first visible, tier 3
+// any candidate — matches the post-delete remap contract).
+import { pickFallbackCategoryId, userCategoryConfig } from '../../core/category-store.js';
 import DOM from '../../core/dom-cache.js';
 import { html, render, repeat } from '../../core/lit-helpers.js';
 import { effect } from '@preact/signals-core';
-import type { Transaction } from '../../../types/index.js';
-
-// ==========================================
-// CURRENCY FORMATTING
-// ==========================================
-
-let splitFmtCurFn: ((v: number) => string) | null = null;
-
-/**
- * Set currency formatter for split transactions
- */
-export function setSplitFmtCur(fn: (v: number) => string): void {
-  splitFmtCurFn = fn;
-}
-
-function formatSplitAmount(amount: number): string {
-  return splitFmtCurFn ? splitFmtCurFn(amount) : `$${amount.toFixed(2)}`;
-}
 
 function focusSplitRowAmount(rowId: string): void {
   requestAnimationFrame(() => {
@@ -62,16 +55,37 @@ export function addSplitRow(): void {
   let nextRows = currentRows;
   let newAmount = toDollars(remainingCents);
 
-  if (currentRows.length === 1 && toCents(currentRows[0].amount) === originalCents) {
+  // Phase 6 Slice 1i (rev 12 L6): `currentRows[0]` is `SplitRow | undefined`
+  // under `noUncheckedIndexedAccess`; the `length === 1` guard guarantees
+  // presence, but a local narrow keeps the spread/access type-safe.
+  const firstRow = currentRows[0];
+  if (currentRows.length === 1 && firstRow && toCents(firstRow.amount) === originalCents) {
     const splitEvenlyCents = Math.floor(originalCents / 2);
     const remainderCents = originalCents - splitEvenlyCents;
-    nextRows = [{ ...currentRows[0], amount: toDollars(remainderCents) }];
+    nextRows = [{ ...firstRow, amount: toDollars(remainderCents) }];
     newAmount = toDollars(splitEvenlyCents);
   }
 
+  // CR-Apr22-D slice 6: if the parent transaction has a valid category,
+  // use it. Otherwise resolve a preset-agnostic fallback against the
+  // user's current category config — `pickFallbackCategoryId` walks the
+  // same tier-1 visible `other*` → tier-2 first visible → tier-3 any
+  // hierarchy used by the post-delete remap path, so the fallback id is
+  // guaranteed to exist on whichever preset the user is on. If the
+  // config has zero categories of the transaction's type (degenerate
+  // case — the split modal couldn't render anyway because `getAllCats`
+  // above would be empty), fall back to the literal `'other'` as a
+  // last-resort placeholder so the row shape is still well-typed; the
+  // status signal's `hasEmptyFields` branch will surface the invalid
+  // state to the user.
+  const config = userCategoryConfig.value;
+  const catType: 'expense' | 'income' = tx.type === 'income' ? 'income' : 'expense';
+  const fallbackCat = config ? pickFallbackCategoryId(config, catType, '') : null;
+  const fallbackCatId = fallbackCat?.id ?? 'other';
+
   const newRow: signals.SplitRow = {
     id: `row_${generateId()}`,
-    categoryId: tx.category || 'other',
+    categoryId: tx.category || fallbackCatId,
     amount: newAmount
   };
 
@@ -114,11 +128,11 @@ export async function saveSplit(): Promise<void> {
   const result = await dataSdk.splitTransaction(origTx, splitData);
 
   if (result.isOk) {
-    closeModal('split-modal');
+    emit(Events.CLOSE_MODAL, { id: 'split-modal' });
     modal.clearSplitTxId();
-    showToast('Transaction split successfully');
+    emit(Events.SHOW_TOAST, { message: 'Transaction split successfully', type: 'success' });
   } else {
-    showToast(`Split failed: ${result.error}`, 'error');
+    emit(Events.SHOW_TOAST, { message: 'Couldn\u2019t split this transaction \u2014 close other tabs and try again.', type: 'error' });
   }
 }
 
@@ -134,21 +148,36 @@ export function mountSplitModal(): () => void {
   if (!container) return () => {};
 
   const cleanup = effect(() => {
+    // CR-Apr24-C2b [P2] finding 100: subscribe to currency so an open
+    // split modal re-renders with refreshed `fmtCur()` formatting after
+    // a settings change. Pre-fix the effect woke only on splitTxId /
+    // splitRows / splitStatus changes — a currency switch with the
+    // modal already open kept showing stale "$1,000.00" on a yen
+    // ledger until the user touched a split row.
+    void signals.currency.value;
+    // CR-Apr24-I finding 99: explicit category dependency so the split
+    // modal re-renders its category dropdowns after a rename / recolor.
+    void signals.categoryVersion.value;
     const txId = signals.splitTxId.value;
     const rows = signals.splitRows.value;
     const status = signals.splitStatus.value;
-    
+
     if (!txId) {
       render(html``, container);
       return;
     }
 
     const tx = signals.transactions.value.find(t => t.__backendId === txId);
-    const cats = getAllCats(tx?.type || 'expense', true);
+    const cats = getAllCats(tx?.type || 'expense');
 
     const hasIncompleteRows = status.hasEmptyFields;
     const incompleteRows = rows.filter((row) => !row.categoryId || toCents(row.amount) === 0);
-    const allocatedAmount = rows.reduce((sum, row) => sum + row.amount, 0);
+    // rev 12 #16 (cents-math migration): sum split rows in integer cents so
+    // the footer "Allocated $X of $Y" line agrees with `status.remainingAmount`
+    // (which is computed in cents via the split-status signal). A pure-float
+    // sum here could display $49.99 / $50.00 while the validator says
+    // "Balanced", which confuses users and looks like a validator bug.
+    const allocatedAmount = toDollars(rows.reduce((sum, row) => sum + toCents(row.amount), 0));
     const bgColor = status.isValid
       ? 'var(--color-income)15'
       : status.remainingAmount < 0
@@ -166,38 +195,36 @@ export function mountSplitModal(): () => void {
     const statusText = status.isValid
       ? '✓ Balanced'
       : status.remainingAmount < 0
-        ? `Over by $${Math.abs(status.remainingAmount).toFixed(2)}`
+        ? `Over by ${fmtCur(Math.abs(status.remainingAmount))}`
         : hasIncompleteRows
           ? 'Complete or remove empty split rows'
-          : `$${status.remainingAmount.toFixed(2)} remaining`;
+          : `${fmtCur(status.remainingAmount)} remaining`;
     const footerDetail = incompleteRows.length > 0
       ? `${incompleteRows.length} row${incompleteRows.length === 1 ? '' : 's'} still need attention`
-      : `Allocated ${formatSplitAmount(allocatedAmount)} of ${formatSplitAmount(status.originalAmount)}`;
-    const controlStyle = 'background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);';
-    const subtleButtonStyle = 'background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-input);';
-    const removeButtonStyle = 'background: color-mix(in srgb, var(--color-expense) 12%, transparent); color: var(--color-expense); border: 1px solid color-mix(in srgb, var(--color-expense) 28%, transparent);';
-    const addRowButtonStyle = 'background: var(--bg-input); color: var(--text-secondary); border: 1px dashed var(--border-input);';
-    const saveButtonStyle = status.isValid
-      ? 'background: linear-gradient(135deg, var(--color-accent), #2563eb); color: white; border: none;'
-      : 'background: color-mix(in srgb, var(--color-accent) 20%, var(--bg-input)); color: var(--text-tertiary); border: 1px solid var(--border-input);';
+      : `Allocated ${fmtCur(allocatedAmount)} of ${fmtCur(status.originalAmount)}`;
+    // UI/UX Review (CSS drift fix): replaced inline style strings with
+    // CSS utility classes. Error variant kept as conditional style since
+    // it's dynamically applied per-row.
+    const controlErrorStyle = 'border-color: var(--color-warning); box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-warning) 40%, transparent);';
 
     render(html`
       <div class="modal-content max-w-2xl w-full p-6">
         <div class="flex justify-between items-center mb-6">
           <h3 class="text-xl font-black text-primary">Split Transaction</h3>
-          <button @click=${() => { modal.clearSplitTxId(); closeModal('split-modal'); }} 
-                  class="w-10 h-10 rounded-lg font-bold text-lg transition-all"
-                  style=${subtleButtonStyle}>✕</button>
+          <button @click=${() => { modal.clearSplitTxId(); emit(Events.CLOSE_MODAL, { id: 'split-modal' }); }}
+                  class="w-10 h-10 rounded-lg font-bold text-lg transition-all form-input-secondary"
+                  aria-label="Close split transaction modal"
+                  title="Close">✕</button>
         </div>
 
-        <div class="p-4 rounded-xl mb-6 flex justify-between items-center" style="background: var(--bg-card-section);">
+        <div class="p-4 rounded-xl mb-6 flex justify-between items-center card-section">
           <div>
             <div class="text-xs text-tertiary uppercase font-bold tracking-tighter">Original</div>
             <div class="text-sm font-bold text-primary">${tx?.description}</div>
           </div>
           <div class="text-right">
             <div class="text-xs text-tertiary uppercase font-bold tracking-tighter">Amount</div>
-            <div id="split-original-amount" class="text-lg font-black text-primary">$${tx?.amount.toFixed(2)}</div>
+            <div id="split-original-amount" class="text-lg font-black text-primary">${tx ? fmtCur(tx.amount) : fmtCur(0)}</div>
           </div>
         </div>
 
@@ -210,49 +237,94 @@ export function mountSplitModal(): () => void {
               : hasAmountError
                 ? 'Enter an amount greater than 0'
                 : '';
-            const rowControlStyle = rowError
-              ? `${controlStyle} border-color: var(--color-warning); box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-warning) 40%, transparent);`
-              : controlStyle;
+            const rowControlStyle = rowError ? controlErrorStyle : '';
 
             return html`
               <div class="space-y-1" data-split-row=${r.id}>
                 <div class="flex items-center justify-between">
-                  <span class="text-xs font-bold" style="color: var(--text-secondary);">Split ${index + 1}</span>
+                  <span class="text-xs font-bold text-secondary">Split ${index + 1}</span>
                   ${index === 0 && rows.length === 1 ? html`
-                    <span class="text-[11px] font-bold" style="color: var(--text-tertiary);">Add another row to break this up</span>
+                    <span class="text-[11px] font-bold text-tertiary">Add another row to break this up</span>
                   ` : ''}
                 </div>
                 <div class="split-row flex gap-2 items-center">
-                  <select class="flex-1 px-2 py-1 rounded text-sm"
+                  <!--
+                    Design-Review-Apr21 P2 (batch 6 follow-up): each
+                    split row previously exposed two unlabeled form
+                    controls (category select + amount input). Visual
+                    context ("Split 1", "Split 2"...) was present but
+                    wasn't bound to the controls, so screen-reader
+                    users walking the modal hit a sequence of bare
+                    "combobox" / "spin button" announcements with no
+                    way to tell which row owned which field. Added
+                    row-scoped aria-labels that combine the row
+                    identity with the field purpose — "Split N
+                    category" / "Split N amount" — so each control
+                    announces full context on focus. Matches the
+                    identifier-in-label pattern used for ledger
+                    edit/delete/reconcile/split controls and the
+                    debt-list edit/delete/payment buttons.
+
+                    Design-Review-Apr21 P3 (batch 6 follow-up): the
+                    shared modal opener's focus-resolver picks the
+                    first focusable control unless one is tagged with
+                    data-modal-initial-focus. The Close button comes
+                    first in DOM order, so the dialog used to open
+                    focused on dismiss instead of the first editable
+                    field. Tag the FIRST row's category select as
+                    the explicit initial-focus target so keyboard
+                    users land ready to edit. Subsequent rows
+                    intentionally omit the tag — the resolver only
+                    reads the first match.
+                  -->
+                  <select class="flex-1 px-2 py-1 rounded text-sm form-input"
                           style=${rowControlStyle}
                           .value=${r.categoryId}
+                          aria-label=${`Split ${index + 1} category`}
+                          aria-describedby=${rowError ? `split-row-${r.id}-error` : null}
+                          aria-invalid=${hasCategoryError ? 'true' : 'false'}
+                          ?data-modal-initial-focus=${index === 0}
                           @change=${(e: Event) => {
                             const target = e.target as HTMLSelectElement;
                             updateRow(r.id, { categoryId: target.value });
                           }}>
                     ${cats.map(c => html`
-                      <option value="${c.id}">${c.parent ? '↳ ' : ''}${c.emoji} ${c.name}</option>
+                      <option value="${c.id}">${c.emoji} ${c.name}</option>
                     `)}
                   </select>
-                  
-                  <input type="number" 
-                         class="w-24 px-2 py-1 rounded text-sm text-right"
+
+                  <input type="number"
+                         class="w-24 px-2 py-1 rounded text-sm text-right form-input"
                          style=${rowControlStyle}
                          .value=${String(r.amount || '')}
                          placeholder="0.00"
                          step="0.01"
+                         aria-label=${`Split ${index + 1} amount`}
+                         aria-describedby=${rowError ? `split-row-${r.id}-error` : null}
+                         aria-invalid=${hasAmountError ? 'true' : 'false'}
                          @input=${(e: Event) => {
                            const target = e.target as HTMLInputElement;
                            updateRow(r.id, { amount: parseAmount(target.value) });
                          }}>
-                  
-                  <button @click=${() => removeSplitRow(r.id)} 
-                          class="px-3 py-1 rounded text-sm font-bold transition-all"
-                          style=${removeButtonStyle}
-                          aria-label="Remove split row">Remove</button>
+
+                  <!--
+                    Design-Review-Apr21 P3 (batch 6 follow-up):
+                    previously every remove button announced the same
+                    "Remove split row" text, so AT users in a
+                    multi-row split could not tell which row the
+                    action targeted without walking surrounding
+                    content. Interpolate the row index into the
+                    accessible name so the button announces
+                    "Remove split 2" / "Remove split 3" etc.,
+                    mirroring the two-tap delete pattern used on
+                    debts and savings goals.
+                  -->
+                  <button @click=${() => removeSplitRow(r.id)}
+                          class="px-3 py-1 rounded text-sm font-bold transition-all btn-tinted-outline text-expense"
+                          aria-label=${`Remove split ${index + 1}`}>Remove</button>
                 </div>
                 ${rowError ? html`
-                  <div class="text-xs font-bold" style="color: var(--color-warning);">
+                  <div id="split-row-${r.id}-error" role="alert" class="text-xs font-bold text-warning">
                     ${rowError}
                   </div>
                 ` : ''}
@@ -261,9 +333,8 @@ export function mountSplitModal(): () => void {
           })}
         </div>
 
-        <button id="add-split-row" @click=${addSplitRow} 
-                class="w-full py-2 rounded-lg text-sm font-bold transition-all mb-6"
-                style=${addRowButtonStyle}>
+        <button id="add-split-row" @click=${addSplitRow}
+                class="w-full py-2 rounded-lg text-sm font-bold transition-all mb-6 btn-dashed">
           + Add Another Category
         </button>
 
@@ -273,19 +344,17 @@ export function mountSplitModal(): () => void {
             <div id="split-remaining" class="text-sm font-bold" style="color: ${textColor}">
               ${statusText}
             </div>
-            <div class="text-xs font-bold mt-1" style="color: var(--text-tertiary);">
+            <div class="text-xs font-bold mt-1 text-tertiary">
               ${footerDetail}
             </div>
           </div>
           
           <div class="flex gap-3 min-w-[260px]">
-            <button @click=${() => { modal.clearSplitTxId(); closeModal('split-modal'); }} 
-                    class="flex-1 py-3 rounded-lg font-bold text-sm transition-all"
-                    style=${subtleButtonStyle}>Cancel</button>
+            <button @click=${() => { modal.clearSplitTxId(); emit(Events.CLOSE_MODAL, { id: 'split-modal' }); }}
+                    class="flex-1 py-3 rounded-lg font-bold text-sm transition-all form-input-secondary">Cancel</button>
             <button id="save-split" @click=${saveSplit}
                     ?disabled=${!status.isValid}
-                    class="flex-1 py-3 rounded-lg font-bold text-sm transition-all ${!status.isValid ? 'opacity-70 cursor-not-allowed' : ''}"
-                    style=${saveButtonStyle}>
+                    class="flex-1 py-3 rounded-lg font-bold text-sm transition-all ${status.isValid ? 'btn-primary' : 'opacity-70 cursor-not-allowed form-input-secondary'}">
               Save Splits
             </button>
           </div>

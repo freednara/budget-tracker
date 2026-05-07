@@ -57,7 +57,7 @@ test.describe('Onboarding', () => {
 
     await expect
       .poll(async () => page.evaluate(() => {
-        const data = localStorage.getItem('budget_tracker_onboarding');
+        const data = localStorage.getItem('harbor_onboarding');
         return data ? JSON.parse(data) : null;
       }))
       .toMatchObject({ completed: true, active: false, step: 0 });

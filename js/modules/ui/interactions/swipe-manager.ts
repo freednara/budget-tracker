@@ -10,6 +10,7 @@
  */
 
 import type { TouchHandlers, SwipeConfig } from '../../../types/index.js';
+import DOM from '../../core/dom-cache.js';
 
 // ==========================================
 // CONFIGURATION
@@ -126,7 +127,7 @@ export const swipeManager = {
    * Attach swipe listeners to a container
    */
   attach(container: HTMLElement): void {
-    const content = container.querySelector('.swipe-content') as HTMLElement | null;
+    const content = container.querySelector<HTMLElement>('.swipe-content');
     if (!content) return;
 
     // Avoid double-attaching
@@ -202,8 +203,14 @@ export const swipeManager = {
     });
 
     // Initialize touch state
-    state.startX = e.touches[0].clientX;
-    state.startY = e.touches[0].clientY;
+    // Phase 6 Slice 1i (rev 12 L6): `TouchList[0]` is
+    // `Touch | undefined` under `noUncheckedIndexedAccess`. Touch
+    // events always carry at least one point; bail defensively on
+    // the empty-touch case rather than let NaN propagate.
+    const t0 = e.touches[0];
+    if (!t0) return;
+    state.startX = t0.clientX;
+    state.startY = t0.clientY;
     state.startTime = Date.now();
     state.currentOffset = 0;
     state.isLocked = false;
@@ -219,8 +226,12 @@ export const swipeManager = {
     const state = getSwipeState(content);
     if (!state.startX) return;
 
-    const diffX = e.touches[0].clientX - state.startX;
-    const diffY = e.touches[0].clientY - state.startY;
+    // Phase 6 Slice 1i (rev 12 L6): same `TouchList[0]` narrowing as
+    // the start handler.
+    const t0 = e.touches[0];
+    if (!t0) return;
+    const diffX = t0.clientX - state.startX;
+    const diffY = t0.clientY - state.startY;
     const distance = Math.sqrt(diffX * diffX + diffY * diffY);
 
     // Early exit if not enough movement
@@ -379,7 +390,7 @@ export const swipeManager = {
    * Close all open swipes
    */
   closeAll(): void {
-    document.querySelectorAll<HTMLElement>('.swipe-container').forEach(c => this.closeSwipe(c));
+    DOM.queryAll<HTMLElement>('.swipe-container').forEach(c => this.closeSwipe(c));
   },
 
   /**
@@ -390,7 +401,7 @@ export const swipeManager = {
     attachedElements: number;
     statesInMemory: number;
   } {
-    const attachedElements = document.querySelectorAll<HTMLElement>('.swipe-content').length;
+    const attachedElements = DOM.queryAll<HTMLElement>('.swipe-content').length;
     
     return {
       activeSwipes: activeSwipeContainer ? 1 : 0,

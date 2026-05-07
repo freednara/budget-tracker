@@ -7,10 +7,10 @@
  * @module multi-tab-sync-conflicts
  */
 
-import { lsGet, lsSet } from './state.js';
-import { showToast } from '../ui/core/ui.js';
-import { emit } from './event-bus.js';
-import type { Transaction, SavingsGoal } from '../../types/index.js';
+import { lsSet, lsGet } from './state.js';
+import { emit, Events } from './event-bus.js';
+import { trackError } from './error-tracker.js';
+import type { Transaction } from '../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
@@ -22,9 +22,12 @@ export interface ConflictResolution {
   mergedValue?: unknown;
 }
 
+// Phase 6 Slice 1j (rev 12 L6): `activeField` widened so callers can
+// assign explicit `undefined` (e.g. `markUserStoppedTyping()` clearing
+// the field) under `exactOptionalPropertyTypes`.
 export interface UserActivityState {
   isTyping: boolean;
-  activeField?: string;
+  activeField?: string | undefined;
   lastActivity: number;
   unsavedChanges: boolean;
 }
@@ -80,12 +83,29 @@ export function detectConflict(localValue: unknown, remoteValue: unknown): boole
 // ==========================================
 
 /**
- * Resolve conflict using the specified strategy
+ * Resolve conflict using the specified strategy.
+ *
+ * Every branch MUST be commutative w.r.t. the (local, remote) pair:
+ * Tab A evaluates (A, B) and Tab B evaluates (B, A) for the same
+ * conflict. If the two calls pick different values, the tabs swap
+ * state and silently diverge. See Inline-Behavior-Review rev 12 C9.
+ *
+ * The ConflictData contract here does not carry logical clocks or
+ * tab IDs, so we can't apply the full (logicalClock, timestamp, tabId)
+ * comparator used in state-revision.ts. The commutative fallback is a
+ * deterministic comparator over the *values themselves* — both tabs
+ * compute the same answer regardless of which side is "local".
  */
 export function resolveConflict(conflict: ConflictData): ConflictResolution {
   const { key, localValue, remoteValue, userActivity } = conflict;
-  
-  // If user is actively editing, prefer local
+
+  // Active-user bias: if a user is actively editing on this tab, prefer
+  // local. Note this is *not* fully commutative when both tabs are
+  // actively editing at the same instant — each tab picks its own value
+  // and they diverge. That split-brain is accepted here because the
+  // caller is expected to promote simultaneous-edit cases to
+  // merge_required / manual resolution upstream. For the common case
+  // (exactly one tab is actively editing), this behaves correctly.
   if (hasActiveUserInteraction(userActivity)) {
     return {
       strategy: 'local',
@@ -93,8 +113,9 @@ export function resolveConflict(conflict: ConflictData): ConflictResolution {
       mergedValue: localValue
     };
   }
-  
-  // For transactions, try to merge
+
+  // For transactions, try to merge. `mergeTransactions` unions by
+  // __backendId so it's commutative on the pair.
   if (key.includes('transaction')) {
     const merged = mergeTransactions(
       localValue as Transaction[],
@@ -108,22 +129,54 @@ export function resolveConflict(conflict: ConflictData): ConflictResolution {
       };
     }
   }
-  
-  // For numeric values, use the larger (more recent activity)
-  if (typeof localValue === 'number' && typeof remoteValue === 'number') {
+
+  // Deterministic fallback: pick whichever value sorts lexicographically
+  // smaller by JSON representation. This is *commutative by construction*
+  // — (A, B) and (B, A) both return the min of {A, B}. The choice isn't
+  // semantically motivated (smaller vs. larger), but it converges, which
+  // matters more than the arbitrary winner when there's no richer signal
+  // to break the tie.
+  //
+  // Previous behavior:
+  //   - Numeric branch used Math.max, which silently reverted any decrease
+  //     (goal balance correction, allocation reduction, debt paydown).
+  //   - Default branch returned `remote`, which from each tab's perspective
+  //     meant "keep the other tab's value" — a deterministic swap.
+  // Fixes C9 (Inline-Behavior-Review rev 12). C10 (Math.max semantics) is
+  // collaterally fixed by the same change.
+  const localKey = stableStringify(localValue);
+  const remoteKey = stableStringify(remoteValue);
+  if (localKey <= remoteKey) {
     return {
-      strategy: 'remote',
+      strategy: 'local',
       resolved: true,
-      mergedValue: Math.max(localValue, remoteValue)
+      mergedValue: localValue
     };
   }
-  
-  // Default to remote (most recent)
   return {
     strategy: 'remote',
     resolved: true,
     mergedValue: remoteValue
   };
+}
+
+/**
+ * JSON.stringify produces different output for the same object depending
+ * on key insertion order, which would break the commutativity of the
+ * comparator. Stable stringify sorts object keys recursively so the same
+ * logical value always produces the same key.
+ */
+function stableStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, v) => {
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(v).sort()) {
+        sorted[k] = (v as Record<string, unknown>)[k];
+      }
+      return sorted;
+    }
+    return v;
+  });
 }
 
 /**
@@ -177,9 +230,9 @@ export function showConflictUI(conflicts: ConflictData[]): Promise<ConflictResol
       const resolution = resolveConflict(conflict);
       
       if (resolution.strategy === 'merge') {
-        showToast('Data synchronized and merged from another tab', 'info');
+        emit(Events.SHOW_TOAST, { message: 'Changes from another tab have been merged.', type: 'info' });
       } else if (resolution.strategy === 'local') {
-        showToast('Kept your local changes during sync', 'info');
+        emit(Events.SHOW_TOAST, { message: 'Your changes were kept. The other tab\u2019s changes were skipped.', type: 'info' });
       }
       
       return resolution;
@@ -197,11 +250,33 @@ export function applyResolutions(
   resolutions: ConflictResolution[]
 ): void {
   conflicts.forEach((conflict, index) => {
+    // Phase 6 Slice 1i (rev 12 L6): `resolutions[index]` is
+    // `ConflictResolution | undefined` under
+    // `noUncheckedIndexedAccess`. Callers are expected to pass
+    // 1:1 aligned arrays; skip defensively on any gap rather than
+    // crash mid-apply.
     const resolution = resolutions[index];
-    if (resolution.resolved && resolution.mergedValue !== undefined) {
+    if (resolution && resolution.resolved && resolution.mergedValue !== undefined) {
+      // STATE-04: Re-validate that local state hasn't changed since the
+      // conflict was captured. If another tab updated this key while the
+      // user was deciding, the conflict is stale and applying the old
+      // resolution could overwrite newer data.
+      const currentValue = lsGet(conflict.key, undefined);
+      const currentJson = JSON.stringify(currentValue);
+      const capturedJson = JSON.stringify(conflict.localValue);
+      if (currentJson !== capturedJson) {
+        trackError(
+          `Stale conflict resolution skipped for ${conflict.key}: local value changed since conflict was detected`,
+          { module: 'multi-tab-sync-conflicts', action: 'stale_conflict_skip' },
+          'validationError'
+        );
+        emit('conflict:stale', { key: conflict.key, strategy: resolution.strategy });
+        return; // Skip this resolution — the conflict should be re-detected
+      }
+
       // Apply the resolved value
       lsSet(conflict.key, resolution.mergedValue);
-      
+
       // Emit update event
       emit('conflict:resolved', {
         key: conflict.key,

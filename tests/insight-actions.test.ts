@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../js/modules/ui/core/ui-navigation.js', async () => {
   const actual = await vi.importActual<typeof import('../js/modules/ui/core/ui-navigation.js')>(
@@ -59,6 +59,11 @@ describe('insight action handlers', () => {
 
     vi.clearAllMocks();
     vi.spyOn(pagination, 'resetPage').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
   });
 
   it('routes filter-category insights through transactions filtering without DI init', async () => {

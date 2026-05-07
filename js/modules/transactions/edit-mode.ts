@@ -13,7 +13,8 @@ import {
   formAmount, formDescription, formDate, formTags,
   formNotes, formRecurring, formRecurringType, formRecurringEnd
 } from './template-manager.js';
-import { getTodayStr, parseLocalDate } from '../core/utils.js';
+import { getTodayStr, parseLocalDate } from '../core/utils-pure.js';
+import { formatDateShort } from '../core/locale-service.js';
 import DOM from '../core/dom-cache.js';
 import { html, render } from '../core/lit-helpers.js';
 import { effect } from '@preact/signals-core';
@@ -86,6 +87,70 @@ export function cancelEditing(): void {
 }
 
 /**
+ * Advance a date by one step of the given recurring frequency, clamping the
+ * day-of-month to preserve the caller's original day when the target month
+ * is shorter (e.g. Jan 31 → Feb 28, Feb 29 → Feb 28 on non-leap years).
+ *
+ * Exported for direct unit testing — the preview loop below is the only
+ * in-app caller, but the same leap-year / month-length invariants also
+ * hold for every recurring-generator downstream, so isolating the math in
+ * a pure function guards against drift across the codebase.
+ *
+ * rev 12 L27: yearly case added so Feb 29 starts no longer silently roll
+ * to Mar 1 of the following year. Matches the same clamping pattern used
+ * by monthly and quarterly cases, and aligns with the authoritative
+ * generator in `data/recurring-templates.ts`.
+ */
+export function advanceRecurringPreviewDate(
+  cur: Date,
+  type: string,
+  originalDay: number
+): Date {
+  switch (type) {
+    case 'daily': {
+      const next = new Date(cur);
+      next.setDate(next.getDate() + 1);
+      return next;
+    }
+    case 'weekly': {
+      const next = new Date(cur);
+      next.setDate(next.getDate() + 7);
+      return next;
+    }
+    case 'biweekly': {
+      const next = new Date(cur);
+      next.setDate(next.getDate() + 14);
+      return next;
+    }
+    case 'monthly': {
+      // Prevent day-of-month drift (e.g. Jan 31 → Mar 3)
+      const nextMonth = cur.getMonth() + 1;
+      const nextYear = cur.getFullYear() + (nextMonth > 11 ? 1 : 0);
+      const actualMonth = nextMonth % 12;
+      const maxDay = new Date(nextYear, actualMonth + 1, 0).getDate();
+      return new Date(nextYear, actualMonth, Math.min(originalDay, maxDay));
+    }
+    case 'quarterly': {
+      const nextMonth = cur.getMonth() + 3;
+      const nextYear = cur.getFullYear() + Math.floor(nextMonth / 12);
+      const actualMonth = nextMonth % 12;
+      const maxDay = new Date(nextYear, actualMonth + 1, 0).getDate();
+      return new Date(nextYear, actualMonth, Math.min(originalDay, maxDay));
+    }
+    case 'yearly': {
+      // Prevent Feb 29 → Mar 1 drift on non-leap years (and preserve
+      // the Feb 29 start when the next year happens to be a leap year)
+      const nextYear = cur.getFullYear() + 1;
+      const actualMonth = cur.getMonth();
+      const maxDay = new Date(nextYear, actualMonth + 1, 0).getDate();
+      return new Date(nextYear, actualMonth, Math.min(originalDay, maxDay));
+    }
+    default:
+      return new Date(cur);
+  }
+}
+
+/**
  * Update the recurring transaction preview
  * WATCHES: formDate, formRecurringEnd, formRecurringType, formRecurring
  */
@@ -123,29 +188,7 @@ export function mountRecurringPreview(): () => void {
     const originalDay = cur.getDate();
     while (cur <= endDate && count < MAX) {
       count++;
-      switch (type) {
-        case 'daily': cur.setDate(cur.getDate() + 1); break;
-        case 'weekly': cur.setDate(cur.getDate() + 7); break;
-        case 'biweekly': cur.setDate(cur.getDate() + 14); break;
-        case 'monthly': {
-          // Prevent day-of-month drift (e.g. Jan 31 → Mar 3)
-          const nextMonth = cur.getMonth() + 1;
-          const nextYear = cur.getFullYear() + (nextMonth > 11 ? 1 : 0);
-          const actualMonth = nextMonth % 12;
-          const maxDay = new Date(nextYear, actualMonth + 1, 0).getDate();
-          cur = new Date(nextYear, actualMonth, Math.min(originalDay, maxDay));
-          break;
-        }
-        case 'quarterly': {
-          const nextMonth = cur.getMonth() + 3;
-          const nextYear = cur.getFullYear() + Math.floor(nextMonth / 12);
-          const actualMonth = nextMonth % 12;
-          const maxDay = new Date(nextYear, actualMonth + 1, 0).getDate();
-          cur = new Date(nextYear, actualMonth, Math.min(originalDay, maxDay));
-          break;
-        }
-        case 'yearly': cur.setFullYear(cur.getFullYear() + 1); break;
-      }
+      cur = advanceRecurringPreviewDate(cur, type, originalDay);
     }
 
     render(html`
@@ -154,7 +197,7 @@ export function mountRecurringPreview(): () => void {
           <strong>${count}</strong> transactions will be created
         </p>
         <p class="text-[10px] text-tertiary">
-          From ${startDate.toLocaleDateString()} to ${endDate.toLocaleDateString()}
+          From ${formatDateShort(startDate)} to ${formatDateShort(endDate)}
         </p>
         ${count >= MAX ? html`
           <p class="text-[10px] text-expense font-black uppercase tracking-widest mt-2">
@@ -189,7 +232,7 @@ export function mountEditUI(): () => void {
     if (submitBtn) {
       submitBtn.textContent = btnText;
       if (isEditing) {
-        submitBtn.style.background = 'linear-gradient(135deg, var(--color-accent), #1e40af)';
+        submitBtn.style.background = 'linear-gradient(135deg, var(--color-accent), var(--color-accent-btn))';
       } else {
         submitBtn.style.background = 'linear-gradient(135deg, var(--color-income), var(--color-income-dark))';
       }

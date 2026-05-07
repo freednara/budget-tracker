@@ -1,30 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { clearFieldErrorMock } = vi.hoisted(() => ({
-  clearFieldErrorMock: vi.fn(),
-}));
-
-vi.mock('../js/modules/core/validator.js', async () => {
-  const actual = await vi.importActual('../js/modules/core/validator.js');
-  return {
-    ...actual,
-    clearFieldError: clearFieldErrorMock,
-  };
-});
-
 import DOM from '../js/modules/core/dom-cache.js';
 import { initKeyboardEvents } from '../js/modules/ui/interactions/keyboard-events.js';
+// Phase 5g-1 (Inline-Behavior-Review rev 12, L52): the standalone
+// `clearFieldError(fieldName)` export was deleted from validator.ts.
+// keyboard-events.ts now calls `validator.clearFieldError(element)` on the
+// singleton, so the test spies on that singleton method (with the actual
+// element argument) instead of mocking the deleted named export.
+import { validator } from '../js/modules/core/validator.js';
 
 describe('keyboard-events lifecycle', () => {
   let cleanup: (() => void) | null = null;
+  let clearFieldErrorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    clearFieldErrorMock.mockReset();
     document.body.innerHTML = `
       <input id="amount" />
       <input id="date" />
     `;
     DOM.clearAll();
+    clearFieldErrorSpy = vi.spyOn(validator, 'clearFieldError').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -32,6 +27,7 @@ describe('keyboard-events lifecycle', () => {
     cleanup = null;
     DOM.clearAll();
     document.body.innerHTML = '';
+    clearFieldErrorSpy.mockRestore();
   });
 
   it('does not duplicate validation listeners after re-init and removes them on cleanup', () => {
@@ -44,8 +40,8 @@ describe('keyboard-events lifecycle', () => {
     amountInput.dispatchEvent(new Event('input', { bubbles: true }));
     dateInput.dispatchEvent(new Event('change', { bubbles: true }));
 
-    expect(clearFieldErrorMock).toHaveBeenNthCalledWith(1, 'amount');
-    expect(clearFieldErrorMock).toHaveBeenNthCalledWith(2, 'date');
+    expect(clearFieldErrorSpy).toHaveBeenNthCalledWith(1, amountInput);
+    expect(clearFieldErrorSpy).toHaveBeenNthCalledWith(2, dateInput);
 
     cleanup();
     cleanup = null;
@@ -53,6 +49,6 @@ describe('keyboard-events lifecycle', () => {
     amountInput.dispatchEvent(new Event('input', { bubbles: true }));
     dateInput.dispatchEvent(new Event('change', { bubbles: true }));
 
-    expect(clearFieldErrorMock).toHaveBeenCalledTimes(2);
+    expect(clearFieldErrorSpy).toHaveBeenCalledTimes(2);
   });
 });

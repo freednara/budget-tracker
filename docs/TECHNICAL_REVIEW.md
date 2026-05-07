@@ -1,105 +1,153 @@
-# Budget Tracker - Technical Review Report 🔍
+# Harbor Ledger — Technical Review
 
-## Executive Summary
-Comprehensive technical review of the modernized Budget Tracker codebase. Following a major refactoring, the application now demonstrates **enterprise-grade architecture**, **robust type safety**, and **exceptional performance at scale**. Previous critical issues (monolithic app.js, memory leaks, performance bottlenecks) have been successfully resolved.
+**Scope:** architectural, performance, and quality snapshot of the Harbor Ledger codebase at v2.6.2.
+**Purpose:** internal technical reference for contributors and for planning v3.0 work. Not a marketing document.
+
+## 1. Architecture
+
+### Layering
+Harbor Ledger uses a strict layered architecture pinned by contract tests in `tests/architecture-contract.test.ts`:
+
+```
+types/ → core/ → data/ → features/ → orchestration/ → ui/ + components/
+```
+
+Cross-layer imports outside this ordering are narrow, documented exceptions tracked in the architecture contract test. The most notable intentional exception is `data/transaction-renderer.ts`, which bridges the persistence layer into the UI layer to allow low-latency ledger rerenders.
+
+### State management
+The app uses `@preact/signals-core` for fine-grained reactivity. All app-facing state mutations default through action objects in `core/state-actions.ts`. Direct signal writes are restricted to an **11-file allowlist** enforced by the architecture contract test. The action-object groups are: `navigation`, `form`, `modal`, `settings`, `data`, `savingsGoals`, `pagination`, `filters`, `calendar`, `alerts`, `onboarding`, `debts`, and `syncState`.
+
+### Storage
+Tiered persistence via `data/storage-manager.ts`:
+- **Primary:** IndexedDB, accessed through `indexeddb-adapter.ts` with a `BaseStorageAdapter` contract
+- **Fallback:** LocalStorage, for environments or failure modes where IndexedDB is unavailable (private browsing, quota exhaustion)
+- **Migration:** `data/migration.ts` with idempotent, versioned schema evolution
+
+Atomic write operations are coordinated by `data/data-manager.ts` and `data/transaction-manager.ts`, which use a LIFO rollback stack to unwind partial failures.
+
+### Concurrency
+Multi-tab coordination is built on:
+- `core/mutex.ts` — custom mutex implementation for atomic storage writes
+- Web Locks API (`navigator.locks`) — origin-wide exclusive access for critical sections
+- `BroadcastChannel` — inter-tab message bus for state-change notifications
+- `core/multi-tab-sync*.ts` — conflict-resolution layers built on top of the above
+
+The conflict-resolution stack combines Lamport clocks, vector clocks, and atomic state groups (`core/state-revision.ts`) to establish causality for concurrent edits, with a user-activity-aware deferral layer that avoids clobbering in-progress edits in inactive tabs.
+
+### Dependency injection
+`core/di-container.ts` implements a lazy-loading DI container. Services are registered by interface and resolved on first use, which keeps startup cheap and makes replacing implementations straightforward for testing.
+
+### Rendering
+`lit-html` via `core/lit-helpers.ts`, with centralized `esc()` escaping in `core/utils-pure.ts`. Signal-directive integration (`core/signal-directive.ts`) lets templates bind to signals for targeted DOM updates without full re-renders. `core/render-scheduler.ts` and `core/render-batcher.ts` coalesce updates across a microtask to avoid layout thrash.
+
+## 2. Performance posture
+
+### Off-main-thread work
+`js/workers/filter-worker-optimized.ts` runs transaction filtering off the main thread, coordinated by `orchestration/worker-manager.ts`. This keeps the UI responsive during large-dataset operations.
+
+### Caching
+- `core/monthly-totals-cache.ts` memoizes monthly aggregates
+- `core/dom-cache.ts` caches frequently queried DOM nodes
+- Date parsing is hoisted and reused across filter passes
+
+### Performance regression guards
+Playwright performance suites enforce baselines for:
+- Shell-ready latency (time to interactive for the app shell)
+- Transactions-surface readiness
+- Transaction edit flow
+- Calendar selection interactions
+- Dashboard chart refresh
+
+These are required gates in CI. Additional 1k / 5k / 10k benchmark runs exist as advisory-only local tooling and are not CI gates.
+
+### Bundle
+Vite 7 build with the vite-plugin-pwa service-worker plugin. Precaching is enabled for the built shell. Bundle size is not a hard CI gate at present; size targets should be added before any Phase 3 cloud-sync merge that adds Firebase dependencies.
+
+## 3. Security
+
+### Current state (v2.6.2)
+- **PIN protection:** PBKDF2-SHA256 with 600,000 iterations, AES-GCM for data at rest when the PIN is set (`features/security/pin-crypto.ts`)
+- **XSS prevention:** `lit-html` for templated DOM, centralized `esc()` in `core/utils-pure.ts` (eight-character escape set including defense-in-depth `=` and backtick), sanitized input via `core/validator.ts`
+- **Storage integrity:** mutex-protected writes prevent multi-tab interleaving from corrupting transaction records
+- **CSP:** `index.html` declares a Content Security Policy; this needs a `connect-src` amendment before Phase 2 introduces Firebase domains
+
+### Known security items
+- `features/import-export/pdf-export.ts` — the `buildPdfHtml()` render surface is safe today (all user-controlled interpolations are wrapped in `esc()`; the one unescaped slot, `currencySymbol`, is sourced from a hardcoded `CURRENCY_MAP` at all call sites). A two-line defense-in-depth `esc()` wrap on the symbol parameter is recommended and is on the Phase 1 punch list — see the pre-Phase-1 verification report.
+- **v3.0 cloud sync will require full client-side E2EE.** See [ADR-001](adr/ADR-001-firestore-cloud-sync.md) §2.1 for the encryption posture decision and Phase 5a for the `field-crypto` module scope.
+
+## 4. Testing
+
+### Test suites
+- **Vitest:** unit and integration — ~65 test files covering ~636 individual cases. Includes architecture contract tests that fail CI if layering, allowlists, or import conventions drift.
+- **Playwright:** E2E across Chromium, WebKit, and Mobile Safari. Covers cold-start shell interaction, transactions-surface readiness, modal flows, calendar selection, and the performance regression gates above.
+- **`@axe-core/playwright`:** accessibility regression checks embedded in the Playwright suite. Targets WCAG 2.1 AA.
+
+### Architecture contract tests (authoritative invariants)
+`tests/architecture-contract.test.ts` pins:
+1. The 11-file direct-signal-writer allowlist
+2. `components → features / orchestration / ui` bridge exception list
+3. `.js` import-extension convention across the repo
+4. Transaction-surface ownership routing through `data/transaction-surface-coordinator.ts`
+5. `syncState.applyKeyUpdate()` case coverage
+
+Any PR that breaks these invariants must update the tests in the same commit, which forces explicit acknowledgment of architectural drift.
+
+### Coverage
+Coverage is generated via `npm run test:coverage` (Vitest + istanbul). It is not currently a CI gate, and exact numbers shift with each test file added. Contributors should run locally when changing core modules to verify coverage remains meaningful.
+
+## 5. Build and deployment
+
+- **Build:** `npm run build` (Vite 7)
+- **Dev:** `npm run dev`
+- **Typecheck:** `npm run typecheck` (`tsc --noEmit` — must produce 0 errors)
+- **Unit tests:** `npm run test:run`
+- **E2E smoke:** `npm run test:e2e:smoke`
+- **Full E2E:** `npm run test:e2e`
+
+Production hosting is on Vercel. iOS and Android wrappers are built via Capacitor (`ios/` and `android/` directories). Service worker updates are managed by `vite-plugin-pwa`.
+
+## 6. Known technical debt
+
+| Item | Severity | Notes |
+|---|---|---|
+| ~~`core/state-actions.ts` is 657 lines with 13 action groups colocated~~ | ~~Medium~~ | ~~Split into `core/actions/*-actions.ts` (6 files). Barrel re-export preserves 28 import sites. Largest file: 264 lines.~~ **RESOLVED** |
+| ~~`ui/virtual-scroller.ts` is an orphaned duplicate~~ | ~~Low~~ | ~~Deleted in Phase 1.~~ **RESOLVED** |
+| ~~`budget_tracker_*` storage key names are stale brand~~ | ~~Medium~~ | ~~Renamed to `harbor_*` with one-time migration in `data/key-migration.ts`. Three legacy keys preserved per ADR-001 §9.4.~~ **RESOLVED** |
+| `AGENTS.MD` allowlist and `modules/README.md` had drift (now fixed) | Low | Refreshed alongside this review. |
+| CSP `connect-src` is not ready for Firebase domains | Low | One-line amendment when Phase 2 imports `firebase/app`. |
+
+The pre-Phase-1 verification report in [adr/ADR-001-pre-phase-1-verification.md](adr/ADR-001-pre-phase-1-verification.md) has the executable punch list for the items above.
+
+## 7. Major resolved items
+
+The following historical issues are called out for context; all were resolved prior to v2.6.2:
+
+- **Monolithic `app.js`** — refactored into the current modular structure under `js/modules/`
+- **Event-listener lifecycle leaks** — standardized via `core/lifecycle-manager.ts` and `core/managed-listeners.ts`
+- **Large-dataset UI blocking** — moved to Web Workers + IndexedDB
+- **Single-tab data corruption** under concurrent edits — eliminated by the mutex + Web Locks + BroadcastChannel stack
+- **XSS regression in `components/daily-allowance.ts`** — fixed during the April 7 review by replacing innerHTML with `textContent` and `createTextNode`
+
+## 8. Browser support
+
+| Browser | Minimum | Support |
+|---|---|---|
+| Chrome | 90+ | Full |
+| Firefox | 88+ | Full |
+| Safari | 14+ | Full |
+| Edge | 90+ | Full |
+| Mobile Safari | 14+ | Full |
+| Chrome Android | 90+ | Full |
+
+Playwright WebKit smoke tests run in CI to catch Safari-specific regressions before they ship.
+
+## 9. What this review does not cover
+
+- **Dependency health / `npm audit`** — should be rerun manually; the ADR adds `npm audit` and `dependency-review-action` as CI gates for Phase 2.
+- **Lighthouse scores** — currently run manually; not a CI gate.
+- **Bundle analyzer output** — not captured in this review; run `vite-bundle-visualizer` locally when changes to dependencies could meaningfully affect bundle size.
+- **Backend review** — there is no backend in v2.6.2. v3.0 backend will be reviewed in its own ADR follow-up.
 
 ---
 
-## 🟢 Strengths Found
-
-### 🛡️ Architecture Excellence
-- ✅ **100% TypeScript Migration**: Full type safety, strict null checks, and comprehensive interface definitions.
-- ✅ **Modular Service-Oriented Design**: The 4,000+ line `app.js` has been refactored into a semantic directory structure under `js/modules/`.
-- ✅ **Lazy-Loading DI Container**: A modern Dependency Injection system (`di-container.ts`) ensures decoupled services and clean initialization.
-- ✅ **Fine-Grained Reactivity**: Migrated to Preact Signals for optimized UI updates, eliminating unnecessary re-renders.
-
-### ⚡ Performance & Scalability
-- ✅ **Off-Main-Thread Processing**: Web Workers (`filter-worker-optimized.ts`) handle heavy transaction filtering and calculations, maintaining 60fps UI.
-- ✅ **Tiered Persistence Layer**: IndexedDB primary store with LocalStorage fallback and automated migration management.
-- ✅ **Multi-Tab Sync**: Real-time synchronization via BroadcastChannel with a custom `Mutex` for atomic storage operations.
-- ✅ **Optimized Sorting & Filtering**: Single-pass filtering logic combined with pre-parsed date caching has reduced O(n) operations by 80%+.
-- ✅ **Performance Suite**: Integrated monitoring, render batching, and signal batching for consistent performance.
-
-### 🔒 Security & Reliability
-- ✅ **Data Atomicity**: Multi-tab mutex ensures that concurrent storage writes never corrupt user data.
-- ✅ **Standardized Error Handling**: Robust `ErrorBoundary` system with global safety hooks and circuit breakers for failing modules.
-- ✅ **Security Hardening**: PBKDF2-SHA256 PIN hashing, XSS prevention via lit-html, and sanitized input validation.
-
-### 🧪 Testing & Quality Assurance
-- ✅ **Comprehensive Test Suite**: 170 tests across 8 test files, including unit, integration, and Playwright E2E scenarios.
-- ✅ **High Coverage**: >90% code coverage across all core modules.
-
----
-
-## 🟡 Ongoing Opportunities (Medium Priority)
-
-### 1. Feature Expansion
-- **Net Worth Tracking**: Foundational asset/liability models exist; needs UI aggregation and trend charts.
-- **Bills Calendar**: Transition recurring transactions into a visual calendar component.
-- **Advanced Reporting**: MoM/YoY comparison views and PDF export functionality.
-
-### 2. Minor Technical Debt
-- **Utility Centralization**: Further consolidate minor utility functions into the centralized `utils-pure.ts` and `utils-dom.ts`.
-- **Component Abstraction**: Continue extracting specialized UI logic into reusable lit-html components.
-
----
-
-## 📊 Performance Metrics (v3.0)
-
-| Metric | Current | Status |
-|--------|---------|---------|
-| Max Transactions | 25,000+ | ✅ Verified 60fps |
-| Initial Load | <180ms | ✅ Exceptional |
-| UI Responsiveness | Constant 60fps | ✅ Optimized |
-| Multi-Tab Latency | <50ms | ✅ Real-time |
-| Bundle Size (v3.0) | <450KB (Gzip) | ✅ Optimized |
-
----
-
-## 🚧 Historical Review (Resolved Issues)
-
-### ✅ Monolithic app.js (RESOLVED)
-- **Status**: Completely refactored into a modular directory structure under `js/modules/`.
-- **Resolution**: Features are now isolated, typed, and managed by a DI container.
-
-### ✅ Performance Bottlenecks (RESOLVED)
-- **Status**: Transaction sorting and filtering now leverage Web Workers and date caching.
-- **Resolution**: O(n log n) operations no longer block the main thread.
-
-### ✅ Memory Leaks (RESOLVED)
-- **Status**: Event listener lifecycle management standardized via `LifecycleManager`.
-- **Resolution**: Proper cleanup of chart handlers and UI event listeners.
-
-### ✅ Large Dataset Handling (RESOLVED)
-- **Status**: IndexedDB and Web Workers successfully handle datasets 25x larger than previous limits.
-- **Resolution**: UI remains responsive regardless of transaction count.
-
----
-
-## ✅ Quality Score
-
-### Overall Assessment: **A+ (98/100)**
-
-| Category | Score | Notes |
-|----------|-------|-------|
-| Security | A+ (97) | Multi-tab mutex, atomic storage, sanitized input |
-| Performance | A+ (96) | Web Workers, IndexedDB, Signal-based reactivity |
-| Architecture | A+ (98) | Clean, modular TypeScript with lazy-loading DI |
-| Code Quality | A+ (98) | Fully typed, strict, and modular |
-| Testing | A+ (95) | >90% coverage, E2E regression suite |
-| Scalability | A+ (98) | Efficiently handles 25k+ transactions |
-
----
-
-## 🏁 Conclusion
-
-The Budget Tracker has successfully transitioned from a high-quality prototype into a **production-ready, enterprise-grade application**. The architectural modernization has eliminated previous bottlenecks and established a foundation that is both performant and exceptionally easy to maintain. 
-
-**Recommendation**: The application is technically ready for wide-scale production deployment.
-
----
-
-*Review conducted: March 11, 2026*
-*Reviewer: Gemini CLI*
-*Lines of code analyzed: 43,000+*
-*Modernization Status: 100% Complete*
+*Technical snapshot for v2.6.2. This document should be refreshed whenever a major architectural change lands or whenever CI gates change.*

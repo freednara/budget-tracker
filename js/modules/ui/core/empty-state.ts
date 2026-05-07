@@ -18,7 +18,12 @@ import type { EmptyStateAction } from '../../../types/index.js';
 
 type SwitchMainTabFn = (tabName: string) => void;
 type OpenModalFn = (modalId: string) => void;
-type LoadSampleDataFn = () => void;
+// `loadSampleData` is inherently async (writes to IndexedDB + rehydrates
+// caches). Accepting `void | Promise<void>` lets callers pass an async
+// supplier directly without wrapping in a void IIFE. The CTA click path
+// is fire-and-forget — async errors should surface via trackError inside
+// loadSampleData itself rather than bubbling through empty-state.
+type LoadSampleDataFn = () => void | Promise<void>;
 type OpenTransactionsForDateFn = (date: string) => void;
 
 type IllustrationType = 'no-transactions' | 'no-results' | 'no-goals' | 'no-recurring';
@@ -122,13 +127,12 @@ export function emptyState(
   return html`
     <div class="text-center py-8">
       ${illustrationTemplate ?? html`<div class="text-4xl mb-2">${emoji}</div>`}
-      <p class="font-bold" style="color: var(--text-primary);">${title}</p>
-      <p class="text-xs mt-1" style="color: var(--text-tertiary);">${subtitle}</p>
+      <p class="font-bold text-primary">${title}</p>
+      <p class="text-xs mt-1 text-tertiary">${subtitle}</p>
       ${action ? html`
         <button class="empty-state-cta mt-4 px-4 py-2 rounded-lg text-sm font-bold transition-all"
                 data-action=${action.id}
-                data-action-date=${action.date || nothing}
-                style="background: var(--color-accent); color: white;">
+                data-action-date=${action.date || nothing}>
           ${action.label}
         </button>
       ` : nothing}
@@ -155,7 +159,7 @@ export function renderEmptyState(
 
 function handleCTAClick(e: MouseEvent): void {
   const target = e.target as HTMLElement;
-  const btn = target.closest('.empty-state-cta') as HTMLElement | null;
+  const btn = target.closest<HTMLElement>('.empty-state-cta');
   if (!btn) return;
 
   const action = btn.dataset.action;
@@ -163,7 +167,12 @@ function handleCTAClick(e: MouseEvent): void {
   switch (action) {
     case 'add-transaction':
       switchMainTabFn('transactions');
-      setTimeout(() => (DOM.get('amount') as HTMLElement | null)?.focus(), FOCUS_DELAY);
+      // CR-Apr24-I finding 120: guard the deferred focus — only focus if
+      // the target element is visible (user hasn't navigated away).
+      setTimeout(() => {
+        const el = DOM.get('amount');
+        if (el instanceof HTMLElement && el.offsetParent !== null) el.focus();
+      }, FOCUS_DELAY);
       break;
 
     case 'add-transaction-for-date': {
@@ -175,15 +184,40 @@ function handleCTAClick(e: MouseEvent): void {
 
     case 'add-goal':
       openModalFn('savings-goal-modal');
-      setTimeout(() => (DOM.get('savings-goal-name') as HTMLElement | null)?.focus(), FOCUS_DELAY);
+      // CR-Apr24-I finding 121: guard the deferred focus — only focus if
+      // the savings-goal modal is still open.
+      setTimeout(() => {
+        const modal = DOM.get('savings-goal-modal');
+        if (!modal?.classList.contains('active')) return;
+        DOM.get('savings-goal-name')?.focus();
+      }, FOCUS_DELAY);
+      break;
+
+    case 'plan-budget':
+      switchMainTabFn('budget');
+      // CR-Apr24-I finding 122: guard the deferred click — only fire if
+      // the budget tab button is still visible (user hasn't navigated away).
+      setTimeout(() => {
+        const el = DOM.get('open-plan-budget');
+        if (el instanceof HTMLElement && el.offsetParent !== null) el.click();
+      }, FOCUS_DELAY);
+      break;
+
+    case 'add-debt':
+      // Delegate to the existing "Add Debt" button which resets the form properly
+      (DOM.get('add-debt-btn'))?.click();
       break;
 
     case 'clear-filters':
-      (DOM.get('clear-filters-btn') as HTMLElement | null)?.click();
+      (DOM.get('clear-filters-btn'))?.click();
       break;
 
     case 'load-sample':
-      loadSampleDataFn();
+      // `void` discard: `LoadSampleDataFn` is `() => void | Promise<void>`
+      // so async loadSampleData (IndexedDB writes + cache rehydration) can
+      // be passed directly. Fire-and-forget — rejections surface via the
+      // loadSampleData internal trackError.
+      void loadSampleDataFn();
       break;
   }
 }

@@ -17,8 +17,10 @@ export interface LazyComponentConfig {
   selector: string;
   loader: () => Promise<{ mount: () => (() => void) }>;
   priority: 'high' | 'medium' | 'low';
-  threshold?: number;
-  rootMargin?: string;
+  // CR-Apr24-I finding 288: removed dead `threshold` and `rootMargin`
+  // fields. The observer uses hardcoded values (200px / 0.01) and never
+  // read per-component overrides. Kept in this comment so re-adding
+  // per-component tuning is easy if needed later.
   dependencies?: string[];
 }
 
@@ -42,6 +44,8 @@ class LazyComponentLoader {
   private pendingComponents = new Map<string, LazyComponentConfig>();
   private loadingPromises = new Map<string, Promise<void>>();
   private failureCounts = new Map<string, number>();
+  /** CR-Apr24-I finding 286: set by cleanup() to abort in-flight loads. */
+  private aborted = false;
 
   /**
    * Initialize the lazy loader with intersection observer
@@ -49,13 +53,13 @@ class LazyComponentLoader {
   init(): void {
     if (this.initialized) return;
 
-    const testMode = (window as any).__PW_TEST__ === true;
+    const testMode = window.__PW_TEST__ === true;
     const forceLoad = window.location.search.includes('force-load=true');
 
     if (forceLoad) {
       if (import.meta.env.DEV) console.log('Force-load mode detected: Loading all lazy components');
       this.initialized = true;
-      this.loadAllComponents();
+      void this.loadAllComponents();
       return;
     }
 
@@ -66,7 +70,7 @@ class LazyComponentLoader {
     if (!('IntersectionObserver' in window)) {
       if (import.meta.env.DEV) console.warn('IntersectionObserver not supported - loading all components immediately');
       this.initialized = true;
-      this.loadAllComponents();
+      void this.loadAllComponents();
       return;
     }
 
@@ -76,7 +80,7 @@ class LazyComponentLoader {
           if (entry.isIntersecting) {
             const name = entry.target.getAttribute('data-lazy-component');
             if (name) {
-              this.loadComponent(name);
+              void this.loadComponent(name);
             }
           }
         });
@@ -87,6 +91,7 @@ class LazyComponentLoader {
       }
     );
 
+    this.aborted = false; // CR-Apr24-I finding 286: reset abort flag on fresh init
     this.initialized = true;
   }
 
@@ -106,7 +111,7 @@ class LazyComponentLoader {
       
       if (config.priority === 'high' || forceLoad) {
         // High priority components load immediately
-        this.loadComponent(config.name);
+        void this.loadComponent(config.name);
       } else if (this.observer) {
         // Observe for intersection
         this.observer.observe(element);
@@ -166,10 +171,27 @@ class LazyComponentLoader {
       await Promise.all(
         config.dependencies.map(dep => this.loadComponent(dep))
       );
+
+      // CR-Apr24-I finding 309: verify all deps actually loaded — loadComponent
+      // swallows errors, so a failed dep lands here without throwing. Proceeding
+      // to mount with broken dependencies is unsafe.
+      for (const dep of config.dependencies) {
+        if (!this.loadedComponents.has(dep)) {
+          throw new Error(`Dependency "${dep}" failed to load for component "${config.name}"`);
+        }
+      }
     }
+
+    // CR-Apr24-I finding 286: if cleanup() ran while we were awaiting deps/loader,
+    // abort before mounting into a torn-down environment.
+    if (this.aborted) return;
 
     // Load the component module
     const module = await config.loader();
+
+    // CR-Apr24-I finding 286: re-check after async loader resolves
+    if (this.aborted) return;
+
     const loadTime = performance.now() - startTime;
 
     // Mount the component
@@ -201,15 +223,26 @@ class LazyComponentLoader {
   /**
    * Load all remaining components (fallback or final load)
    */
-  async loadAllComponents(): Promise<void> {
+  // CR-Apr24-I finding 287: report which components failed so callers
+  // can distinguish full success from partial failure.
+  async loadAllComponents(): Promise<{ failed: string[] }> {
     const pending = Array.from(this.pendingComponents.values());
     await Promise.all(pending.map(config => this.loadComponent(config.name)));
+    // Any component still in pendingComponents with exhausted retries failed.
+    const failed = Array.from(this.pendingComponents.keys()).filter(name => {
+      const failures = this.failureCounts.get(name) || 0;
+      return failures >= MAX_LOAD_RETRIES;
+    });
+    return { failed };
   }
 
   /**
    * Cleanup all loaded components
    */
   cleanup(): void {
+    // CR-Apr24-I finding 286: signal in-flight performLoad() promises to bail out
+    this.aborted = true;
+
     this.loadedComponents.forEach(component => {
       try {
         component.cleanup();
@@ -274,6 +307,15 @@ export function initLazyLoading(): void {
   // Register all components for lazy loading
   const componentConfigs: LazyComponentConfig[] = [
     {
+      name: 'dashboard-welcome',
+      selector: '#dashboard-welcome',
+      loader: async () => {
+        const module = await import('../components/dashboard-welcome.js');
+        return { mount: () => module.mountDashboardWelcome() };
+      },
+      priority: 'high'
+    },
+    {
       name: 'summary-cards',
       selector: '#total-income',
       loader: async () => {
@@ -319,29 +361,29 @@ export function initLazyLoading(): void {
       priority: 'medium'
     },
     {
-      name: 'weekly-rollup',
-      selector: '#weekly-rollup-section',
-      loader: async () => {
-        const module = await import('../components/weekly-rollup.js');
-        return { mount: () => module.mountWeeklyRollup() };
-      },
-      priority: 'medium'
-    },
-    {
-      name: 'recurring-breakdown',
-      selector: '#recurring-breakdown-section',
-      loader: async () => {
-        const module = await import('../components/recurring-breakdown.js');
-        return { mount: () => module.mountRecurringBreakdown() };
-      },
-      priority: 'medium'
-    },
-    {
       name: 'envelope-budget',
       selector: '#envelope-section',
       loader: async () => {
         const module = await import('../components/envelope-budget.js');
         return { mount: () => module.mountEnvelopeBudget() };
+      },
+      priority: 'high'
+    },
+    {
+      name: 'category-detail-panel',
+      selector: '#envelope-section',
+      loader: async () => {
+        const module = await import('../components/category-detail-panel.js');
+        return { mount: () => module.mountCategoryDetailPanel() };
+      },
+      priority: 'high'
+    },
+    {
+      name: 'transaction-detail-panel',
+      selector: '#debts-list',
+      loader: async () => {
+        const module = await import('../components/transaction-detail-panel.js');
+        return { mount: () => module.mountTransactionDetailPanel() };
       },
       priority: 'high'
     },
@@ -429,7 +471,7 @@ export function cleanupLazyLoading(): void {
 /**
  * Force load all components (for testing or immediate load)
  */
-export function loadAllComponents(): Promise<void> {
+export function loadAllComponents(): Promise<{ failed: string[] }> {
   return lazyLoader.loadAllComponents();
 }
 

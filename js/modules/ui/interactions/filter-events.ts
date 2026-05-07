@@ -5,10 +5,11 @@
  */
 'use strict';
 
+import { createEventBinder } from '../../core/event-binding.js';
 import * as signals from '../../core/signals.js';
 import { SK, persist } from '../../core/state.js';
 import { filters } from '../../core/state-actions.js';
-import { debounce } from '../../core/utils.js';
+import { debounce } from '../../core/utils-pure.js';
 import { showToast } from '../core/ui.js';
 import { getDatePresetRange, saveFilterPreset } from '../widgets/filters.js';
 import { applyTransactionFilters, clearTransactionFilters } from '../../data/transaction-surface-coordinator.js';
@@ -46,17 +47,7 @@ let promptTextInputFn: PromptTextInputFn = async (message: string, title?: strin
 };
 
 const filterEventCleanups: Array<() => void> = [];
-
-function bindFilterEvent(
-  target: EventTarget,
-  type: string,
-  handler: EventListenerOrEventListenerObject
-): void {
-  target.addEventListener(type, handler);
-  filterEventCleanups.push(() => {
-    target.removeEventListener(type, handler);
-  });
-}
+const bindFilterEvent = createEventBinder(filterEventCleanups);
 
 export function cleanupFilterEvents(): void {
   const cleanups = filterEventCleanups.splice(0, filterEventCleanups.length);
@@ -112,8 +103,14 @@ export function applyDatePreset(preset: string): void {
 
 /**
  * Initialize filter event handlers (Reactive Bridge)
+ *
+ * Phase 6 cleanup (no-explicit-any sweep): the historical `callbacks` arg
+ * is unused — every filter event now resolves through the reactive bridge
+ * — but the parameter is retained for backwards compatibility with the
+ * boot sequence's positional invocation. Type as `Record<string, unknown>`
+ * to drop the `any` without changing call sites.
  */
-export function initFilterEvents(callbacks: any = {}): void {
+export function initFilterEvents(callbacks: Record<string, unknown> = {}): void {
   void callbacks;
   cleanupFilterEvents();
 
@@ -214,7 +211,7 @@ export function initFilterEvents(callbacks: any = {}): void {
   });
 
   // Date Presets
-  document.querySelectorAll<HTMLButtonElement>('.date-preset-btn').forEach(btn => {
+  DOM.queryAll<HTMLButtonElement>('.date-preset-btn').forEach(btn => {
     bindFilterEvent(btn, 'click', () => applyDatePreset(btn.dataset.preset || ''));
   });
 
@@ -225,7 +222,7 @@ export function initFilterEvents(callbacks: any = {}): void {
   // Save filter preset button
   const saveFilterPresetButton = DOM.get('save-filter-preset-btn');
   if (saveFilterPresetButton) bindFilterEvent(saveFilterPresetButton, 'click', async () => {
-    const name = await promptTextInputFn('Name this filter preset:', 'Save Filter Preset', '', 'Preset name');
+    const name = await promptTextInputFn('Name this preset (presets persist across sessions):', 'Save Filter Preset', '', 'e.g. Monthly groceries');
     if (name) {
       saveFilterPreset(name);
     }
@@ -235,7 +232,7 @@ export function initFilterEvents(callbacks: any = {}): void {
   const saveAsTemplateButton = DOM.get('save-as-template-btn');
   if (saveAsTemplateButton) bindFilterEvent(saveAsTemplateButton, 'click', async () => {
     if (!signals.selectedCategory.value) {
-      showToast('Select a category first', 'error');
+      showToast('Pick a category before saving \u2014 templates need a category to work.', 'error');
       return;
     }
     const name = await promptTextInputFn('Enter a name for this template:', 'Save Transaction Template', '', 'Template name');

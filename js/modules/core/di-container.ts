@@ -1,12 +1,14 @@
 /**
  * Enhanced Dependency Injection Container
- * 
+ *
  * Production-grade DI container with:
  * - Race condition prevention
  * - Circular dependency detection
  * - Automatic dependency injection
  * - Comprehensive error handling and debugging
  */
+
+import { trackError } from './error-tracker.js';
 
 // ==========================================
 // TYPE DEFINITIONS
@@ -20,6 +22,30 @@ export interface ServiceMetadata {
   priority?: number; // For initialization ordering
   eagerInit?: boolean;
 }
+
+/**
+ * Options accepted by `register()` / `registerLazy()` / `registerValue()`.
+ *
+ * Phase 6 Slice 1d (Inline-Behavior-Review rev 12, L12): extends
+ * `Partial<ServiceMetadata>` with a transient `override` flag that is
+ * consumed at register-time (for the silent-re-registration guard) and
+ * explicitly NOT persisted onto the service registration record — it's
+ * a directive about the act of registering, not a property of the
+ * service itself.
+ */
+export type RegisterOptions = Partial<ServiceMetadata> & {
+  /**
+   * Pass `true` to acknowledge that this call intentionally replaces an
+   * existing registration under the same name. Without this flag, a
+   * double-registration fires a DEV `console.warn` and a production
+   * `trackError` (`module: 'di-container', action: 'register'`) so that
+   * silent token-clobbering bugs surface instead of hiding.
+   *
+   * Legitimate use cases: test-suite fixtures, HMR re-bootstrap,
+   * feature-flag service swaps, plugin hot-swap.
+   */
+  override?: boolean;
+};
 
 export interface InitializeOptions {
   services?: string[];
@@ -88,13 +114,23 @@ export class DIContainer {
   private resolutionTimeoutMs = 30000; // 30 seconds
 
   /**
-   * Register a service with enhanced metadata and dependency tracking
+   * Register a service with enhanced metadata and dependency tracking.
+   *
+   * Phase 6 Slice 1d (Inline-Behavior-Review rev 12, L12): silent
+   * re-registration now fires a DEV `console.warn` and a production
+   * `trackError`. Pass `{ override: true }` in the options bag to
+   * explicitly acknowledge the replacement (tests, HMR, feature-flag
+   * swaps). The `override` flag is stripped before the metadata is
+   * persisted — it's a directive about the call, not a service trait.
    */
   register<T>(
-    name: string, 
-    factory: (...deps: any[]) => T | Promise<T>, 
-    metadata?: Partial<ServiceMetadata>
+    name: string,
+    factory: (...deps: any[]) => T | Promise<T>,
+    options?: RegisterOptions
   ): this {
+    const { override, ...metadata } = options ?? {};
+    this.guardAgainstSilentReRegistration(name, override, 'register');
+
     const serviceMetadata: ServiceMetadata = {
       name,
       singleton: true,
@@ -149,24 +185,58 @@ export class DIContainer {
   }
 
   /**
-   * Register a lazy service factory
+   * Register a lazy service factory. Pass `{ override: true }` in
+   * `options` to suppress the Slice 1d re-registration guard.
    */
   registerLazy<T>(
     name: string,
     loader: () => Promise<T>,
     dependencies: string[] = [],
-    metadata?: Partial<ServiceMetadata>
+    options?: RegisterOptions
   ): this {
-    return this.register(name, async (...deps) => {
+    return this.register(name, async (..._deps) => {
       const instance = await loader();
       return instance;
-    }, { 
-      lazy: true, 
-      singleton: true, 
+    }, {
+      lazy: true,
+      singleton: true,
       dependencies,
       eagerInit: true,
-      ...metadata
+      ...options
     });
+  }
+
+  /**
+   * Phase 6 Slice 1d (Inline-Behavior-Review rev 12, L12): shared guard
+   * used by `register()` and `registerValue()`. When a name is already
+   * bound and the caller did not pass `{ override: true }`, emit a DEV
+   * `console.warn` (so the developer notices immediately in the browser
+   * console) and a production `trackError` (so the monitoring pipeline
+   * catches the bug even when DevTools is closed). The caller still
+   * proceeds to overwrite the binding — the goal is visibility, not a
+   * breaking change that would surprise-crash apps on legitimate
+   * hot-reload paths.
+   */
+  private guardAgainstSilentReRegistration(
+    name: string,
+    override: boolean | undefined,
+    action: 'register' | 'registerValue'
+  ): void {
+    if (!this.services.has(name) || override) {
+      return;
+    }
+    const isDev = typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV;
+    if (isDev) {
+      console.warn(
+        `[DIContainer] service '${name}' re-registered without { override: true }. ` +
+          `The previous binding will be silently replaced — pass { override: true } to acknowledge intent.`
+      );
+    }
+    trackError(
+      `DIContainer: silent re-registration of service '${name}'`,
+      { module: 'di-container', action },
+      'validationError'
+    );
   }
 
   /**
@@ -220,7 +290,9 @@ export class DIContainer {
     }
 
     // Return existing instance if singleton
-    if (registration.metadata.singleton && registration.instance) {
+    // CR-Apr24-I finding 304: use `undefined` check instead of truthiness
+    // so legitimate falsy singletons (0, false, '', null) are returned.
+    if (registration.metadata.singleton && registration.instance !== undefined) {
       return registration.instance;
     }
 
@@ -333,10 +405,13 @@ export class DIContainer {
       throw new DIContainerError(`Service '${name}' not registered`, name);
     }
     
-    if (!registration.instance) {
+    // CR-Apr24-H finding 296: use `undefined` check instead of truthiness
+    // so legitimate falsy values (0, false, '', null) registered via
+    // registerValue() are not misclassified as missing.
+    if (registration.instance === undefined) {
       const stats = this.initializationStats.get(name);
       const isInitialized = stats?.initialized || false;
-      
+
       if (!this.initialized) {
         throw new DIContainerError(
           `Service '${name}' resolved before container initialization. ` +
@@ -344,7 +419,7 @@ export class DIContainer {
           name
         );
       }
-      
+
       if (!isInitialized) {
         throw new DIContainerError(
           `Service '${name}' not yet initialized. ` +
@@ -352,14 +427,14 @@ export class DIContainer {
           name
         );
       }
-      
+
       // If we reach here, something went wrong with initialization
       throw new DIContainerError(
         `Service '${name}' initialization completed but instance is missing. This may indicate a factory error.`,
         name
       );
     }
-    
+
     return registration.instance as T;
   }
 
@@ -382,7 +457,6 @@ export class DIContainer {
       
       // Group services by dependency depth and resolve each level in parallel
       const depthMap = new Map<number, string[]>();
-      const resolved = new Set<string>();
 
       const explicitlyRequestedServices = options?.services ? new Set(options.services) : null;
       this.expectedInitializedServices = new Set();
@@ -511,9 +585,13 @@ export class DIContainer {
   }
 
   /**
-   * Register a value directly (useful for testing)
+   * Register a value directly (useful for testing). Pass
+   * `{ override: true }` in `options` to suppress the Slice 1d
+   * re-registration guard — typical for test fixtures that swap a
+   * value between cases.
    */
-  registerValue<T>(name: string, value: T): this {
+  registerValue<T>(name: string, value: T, options?: { override?: boolean }): this {
+    this.guardAgainstSilentReRegistration(name, options?.override, 'registerValue');
     this.services.set(name, {
       factory: () => value,
       metadata: {
@@ -601,79 +679,76 @@ export class DIContainer {
    * Log initialization summary for debugging
    */
   private logInitializationSummary(): void {
-    const isDev = typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV;
-    if (!isDev) return;
+    if (import.meta.env?.DEV) {
+      const stats = this.getServiceStats();
+      const initialized = stats.filter(s => s.initialized);
+      const totalSelfTime = initialized.reduce((sum, s) => sum + (s.initializationTime || 0), 0);
 
-    const stats = this.getServiceStats();
-    const initialized = stats.filter(s => s.initialized);
-    const totalSelfTime = initialized.reduce((sum, s) => sum + (s.initializationTime || 0), 0);
+      console.group('📊 DI Container Statistics');
+      console.log(`Total Services: ${stats.length}`);
+      console.log(`Initialized: ${initialized.length}`);
+      console.log(`Initialization Wall Clock: ${this.lastInitializationWallClockMs}ms`);
+      console.log(`Total Service Self Time: ${totalSelfTime}ms`);
 
-    console.group('📊 DI Container Statistics');
-    console.log(`Total Services: ${stats.length}`);
-    console.log(`Initialized: ${initialized.length}`);
-    console.log(`Initialization Wall Clock: ${this.lastInitializationWallClockMs}ms`);
-    console.log(`Total Service Self Time: ${totalSelfTime}ms`);
+      if (initialized.length > 0) {
+        console.log('🏆 Initialization Times:');
+        initialized
+          .sort((a, b) => (b.initializationTime || 0) - (a.initializationTime || 0))
+          .slice(0, 5)
+          .forEach(s => {
+            console.log(`  ${s.name}: ${s.initializationTime}ms`);
+          });
+      }
 
-    if (initialized.length > 0) {
-      console.log('🏆 Initialization Times:');
-      initialized
-        .sort((a, b) => (b.initializationTime || 0) - (a.initializationTime || 0))
-        .slice(0, 5)
-        .forEach(s => {
-          console.log(`  ${s.name}: ${s.initializationTime}ms`);
-        });
+      console.groupEnd();
     }
-
-    console.groupEnd();
   }
 
   /**
    * Debug a specific service and its dependencies
    */
   debugService(name: string): void {
-    const isDev = typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV;
-    if (!isDev) return;
+    if (import.meta.env?.DEV) {
+      const registration = this.services.get(name);
+      const stats = this.initializationStats.get(name);
 
-    const registration = this.services.get(name);
-    const stats = this.initializationStats.get(name);
+      if (!registration) {
+        console.error(`Service '${name}' not registered`);
+        return;
+      }
 
-    if (!registration) {
-      if (isDev) console.error(`Service '${name}' not registered`);
-      return;
+      console.group(`🔍 Service Debug: ${name}`);
+      console.log('Registration:', {
+        metadata: registration.metadata,
+        hasInstance: !!registration.instance,
+        hasInitPromise: !!registration.initializationPromise
+      });
+
+      if (stats) {
+        console.log('Statistics:', stats);
+      }
+
+      const dependencies = this.dependencyGraph.get(name);
+      if (dependencies && dependencies.size > 0) {
+        console.log('Dependencies:', Array.from(dependencies));
+      }
+
+      console.groupEnd();
     }
-
-    console.group(`🔍 Service Debug: ${name}`);
-    console.log('Registration:', {
-      metadata: registration.metadata,
-      hasInstance: !!registration.instance,
-      hasInitPromise: !!registration.initializationPromise
-    });
-
-    if (stats) {
-      console.log('Statistics:', stats);
-    }
-
-    const dependencies = this.dependencyGraph.get(name);
-    if (dependencies && dependencies.size > 0) {
-      console.log('Dependencies:', Array.from(dependencies));
-    }
-
-    console.groupEnd();
   }
 
   /**
    * Debug the entire container state
    */
   debugContainer(): void {
-    const isDev = typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV;
-    if (!isDev) return;
-
-    console.group('🔧 DI Container Debug');
-    console.log('Initialized:', this.initialized);
-    console.log('Total Services:', this.services.size);
-    console.log('Dependency Graph:', this.getDependencyGraph());
-    console.log('Service Stats:', this.getServiceStats());
-    console.groupEnd();
+    if (import.meta.env?.DEV) {
+      console.group('🔧 DI Container Debug');
+      console.log('Initialized:', this.initialized);
+      console.log('Total Services:', this.services.size);
+      console.log('Dependency Graph:', this.getDependencyGraph());
+      console.log('Service Stats:', this.getServiceStats());
+      console.groupEnd();
+    }
   }
 
   /**
@@ -803,12 +878,12 @@ export function createDefaultContainer(): DIContainer {
 
   // Register formatters with dependencies
   container.registerLazy(Services.CURRENCY_FORMATTER, async () => {
-    const { fmtCur } = await import('./utils.js');
+    const { fmtCur } = await import('./utils-pure.js');
     return fmtCur;
   }, [Services.CONFIG]); // Currency formatter may need locale config
 
   container.registerLazy(Services.GET_TODAY_STR, async () => {
-    const { getTodayStr } = await import('./utils.js');
+    const { getTodayStr } = await import('./utils-pure.js');
     return getTodayStr;
   }); // No dependencies
 
@@ -826,7 +901,10 @@ export function createDefaultContainer(): DIContainer {
   container.registerLazy(Services.RENDER_TRANSACTIONS, async () => {
     const { refreshTransactionsSurface } = await import('../data/transaction-surface-coordinator.js');
     return (resetPage?: boolean): void => {
-      void refreshTransactionsSurface({ resetPage });
+      // Phase 6 Slice 1j (rev 12 L6): conditional spread for
+      // `exactOptionalPropertyTypes` — omit `resetPage` when undefined
+      // rather than passing `{ resetPage: undefined }`.
+      void refreshTransactionsSurface(resetPage !== undefined ? { resetPage } : {});
     };
   }, [Services.CONFIG, Services.CURRENCY_FORMATTER, Services.VALIDATOR], { eagerInit: false }); // Multiple dependencies
 
@@ -845,6 +923,11 @@ export function createDefaultContainer(): DIContainer {
     const { generateInsights } = await import('../features/personalization/insights.js');
     return generateInsights;
   }, [Services.CONFIG, Services.DATA_SDK], { eagerInit: false });
+
+  container.registerLazy(Services.UPDATE_CHARTS, async () => {
+    const { updateCharts } = await import('../ui/core/ui-render.js');
+    return updateCharts;
+  }, [Services.CONFIG], { eagerInit: false });
 
   // Register service priority (higher numbers initialize first)
   container.register(Services.CONFIG, async () => {

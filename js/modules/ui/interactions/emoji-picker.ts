@@ -8,7 +8,6 @@
  */
 'use strict';
 
-import DOM from '../../core/dom-cache.js';
 import { EMOJI_PICKER_CATEGORIES } from '../../core/categories.js';
 
 // ==========================================
@@ -41,7 +40,6 @@ let preview: HTMLElement | null = null;
 let hiddenInput: HTMLInputElement | null = null;
 let tabsContainer: HTMLElement | null = null;
 let grid: HTMLElement | null = null;
-const EMOJI_GRID_COLUMNS = 8;
 
 function refreshRefs(): void {
   trigger = document.getElementById('emoji-picker-trigger');
@@ -61,7 +59,12 @@ function renderTabs(): void {
   if (!tabsContainer) return;
   const categories = Object.keys(EMOJI_PICKER_CATEGORIES);
   tabsContainer.replaceChildren(...categories.map((cat) => {
-    const firstEmoji = EMOJI_PICKER_CATEGORIES[cat][0];
+    // Phase 6 Slice 1i (rev 12 L6): two levels of index access are both
+    // `T | undefined` under `noUncheckedIndexedAccess`. `cat` came from
+    // `Object.keys` so the outer lookup always hits; the inner `[0]`
+    // relies on every category list having at least one emoji — fall
+    // back to a neutral glyph if that invariant is ever violated.
+    const firstEmoji = EMOJI_PICKER_CATEGORIES[cat]?.[0] ?? '·';
     const label = cat.charAt(0).toUpperCase() + cat.slice(1);
     const isActive = cat === currentCategory;
     const button = document.createElement('button');
@@ -102,6 +105,26 @@ function getTabButtons(): HTMLButtonElement[] {
 
 function getEmojiButtons(): HTMLButtonElement[] {
   return grid ? Array.from(grid.querySelectorAll<HTMLButtonElement>('.emoji-cell')) : [];
+}
+
+/**
+ * Phase 5g-2 (Inline-Behavior-Review rev 12, L33): derive the grid column
+ * count at keypress time from the rendered grid's computed style instead of
+ * the previously-hardcoded `EMOJI_GRID_COLUMNS = 8` constant. The markup in
+ * `form-modals.ts` currently uses a static Tailwind `grid-cols-8` class, so
+ * today the measurement returns 8 — but if the template ever adds
+ * responsive variants (e.g. `sm:grid-cols-4 md:grid-cols-6 grid-cols-8`)
+ * the hardcoded constant would silently break ArrowUp/ArrowDown navigation
+ * on those viewports, moving focus by 8 cells while the user sees rows of
+ * 4 or 6. Measuring `gridTemplateColumns` keeps keyboard navigation in
+ * lockstep with the actual visible layout. Falls back to 8 if the grid
+ * is detached or the computed style is empty (pre-open, etc.).
+ */
+function getGridColumnCount(): number {
+  if (!grid) return 8;
+  const template = getComputedStyle(grid).gridTemplateColumns;
+  const columns = template.split(' ').filter((token) => token.trim().length > 0).length;
+  return columns > 0 ? columns : 8;
 }
 
 function focusCurrentTab(): void {
@@ -147,7 +170,7 @@ function handleTriggerClick(): void {
 function handleTabClick(e: MouseEvent): void {
   refreshRefs();
   const target = e.target as HTMLElement;
-  const tab = target.closest('.emoji-tab') as HTMLElement | null;
+  const tab = target.closest<HTMLElement>('.emoji-tab');
   if (!tab) return;
   setCurrentCategory(tab.dataset.category || 'money');
   focusCurrentTab();
@@ -156,7 +179,7 @@ function handleTabClick(e: MouseEvent): void {
 function handleEmojiSelect(e: MouseEvent): void {
   refreshRefs();
   const target = e.target as HTMLElement;
-  const cell = target.closest('.emoji-cell') as HTMLElement | null;
+  const cell = target.closest<HTMLElement>('.emoji-cell');
   if (!cell) return;
   selectedEmoji = cell.dataset.emoji || '🎨';
   if (preview) preview.textContent = selectedEmoji;
@@ -222,12 +245,12 @@ function handleKeydown(e: KeyboardEvent): void {
     }
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      moveEmojiFocus(target as HTMLButtonElement, EMOJI_GRID_COLUMNS);
+      moveEmojiFocus(target as HTMLButtonElement, getGridColumnCount());
       return;
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault();
-      moveEmojiFocus(target as HTMLButtonElement, -EMOJI_GRID_COLUMNS);
+      moveEmojiFocus(target as HTMLButtonElement, -getGridColumnCount());
       return;
     }
     if (e.key === 'Home') {
@@ -326,6 +349,7 @@ function handleDocumentClick(e: MouseEvent): void {
  * Initialize emoji picker
  */
 export function init(): void {
+  // Round 7 fix: Singleton guard prevents duplicate document click/keydown listeners
   if (isInitialized) return;
   refreshRefs();
 

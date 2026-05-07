@@ -8,7 +8,7 @@
 'use strict';
 
 import DOM from '../../core/dom-cache.js';
-import { closeModal } from '../../ui/core/ui.js';
+import { emit, Events } from '../../core/event-bus.js';
 import type { AchievementDefinition, CelebrationConfig } from '../../../types/index.js';
 
 // ==========================================
@@ -48,6 +48,32 @@ const DEFAULTS: CelebrationConfig = {
 let config: CelebrationConfig = { ...DEFAULTS };
 let celebrationTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
+// ==========================================
+// CONFETTI STATE (module-scoped)
+// ==========================================
+// Phase 6 Slice 1k (Inline-Behavior-Review rev 12, L26 part 2): the
+// `spawnConfetti` concurrency path previously had no re-entrancy guard.
+// `awardAchievement` calls `showCelebration` → `spawnConfetti` on every
+// unlock, so a synchronous burst of achievements (the canonical
+// onboarding case: `first_budget` + `diversified` + `savers_club`
+// unlock together when the user seeds demo data) would spawn
+// `config.confettiCount * N` DOM nodes with N * confettiCount
+// independent self-removal setTimeouts. One visual confetti burst
+// reads the same as three stacked; stacking only costs DOM + scheduler
+// time and creates a shape that scales poorly as the catalog grows.
+//
+// The guard: while a burst is in flight (particles on screen), a
+// second spawnConfetti call is a no-op. After `config.confettiRemoval`
+// ms — matching the self-removal timeout each particle is born with —
+// the guard re-arms so the NEXT unlock cluster (hours / sessions
+// later) fires fresh. The spawned particles are tracked in an array so
+// `clearConfetti()` can eagerly remove them plus cancel pending
+// self-removal timeouts (early-dismiss path, test teardown).
+let confettiActive = false;
+const confettiParticles: HTMLElement[] = [];
+const confettiRemovalTimers: ReturnType<typeof setTimeout>[] = [];
+let confettiReArmTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
 /**
  * Configure celebration settings
  */
@@ -78,22 +104,86 @@ export function getAllAchievements(): AchievementDefinition[] {
 // ==========================================
 
 /**
- * Spawn confetti particles
+ * Spawn confetti particles.
+ *
+ * Re-entrancy guard: while a burst is in flight, a second call is a
+ * no-op. Use `clearConfetti()` for the early-dismiss / test-teardown
+ * path that wants to cancel the in-flight burst and re-arm
+ * immediately.
  */
 export function spawnConfetti(): void {
-  const colors = ['#ef4444', '#3b82f6', '#22c55e', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4'];
+  if (confettiActive) return;
+  confettiActive = true;
+
+  const style = getComputedStyle(document.documentElement);
+  const token = (name: string) => style.getPropertyValue(name).trim();
+  const colors = [
+    token('--color-expense'),
+    token('--color-accent'),
+    token('--color-income'),
+    token('--color-warning'),
+    token('--color-purple'),
+    token('--color-pink'),
+    token('--color-accent2'),
+  ].filter(Boolean);
 
   for (let i = 0; i < config.confettiCount; i++) {
     const p = document.createElement('div');
     p.className = 'confetti-particle';
     p.style.left = Math.random() * 100 + 'vw';
     p.style.top = '-10px';
-    p.style.background = colors[Math.floor(Math.random() * colors.length)];
+    // Phase 6 Slice 1i (rev 12 L6): `colors[i]` is `string | undefined`
+    // under `noUncheckedIndexedAccess`; the array is non-empty (filter
+    // above keeps truthy colors) but `?? ''` keeps the CSS assignment
+    // well-typed when the color list is empty.
+    p.style.background = colors[Math.floor(Math.random() * colors.length)] ?? '';
     p.style.animationDelay = Math.random() * 1 + 's';
     p.style.animationDuration = (config.confettiDurationBase + Math.random()) + 's';
     document.body.appendChild(p);
-    setTimeout(() => p.remove(), config.confettiRemoval);
+    confettiParticles.push(p);
+    const removalId = setTimeout(() => {
+      p.remove();
+    }, config.confettiRemoval);
+    confettiRemovalTimers.push(removalId);
   }
+
+  // Re-arm the guard after the last particle self-removes. Pending
+  // particles for the *current* burst are tracked in
+  // `confettiParticles` and remain available to `clearConfetti()`
+  // until this timer fires.
+  confettiReArmTimeoutId = setTimeout(() => {
+    confettiActive = false;
+    confettiParticles.length = 0;
+    confettiRemovalTimers.length = 0;
+    confettiReArmTimeoutId = null;
+  }, config.confettiRemoval);
+}
+
+/**
+ * Cancel the in-flight confetti burst (if any): eagerly remove all
+ * tracked particle nodes, cancel pending self-removal timeouts, and
+ * re-arm the spawn guard immediately so the next `spawnConfetti()`
+ * call starts a fresh burst.
+ *
+ * Safe to call when no burst is in flight (no-op).
+ */
+export function clearConfetti(): void {
+  for (const timerId of confettiRemovalTimers) {
+    clearTimeout(timerId);
+  }
+  confettiRemovalTimers.length = 0;
+
+  for (const particle of confettiParticles) {
+    particle.remove();
+  }
+  confettiParticles.length = 0;
+
+  if (confettiReArmTimeoutId !== null) {
+    clearTimeout(confettiReArmTimeoutId);
+    confettiReArmTimeoutId = null;
+  }
+
+  confettiActive = false;
 }
 
 /**
@@ -121,7 +211,7 @@ export function showCelebration(achieveId: string): void {
   overlay.classList.add('active');
   spawnConfetti();
   celebrationTimeoutId = setTimeout(() => {
-    closeModal('celebration-overlay');
+    emit(Events.CLOSE_MODAL, { id: 'celebration-overlay' });
     celebrationTimeoutId = null;
   }, config.celebrationDuration);
 }

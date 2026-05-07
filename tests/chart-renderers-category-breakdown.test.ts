@@ -4,7 +4,12 @@ import { getDashboardCategoryBreakdownStatus } from '../js/modules/ui/charts/cha
 import type { CategoryTrendChange } from '../js/types/index.js';
 
 describe('dashboard category breakdown status cues', () => {
-  const trend = (direction: CategoryTrendChange['direction'], change: number): CategoryTrendChange => ({
+  // 7a (Inline-Behavior-Review, CategoryTrendChange nullable widening):
+  // `change` is `number | null` — the producer emits `null` for 'new' and
+  // 'no-data' baseline statuses. Widen the helper signature so tests can
+  // exercise both the numeric path (up/down/flat) and the null path
+  // without resorting to `as any` casts.
+  const trend = (direction: CategoryTrendChange['direction'], change: number | null): CategoryTrendChange => ({
     direction,
     change
   });
@@ -42,6 +47,35 @@ describe('dashboard category breakdown status cues', () => {
   });
 
   it('does not assign misleading status to new categories below the concentration threshold', () => {
-    expect(getDashboardCategoryBreakdownStatus(18, trend('new', 100))).toBeNull();
+    // 7a: producer now emits `change: null` for 'new' — the status helper
+    // short-circuits on direction 'new' before reading change, so this
+    // still resolves to null (no misleading Caution/Healthy badge).
+    expect(getDashboardCategoryBreakdownStatus(18, trend('new', null))).toBeNull();
+  });
+
+  // 7a (Inline-Behavior-Review, lock-in regression): pre-fix, the producer
+  // fabricated `change: 100` for 'new' and `change: 0` for 'no-data'. A
+  // future contributor could route those sentinels past the
+  // direction-short-circuit in `getDashboardCategoryBreakdownStatus` and
+  // get a real Caution/Healthy badge on synthetic data. Lock in the
+  // null-channel behavior here so any attempt to regress to the sentinel
+  // producer fails this test under the widened type system.
+  it('handles null change on up/down/flat without synthesizing a status', () => {
+    // An 'up' with null change should not trip the >=15 or >0 gates —
+    // those gates now null-guard explicitly.
+    expect(getDashboardCategoryBreakdownStatus(24, trend('up', null))).toBeNull();
+    // A 'flat' with null change below 40% share is still Healthy (the
+    // healthy check depends on direction + share, not on change).
+    expect(getDashboardCategoryBreakdownStatus(18, trend('flat', null))).toEqual({
+      label: 'Healthy',
+      tone: 'positive'
+    });
+    // A 'down' with null change below 40% is still Healthy for the same
+    // reason — the helper uses direction for the classification, change
+    // only gates the up-side caution escalations.
+    expect(getDashboardCategoryBreakdownStatus(24, trend('down', null))).toEqual({
+      label: 'Healthy',
+      tone: 'positive'
+    });
   });
 });

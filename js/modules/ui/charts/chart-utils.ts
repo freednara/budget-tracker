@@ -1,58 +1,30 @@
 /**
  * Chart Utilities Module
  *
- * Shared utilities for chart rendering: tooltips and event cleanup.
+ * Shared utilities for chart rendering: tooltips.
+ *
+ * Phase 5g-1 (Inline-Behavior-Review rev 12, L16): removed
+ * `cleanupChartListeners` and the seven handler-storage property slots it
+ * iterated (`_chartHandler`, `_chartMoveHandler`, `_chartLeaveHandler`,
+ * `_chartClickHandler`, `_barChartHandlers`, `_trendChartHandlers`,
+ * `_weeklyRollupHandlers`). Grep across js/ confirmed:
+ *   - zero callers of `cleanupChartListeners(` (the only `cleanupChartListeners`
+ *     reference outside the old definition was an unused import in
+ *     `chart-renderers.ts`, also deleted);
+ *   - zero assignments to any of the `_chart*Handler*` slots — chart
+ *     renderers attach listeners via Lit-html's `@event=${handler}` binding
+ *     syntax, which teardown automatically on template re-render or host
+ *     removal. The manual cleanup infrastructure was left over from an
+ *     earlier non-Lit implementation.
+ * Paired with the `ChartElementWithHandlers` / `ChartHandlerRecord` type
+ * definitions in `js/types/index.ts` (deleted) and the inline `ChartElement`
+ * / `WeeklyRollupElement` extensions (replaced with plain `HTMLElement`).
  *
  * @module chart-utils
  */
 'use strict';
 
 import DOM from '../../core/dom-cache.js';
-import type { ChartElementWithHandlers, ChartHandlerRecord } from '../../../types/index.js';
-
-// ==========================================
-// EVENT LISTENER CLEANUP
-// ==========================================
-
-/**
- * Clean up all chart event listeners to prevent memory leaks
- * Handles two patterns:
- * - Pattern 1: Individual handler functions (donut chart)
- * - Pattern 2: Array of {element, type, handler} objects (bar, trend charts)
- */
-export function cleanupChartListeners(el: HTMLElement | null): void {
-  if (!el) return;
-
-  // Use type assertion with indexed access for dynamic property access
-  const chartEl = el as unknown as Record<string, unknown>;
-
-  // Pattern 1: Individual handler functions (donut chart style)
-  const singleHandlerKeys = ['_chartHandler', '_chartMoveHandler', '_chartLeaveHandler', '_chartClickHandler'];
-  singleHandlerKeys.forEach(key => {
-    const handler = chartEl[key];
-    if (handler && typeof handler === 'function') {
-      el.removeEventListener('mouseenter', handler as EventListener, true);
-      el.removeEventListener('mousemove', handler as EventListener, true);
-      el.removeEventListener('mouseleave', handler as EventListener, true);
-      el.removeEventListener('click', handler as EventListener, true);
-      chartEl[key] = null;
-    }
-  });
-
-  // Pattern 2: Array of {element, type, handler} objects (bar, trend, weekly rollup charts)
-  const arrayHandlerKeys = ['_barChartHandlers', '_trendChartHandlers', '_weeklyRollupHandlers'];
-  arrayHandlerKeys.forEach(key => {
-    const handlers = chartEl[key] as ChartHandlerRecord[] | null | undefined;
-    if (handlers && Array.isArray(handlers)) {
-      handlers.forEach(({ element, type, handler }) => {
-        if (element && handler) {
-          element.removeEventListener(type, handler);
-        }
-      });
-      chartEl[key] = null;
-    }
-  });
-}
 
 // ==========================================
 // TOOLTIP FUNCTIONS
@@ -62,7 +34,7 @@ export function cleanupChartListeners(el: HTMLElement | null): void {
  * Show tooltip at cursor position
  */
 export function showChartTooltip(e: MouseEvent, text: string): void {
-  let tooltip = DOM.get('chart-tooltip') as HTMLElement | null;
+  let tooltip = DOM.get('chart-tooltip');
   if (!tooltip) {
     tooltip = document.createElement('div');
     tooltip.id = 'chart-tooltip';
@@ -79,6 +51,6 @@ export function showChartTooltip(e: MouseEvent, text: string): void {
  * Hide the chart tooltip
  */
 export function hideChartTooltip(): void {
-  const tooltip = DOM.get('chart-tooltip') as HTMLElement | null;
+  const tooltip = DOM.get('chart-tooltip');
   if (tooltip) tooltip.style.display = 'none';
 }

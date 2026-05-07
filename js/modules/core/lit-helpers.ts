@@ -76,12 +76,28 @@ export function join(
  * Mount multiple sub-components and return a single cleanup function.
  * Eliminates the repeated "collect cleanups in array, return dispose" boilerplate.
  *
+ * Round 7 fix: wrap each mount in try/catch. If any throws, run all collected
+ * cleanups before re-throwing to prevent orphaned component state on error.
+ *
  * @example
  * export function mountDailyAllowance(): () => void {
  *   return mountAll(mountHeroCard, mountTodayBudget, mountMonthlyPace);
  * }
  */
 export function mountAll(...mountFns: Array<() => (() => void)>): () => void {
-  const cleanups = mountFns.map(fn => fn());
+  const cleanups: Array<() => void> = [];
+  
+  // Round 7 fix: wrap each mount in try/catch to ensure cleanup on error
+  for (const fn of mountFns) {
+    try {
+      const cleanup = fn();
+      cleanups.push(cleanup);
+    } catch (err) {
+      // If any mount fails, run all collected cleanups before re-throwing
+      cleanups.forEach(c => c());
+      throw err;
+    }
+  }
+  
   return () => { cleanups.forEach(c => c()); };
 }

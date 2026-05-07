@@ -15,15 +15,17 @@ import {
   loadingTransactionListTemplate,
   TransactionRowOptions 
 } from '../ui/templates/transaction-row-template.js';
-import { render, html } from '../core/lit-helpers.js';
-import { formatCurrency } from '../core/currency-service.js';
+import { render, html, repeat } from '../core/lit-helpers.js';
 import { modal } from '../core/state-actions.js';
-import { openModal, showToast } from '../ui/core/ui.js';
+import { emit, Events } from '../core/event-bus.js';
 import { swipeManager } from '../ui/interactions/swipe-manager.js';
-import { filterTransactions, isWorkerReady, syncWorkerDataset } from '../orchestration/worker-manager.js';
-import { monthLabel } from '../core/utils.js';
+import { filterTransactions } from '../orchestration/worker-manager.js';
+import { fmtCur, monthLabel } from '../core/utils-pure.js';
+import { formatDateWithYear } from '../core/locale-service.js';
+import { getCatInfo } from '../core/categories.js';
+import { countActiveFilters, filterStateToWorkerFilters } from '../core/filter-utils.js';
 import DOM from '../core/dom-cache.js';
-import type { Transaction, TransactionType, WorkerTransactionFilters } from '../../types/index.js';
+import type { Transaction } from '../../types/index.js';
 
 // ==========================================
 // MODULE STATE
@@ -33,20 +35,6 @@ let activeAbortController: AbortController | null = null;
 
 // Track last pagination state to avoid unnecessary DOM updates
 let lastPaginationState = { totalItems: -1, currentPage: -1, itemsPerPage: -1 };
-
-function countActiveFilters(f: signals.FilterState): number {
-  let count = 0;
-  if (f.searchText) count++;
-  if (f.type !== 'all') count++;
-  if (f.category) count++;
-  if (f.tags) count++;
-  if (f.dateFrom || f.dateTo) count++;
-  if (f.minAmount || f.maxAmount) count++;
-  if (f.reconciled !== 'all') count++;
-  if (f.recurring) count++;
-  if (f.showAllMonths) count++;
-  return count;
-}
 
 function updateTransactionSummary(totalItems: number): void {
   const summaryEl = DOM.get('tx-results-summary');
@@ -66,35 +54,121 @@ function updateTransactionSummary(totalItems: number): void {
 export interface RendererConfig {
   itemsPerPage?: number;
   enableSwipeActions?: boolean;
-  enablePinIcon?: boolean;
-  onEdit?: (tx: Transaction) => void;
-  onDelete?: (tx: Transaction) => void;
-  onReconcile?: (tx: Transaction) => void;
-  onSplit?: (tx: Transaction) => void;
+  // Callbacks may be sync or async. Accepting `Promise<void>` explicitly lets
+  // callers pass `async` handlers without wrapping in an IIFE; the renderer
+  // never awaits these — it fires and forgets, so async callbacks must do
+  // their own error routing (trackError) if needed.
+  onEdit?: (tx: Transaction) => void | Promise<void>;
+  onDelete?: (tx: Transaction) => void | Promise<void>;
+  onReconcile?: (tx: Transaction) => void | Promise<void>;
+  onSplit?: (tx: Transaction) => void | Promise<void>;
+}
+
+/**
+ * Route a transaction-row edit click to the correct entry path.
+ *
+ * CR-Apr24-C3 [P2] finding 144: recurring transactions must go through
+ * the edit-series chooser modal so the user can decide whether the
+ * edit applies to this single occurrence only or to all future
+ * occurrences (template + this row + every later instance). Pre-fix
+ * every edit path jumped straight into single-occurrence edit mode
+ * regardless of recurring status, making the "edit recurring" feature
+ * a dead modal nobody could reach.
+ *
+ * The chooser handlers in `modal-events.ts:setupEditRecurringModal`
+ * already exist and work correctly — they write `editSeriesMode` and
+ * call `startEditing(tx)`. This routing helper supplies the missing
+ * writer for `pendingEditTx` and the missing modal-open trigger.
+ *
+ * Recurring detection requires BOTH `tx.recurring` AND
+ * `tx.recurringTemplateId` so a one-off "recurring" rounding-error
+ * (legacy data with the recurring flag set but no template link)
+ * doesn't open a chooser the user can't meaningfully complete —
+ * those rows fall through to single-occurrence edit instead.
+ *
+ * Exported so tests can drive it without going through the full
+ * renderer mount.
+ */
+/**
+ * CR-Apr24-I finding 141: previously the `tx` snapshot was passed
+ * unchanged through the async import boundary. If the row was updated
+ * elsewhere before the import resolved, startEditing opened stale data
+ * that could later overwrite newer fields on save. Now re-reads the
+ * transaction from live signal state after the import, and bails if an
+ * edit is already in progress.
+ */
+export async function routeTransactionEdit(tx: Transaction): Promise<void> {
+  if (tx.recurring && tx.recurringTemplateId) {
+    const [signalsModule, { openModal }] = await Promise.all([
+      import('../core/signals.js'),
+      import('../ui/core/ui.js')
+    ]);
+    // CR-Apr24-I finding 141: re-read fresh data for recurring path too
+    const freshRecurring = signalsModule.transactions.value.find(
+      (t: Transaction) => t.__backendId === tx.__backendId
+    );
+    signalsModule.pendingEditTx.value = freshRecurring ?? tx;
+    openModal('edit-recurring-modal');
+    return;
+  }
+  const { startEditing } = await import('../transactions/index.js');
+
+  // CR-Apr24-I finding 141: bail if another edit started while awaiting
+  if (signals.editingId.value) return;
+
+  // Re-read from live state
+  const fresh = signals.transactions.value.find(t => t.__backendId === tx.__backendId);
+  startEditing(fresh ?? tx);
 }
 
 let config: RendererConfig = {
   itemsPerPage: 50,
   enableSwipeActions: true,
-  enablePinIcon: true,
   onEdit: async (tx) => {
-    const { startEditing } = await import('../transactions/index.js');
-    startEditing(tx);
+    await routeTransactionEdit(tx);
   },
   onDelete: (tx) => {
+    // Populate delete confirmation details
+    const cat = getCatInfo(tx.type, tx.category);
+    const emojiEl = DOM.get('delete-tx-emoji');
+    const catEl = DOM.get('delete-tx-category');
+    const amtEl = DOM.get('delete-tx-amount');
+    const dateEl = DOM.get('delete-tx-date');
+    const descEl = DOM.get('delete-tx-desc');
+    if (emojiEl) emojiEl.textContent = cat.emoji + ' ';
+    if (catEl) {
+      // emoji is nested inside category span, so set the text after the emoji child
+      const textNode = catEl.childNodes[catEl.childNodes.length - 1];
+      if (textNode?.nodeType === 3) textNode.textContent = ' ' + cat.name;
+      else catEl.appendChild(document.createTextNode(' ' + cat.name));
+    }
+    if (amtEl) {
+      amtEl.textContent = (tx.type === 'expense' ? '-' : '+') + fmtCur(tx.amount);
+      amtEl.className = `text-3xl font-black mb-4 ${tx.type === 'income' ? 'text-income' : 'text-expense'}`;
+    }
+    if (dateEl) {
+      // CR-Apr22-G slice 2: route the delete-transaction confirmation
+      // modal's date label through the canonical locale service so a
+      // user on de-DE / ja-JP / es-ES sees their preferred shape instead
+      // of the browser-default one that `toLocaleDateString(undefined, …)`
+      // produced. Preserves the "long month, day, year" no-weekday shape.
+      dateEl.textContent = formatDateWithYear(tx.date, 'long');
+    }
+    if (descEl) descEl.textContent = tx.description || '';
+
     modal.setDeleteTargetId(tx.__backendId);
-    openModal('delete-modal');
+    emit(Events.OPEN_MODAL, { id: 'delete-modal' });
   },
   onReconcile: async (tx) => {
     const updated = { ...tx, reconciled: !tx.reconciled };
     const result = await dataSdk.update(updated);
     if (result.isOk) {
-      showToast(updated.reconciled ? 'Marked as reconciled' : 'Unmarked as reconciled', 'info');
+      emit(Events.SHOW_TOAST, { message: updated.reconciled ? 'Marked as reconciled' : 'Unmarked as reconciled', type: 'info' });
     }
   },
   onSplit: (tx) => {
     modal.setSplitTxId(tx.__backendId);
-    openModal('split-modal');
+    emit(Events.OPEN_MODAL, { id: 'split-modal' });
   }
 };
 
@@ -137,24 +211,11 @@ export async function renderTransactionsList(resetPage: boolean = false): Promis
 
   // 1. Gather filter values from signals (single source of truth, not DOM)
   const f = signals.filters.value;
-  const filters: WorkerTransactionFilters = {
-    monthKey: signals.currentMonth.value,
-    showAllMonths: f.showAllMonths,
-    type: f.type as TransactionType | 'all',
-    category: f.category || 'all',
-    searchQuery: f.searchText || '',
-    tagsFilter: f.tags || '',
-    dateFrom: f.dateFrom,
-    dateTo: f.dateTo,
-    minAmount: f.minAmount,
-    maxAmount: f.maxAmount,
-    recurringOnly: f.recurring,
-    reconciled: f.reconciled
-  };
+  const filters = filterStateToWorkerFilters(f, signals.currentMonth.value);
 
   // 2. Determine sort options from signal
   const txSort = f.sortBy || 'date-desc';
-  const [sortBy, sortDir] = txSort.split('-') as [any, any];
+  const [sortBy, sortDir] = txSort.split('-') as [string, string];
 
   try {
     // 3. Execute smart filtering (Worker vs Sync) with cancellation support
@@ -190,7 +251,14 @@ export async function renderTransactionsList(resetPage: boolean = false): Promis
       render(emptyTransactionListTemplate({
         hasTransactions: signals.transactions.value.length > 0,
         hasActiveFilters: countActiveFilters(f) > 0,
-        isAllMonths: f.showAllMonths
+        isAllMonths: f.showAllMonths,
+        // Design-Review-Apr21 P3 (batch 6 follow-up wave L): pass the
+        // month the user is actually viewing so the empty-state title
+        // reflects "No transactions for April 2026" when navigated
+        // elsewhere, instead of the hardcoded "this month". The template
+        // falls back to "this month" if `monthKey` is omitted, keeping
+        // the legacy shape safe.
+        monthKey: signals.currentMonth.value
       }), container);
       renderPaginationControls(0, 0, config.itemsPerPage || 50);
       return;
@@ -198,8 +266,7 @@ export async function renderTransactionsList(resetPage: boolean = false): Promis
 
     const rowOptions: TransactionRowOptions = {
       showSwipeActions: config.enableSwipeActions,
-      showPinIcon: config.enablePinIcon,
-      currencyFormatter: formatCurrency,
+      currencyFormatter: fmtCur,
       onEdit: config.onEdit,
       onDelete: config.onDelete,
       onReconcile: config.onReconcile,
@@ -208,7 +275,7 @@ export async function renderTransactionsList(resetPage: boolean = false): Promis
 
     const template = html`
       <div class="transactions-container space-y-2">
-        ${result.items.map(tx => transactionRowTemplate(tx, rowOptions))}
+        ${repeat(result.items, tx => tx.__backendId, tx => transactionRowTemplate(tx, rowOptions))}
       </div>
     `;
 
@@ -228,7 +295,7 @@ export async function renderTransactionsList(resetPage: boolean = false): Promis
       return;
     }
     if (import.meta.env.DEV) console.error('Render error:', err);
-    showToast('Failed to render transactions', 'error');
+    emit(Events.SHOW_TOAST, { message: 'Couldn\u2019t display transactions \u2014 try refreshing the page.', type: 'error' });
   } finally {
     if (activeAbortController?.signal === signal) {
       activeAbortController = null;
@@ -274,7 +341,7 @@ function renderPaginationControls(
         style="${currentPage === 0 ? 'opacity: 0.5; cursor: not-allowed;' : ''}"
         @click=${() => {
           signals.pagination.value = { ...signals.pagination.value, page: currentPage - 1 };
-          renderTransactionsList();
+          void renderTransactionsList();
         }}
       >
         ← Previous
@@ -290,7 +357,7 @@ function renderPaginationControls(
         style="${currentPage >= totalPages - 1 ? 'opacity: 0.5; cursor: not-allowed;' : ''}"
         @click=${() => {
           signals.pagination.value = { ...signals.pagination.value, page: currentPage + 1 };
-          renderTransactionsList();
+          void renderTransactionsList();
         }}
       >
         Next →

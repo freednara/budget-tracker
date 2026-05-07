@@ -210,10 +210,39 @@ export async function checkPin(pin: string): Promise<boolean> {
   return requestFeature('feature:request:pin_check', { pin });
 }
 
+/**
+ * Set or rotate the user's PIN through the public feature-event API.
+ *
+ * CR-Apr24-D3 [P2] finding 166: `newPin` MUST be a pre-computed
+ * password bundle (the result of `createPinWithRecovery(rawPin)` or
+ * the equivalent hashing pipeline) — NOT the user's raw PIN digits.
+ * The listener persists the value directly into `SK.PIN`, so passing
+ * a raw PIN would store cleartext digits on disk. The function name
+ * is preserved for back-compat with prior signature; the type-level
+ * contract (string for `newPin`) doesn't communicate this — refer to
+ * the JSDoc here and the listener in `pin-ui-handlers.ts:UPDATE_PIN`.
+ *
+ * @param newPin - Hashed PIN bundle string. Empty string is treated
+ *   as a no-op by the listener (use `clearPin()` for explicit clear).
+ * @param oldPin - Reserved for future PIN-rotation flows that need the
+ *   prior bundle for re-encryption. Currently unused by the listener.
+ */
 export function updatePin(newPin: string, oldPin?: string) {
   notifyFeature('feature:update:pin', { newPin, oldPin });
 }
 
+/**
+ * Clear the user's PIN through the public feature-event API.
+ *
+ * Side-effects (matched to the local clear-PIN button handler):
+ *  - Wipes `SK.PIN` from storage.
+ *  - Refreshes Settings "Turn Off PIN" button visibility.
+ *  - Tears down any active auto-lock instance.
+ *
+ * CR-Apr24-D3 [P3] finding 167: pre-fix the listener was missing the
+ * Settings refresh and auto-lock teardown — the public API path
+ * diverged from the direct-click path. Now they're symmetric.
+ */
 export function clearPin() {
   notifyFeature('feature:clear:pin');
 }

@@ -11,11 +11,12 @@ import {
   getStoredErrors,
   clearErrorLog as clearTrackerLog,
   onError as onTrackerError,
-  displayError
+  displayError,
+  type TrackedError
 } from './error-tracker.js';
 import DOM from './dom-cache.js';
-import { esc } from './utils-dom.js';
 import { safeStorage, setStorageErrorHandler } from './safe-storage.js';
+import { emit, Events } from './event-bus.js';
 
 // ==========================================
 // TYPE DEFINITIONS
@@ -32,9 +33,11 @@ export interface ErrorInfo {
 }
 
 /**
- * Backwards compatibility alias
+ * Backwards compatibility alias — historically `ErrorLogEntry` was an
+ * untyped record; widened to `unknown` under Phase 6 cleanup. Callers
+ * that need strong typing should import `ErrorInfo` directly.
  */
-export type ErrorLogEntry = any;
+export type ErrorLogEntry = unknown;
 export type ErrorListener = (errorInfo: ErrorInfo) => void;
 
 type ToastType = 'error' | 'info' | 'warning';
@@ -43,11 +46,18 @@ type ToastType = 'error' | 'info' | 'warning';
 // ERROR HANDLER CLASS
 // ==========================================
 
+/**
+ * Centralised error handler.
+ *
+ * Routes errors to the error tracker, displays user-facing toasts, and
+ * notifies registered listeners. Listens for global unhandled rejections
+ * via the `ErrorTracker` callback.
+ */
 class ErrorHandler {
   private listeners = new Set<ErrorListener>();
 
+  /** Subscribes to unhandled-rejection events from the global `ErrorTracker`. */
   constructor() {
-    // ErrorTracker handles its own global initialization
     onTrackerError((tracked) => {
       this.notifyListeners({
         message: tracked.message,
@@ -57,9 +67,10 @@ class ErrorHandler {
     });
   }
 
+  /** Track an error and optionally show a user-facing notification. */
   handleError(errorInfo: ErrorInfo): void {
     const err = errorInfo.error instanceof Error ? errorInfo.error : new Error(errorInfo.message);
-    
+
     trackError(err, {
       module: errorInfo.source || 'ErrorHandler',
       action: 'manual_handle'
@@ -71,34 +82,53 @@ class ErrorHandler {
         context: { module: errorInfo.source }
       });
     }
+
+    // CR-Apr24-I finding 294: broadcast to registered listeners so
+    // consumers using addListener() see manually handled errors too.
+    this.notifyListeners(errorInfo);
   }
 
+  /** Display a toast notification to the user via the UI bridge. */
   showUserNotification(message: string, type: ToastType = 'error'): void {
-    import('../ui/core/ui.js').then(({ showToast }) => showToast(message, type));
+    emit(Events.SHOW_TOAST, { message, type });
   }
 
+  /** Register a callback that is invoked whenever an error is handled. */
   addListener(callback: ErrorListener): void {
     this.listeners.add(callback);
+    if (import.meta.env.DEV && this.listeners.size > 20) {
+      console.warn(`[ErrorHandler] ${this.listeners.size} listeners registered — possible leak`);
+    }
   }
 
+  /** Remove a previously registered error listener. */
   removeListener(callback: ErrorListener): void {
     this.listeners.delete(callback);
   }
 
+  /** Remove all registered error listeners. */
+  clearListeners(): void {
+    this.listeners.clear();
+  }
+
   private notifyListeners(errorInfo: ErrorInfo): void {
-    this.listeners.forEach(callback => {
+    // Snapshot to protect against concurrent add/remove/clear during iteration
+    const snapshot = Array.from(this.listeners);
+    for (const callback of snapshot) {
       try {
         callback(errorInfo);
       } catch (e) {
         if (import.meta.env.DEV) console.warn('Error in error listener:', e);
       }
-    });
+    }
   }
 
-  getRecentErrors(count = 10): any[] {
+  /** Return the most recent tracked errors (newest last). */
+  getRecentErrors(count = 10): TrackedError[] {
     return getStoredErrors().slice(-count);
   }
 
+  /** Clear the persisted error log. */
   clearErrorLog(): void {
     clearTrackerLog();
   }
@@ -108,7 +138,7 @@ class ErrorHandler {
 // GLOBAL ERROR HANDLER INSTANCE
 // ==========================================
 
-// Global error handler instance
+/** Application-wide singleton error handler. */
 export const errorHandler = new ErrorHandler();
 
 // Register with safeStorage to maintain error reporting
@@ -133,8 +163,8 @@ if (!DOM.get('error-handler-styles')) {
       position: fixed;
       top: 20px;
       right: 20px;
-      z-index: 10000;
-      animation: slide-in 0.3s ease;
+      z-index: var(--z-pin);
+      animation: slide-in var(--duration-slow) var(--ease-default);
     }
 
     .toast-content {
@@ -144,7 +174,7 @@ if (!DOM.get('error-handler-styles')) {
       padding: 12px 16px;
       background: var(--surface, #fff);
       border-radius: 8px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      box-shadow: var(--shadow-card);
       border-left: 4px solid var(--color-expense, #e74c3c);
       max-width: 400px;
     }

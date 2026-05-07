@@ -7,24 +7,63 @@
 
 import { getDefaultContainer, Services, DIContainer } from '../core/di-container.js';
 import { unmountAll } from '../core/effect-manager.js';
-import { initDashboard } from './dashboard.js';
+// Phase 5g-1 (Inline-Behavior-Review rev 12, action-plan #37): removed
+// `initDashboard` import from orchestration/dashboard.js. That module was a
+// no-op backward-compat shim (`initDashboard()` returned `() => {}`) and its
+// `animateValue` re-export had zero consumers (summary-cards.ts and
+// daily-allowance.ts both import directly from dashboard-animations.js).
+// Dashboard UI is owned by the reactive components — the shim added
+// indirection without behavior. Module deleted in the same phase.
 import { initAppEvents, cleanupAppEvents } from './app-events.js';
 import { loadSampleData } from './sample-data.js';
 import { initTheme } from '../features/personalization/theme.js';
 import { startOnboarding } from '../features/personalization/onboarding.js';
-import { SK, lsGet, lsSet } from '../core/state.js';
+import { SK, lsGet } from '../core/state.js';
 import * as signals from '../core/signals.js';
 import { dataSdk } from '../data/data-manager.js';
 import { migrationManager } from '../data/migration.js';
-import { showToast } from '../ui/core/ui.js';
+import { on, emit, Events, initEventBusDefaults } from '../core/event-bus.js';
+import { initialize as initializeErrorTracker, trackError, loadAndCall } from '../core/error-tracker.js';
 import { DOM } from '../core/dom-cache.js';
 import { initMultiTabSync, cleanup as cleanupMultiTabSync } from '../core/multi-tab-sync.js';
 import { initShellNavigation, cleanupShellNavigation } from '../ui/core/ui-navigation.js';
 import * as filterEv from '../ui/interactions/filter-events.js';
 import * as formEv from '../ui/interactions/form-events.js';
 import * as keyboardEv from '../ui/interactions/keyboard-events.js';
-import { on, Events } from '../core/event-bus.js';
-import { DataSyncEvents, type TransactionDataDelta } from '../core/data-sync-interface.js';
+import { DataSyncEvents, requestDataReload, type TransactionDataDelta } from '../core/data-sync-interface.js';
+import { syncCurrencyFormat } from '../core/utils-pure.js';
+import type { Transaction, MainTab } from '../../types/index.js';
+
+/**
+ * Runtime type guard for Transaction payloads arriving from the event bus.
+ *
+ * Event-bus payloads are typed `unknown` because subscribers come from many
+ * different emit sites. The sync-dispatch handlers below cannot safely cast
+ * a payload to `Transaction` — a malformed or foreign event (for example a
+ * bug in another module emitting the wrong shape) would silently propagate
+ * garbage into the worker delta pipeline and corrupt downstream aggregates.
+ *
+ * This guard checks the structural contract of a Transaction: the required
+ * fields the worker protocol depends on must exist with the right primitive
+ * types. Optional fields are not validated — they are tolerated by the
+ * worker.
+ *
+ * Fixes C4 (Inline-Behavior-Review rev 12).
+ */
+function isTransaction(value: unknown): value is Transaction {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.__backendId === 'string' &&
+    (v.type === 'expense' || v.type === 'income') &&
+    typeof v.amount === 'number' && Number.isFinite(v.amount) &&
+    typeof v.description === 'string' &&
+    typeof v.date === 'string' &&
+    typeof v.category === 'string' &&
+    typeof v.currency === 'string' &&
+    typeof v.recurring === 'boolean'
+  );
+}
 // Dynamic imports will be resolved from DI container
 
 // ==========================================
@@ -93,30 +132,30 @@ const initStatus: InitializationStatus = {
 };
 
 function setStartupProgress(step: string): void {
-  (window as any).__APP_STARTUP_PROGRESS__ = step;
+  window.__APP_STARTUP_PROGRESS__ = step;
   document.documentElement.dataset.appStartupProgress = step;
-  if (import.meta.env.DEV && typeof window !== 'undefined' && (window as any).__APP_DEBUG_STARTUP__ === true) {
+  if (import.meta.env.DEV && typeof window !== 'undefined' && window.__APP_DEBUG_STARTUP__ === true) {
     console.log(`[startup] ${step}`);
   }
 }
 
 function setShellReadyState(isReady: boolean): void {
-  (window as any).__APP_SHELL_READY__ = isReady;
+  window.__APP_SHELL_READY__ = isReady;
   document.documentElement.dataset.appShellReady = isReady ? 'true' : 'false';
 }
 
 function setInteractiveReadyState(isReady: boolean): void {
-  (window as any).__APP_INTERACTIVE_READY__ = isReady;
+  window.__APP_INTERACTIVE_READY__ = isReady;
   document.documentElement.dataset.appInteractiveReady = isReady ? 'true' : 'false';
 }
 
 function setBackgroundReadyState(isReady: boolean): void {
-  (window as any).__APP_BACKGROUND_READY__ = isReady;
+  window.__APP_BACKGROUND_READY__ = isReady;
   document.documentElement.dataset.appBackgroundReady = isReady ? 'true' : 'false';
 }
 
 function setBackgroundFailedState(isFailed: boolean): void {
-  (window as any).__APP_BACKGROUND_FAILED__ = isFailed;
+  window.__APP_BACKGROUND_FAILED__ = isFailed;
   document.documentElement.dataset.appBackgroundFailed = isFailed ? 'true' : 'false';
 }
 
@@ -126,21 +165,21 @@ function recordDeferredStartupFailure(errorLabel: string, error: unknown): void 
   initStatus.errors.push(normalizedError);
   setBackgroundFailedState(true);
   setStartupProgress('initialize:background-failed');
-  const deferredErrors = Array.isArray((window as any).__APP_DEFERRED_ERRORS__)
-    ? (window as any).__APP_DEFERRED_ERRORS__
+  const deferredErrors: DeferredStartupError[] = Array.isArray(window.__APP_DEFERRED_ERRORS__)
+    ? window.__APP_DEFERRED_ERRORS__
     : [];
   deferredErrors.push({
     label: errorLabel,
     message: normalizedError.message,
     timestamp: Date.now()
   });
-  (window as any).__APP_DEFERRED_ERRORS__ = deferredErrors;
+  window.__APP_DEFERRED_ERRORS__ = deferredErrors;
 }
 
 function createBackgroundTaskTracker(totalTasks: number): (step: string) => void {
   let remainingTasks = totalTasks;
   return (step: string) => {
-    if ((window as any).__APP_BACKGROUND_FAILED__ === true) {
+    if (window.__APP_BACKGROUND_FAILED__ === true) {
       return;
     }
     setStartupProgress(step);
@@ -189,32 +228,62 @@ function scheduleTrackedDeferredInteractiveWork(
  */
 export async function initializeApp(): Promise<InitializationStatus> {
   try {
+    // Fixes L39 + L60 (Inline-Behavior-Review rev 12): error-tracker and
+    // event-bus previously installed global listeners / throttle config at
+    // module-import time. That coupled test imports to runtime side effects.
+    // Now boot code calls them explicitly — and does so FIRST, before any
+    // other module gets a chance to throw, so global error capture is live
+    // before the rest of initialization runs.
+    initializeErrorTracker();
+    initEventBusDefaults();
+
     cleanupDeferredInteractiveWork();
     setShellReadyState(false);
     setInteractiveReadyState(false);
     setBackgroundReadyState(false);
     setBackgroundFailedState(false);
     setStartupProgress('initialize:start');
-    (window as any).__APP_DEFERRED_ERRORS__ = [];
+    window.__APP_DEFERRED_ERRORS__ = [];
+
+    // One-time key migration: rename budget_tracker_* → harbor_* in localStorage.
+    // MUST run before anything reads from SK.* keys (state hydration, theme init, etc.).
+    const { migrateStorageKeyNames } = await import('../data/key-migration.js');
+    migrateStorageKeyNames();
 
     // Get DI container
     const container = getDefaultContainer();
     initStatus.container = container;
 
-    // Bind the static shell before DI/data startup so visible tabs are immediately interactive.
-    initShellNavigation();
-    registerCleanup(cleanupShellNavigation);
-    setStartupProgress('initialize:shell-navigation-bound');
-
     // Initialize only shell-critical services on the blocking path.
+    // Round 7 fix: Defer initShellNavigation until AFTER container initialization
+    // to prevent interactive race when user clicks a tab during boot. If a click
+    // arrives before container.initialize() completes, switchMainTab will fail
+    // trying to resolve services from an uninitialized container.
     await container.initialize({
       services: [Services.CONFIG, Services.CURRENCY_FORMATTER, Services.GET_TODAY_STR]
     });
     setStartupProgress('initialize:container-ready');
 
+    // Round 7 fix: NOW bind the static shell navigation after DI container is ready.
+    // Tab clicks can now safely resolve services since the container is initialized.
+    initShellNavigation();
+    registerCleanup(cleanupShellNavigation);
+    setStartupProgress('initialize:shell-navigation-bound');
+
+    // Synchronise the reactive currency formatter with the hydrated currency signal.
+    // Signals are hydrated from localStorage at module-evaluation time, so this runs
+    // once with the correct value before any UI renders. Subsequent changes go through
+    // data.setCurrencySettings() which also calls syncCurrencyFormat().
+    syncCurrencyFormat(signals.currency.value);
+
     // Initialize theme first (affects UI)
     registerCleanup(initTheme());
     setStartupProgress('initialize:theme-ready');
+
+    // Initialize user-owned category store (migrate from hardcoded if needed)
+    const { initCategoryStore } = await import('../core/category-store.js');
+    initCategoryStore();
+    setStartupProgress('initialize:categories-ready');
 
     // Check PIN lock
     const pinHandlers = await import('../ui/widgets/pin-ui-handlers.js');
@@ -222,9 +291,16 @@ export async function initializeApp(): Promise<InitializationStatus> {
       setStartupProgress('initialize:pin-lock-required');
       await pinHandlers.showPinLock();
 
-      // Initialize auto-lock for inactivity when PIN is set
-      const { initAutoLock } = await import('../features/security/auto-lock.js');
-      const autoLockCleanup = initAutoLock(() => {
+      // Initialize auto-lock for inactivity when PIN is set.
+      //
+      // CR-Apr24-D1 [P2] findings 151, 154, 155: route through the
+      // module-scoped controller (`startAutoLockIfNeeded`) so storage-
+      // events.ts and the local clear-PIN handler can later call
+      // `stopAutoLockIfActive()` to tear down the same instance. Pre-fix
+      // the cleanup returned by `initAutoLock` was captured in this
+      // closure and never reachable from runtime PIN-mutation paths.
+      const { startAutoLockIfNeeded } = await import('../features/security/auto-lock.js');
+      const autoLockCleanup = startAutoLockIfNeeded(() => {
         pinHandlers.showPinLock();
       });
       registerCleanup(autoLockCleanup);
@@ -246,15 +322,19 @@ export async function initializeApp(): Promise<InitializationStatus> {
       throw new Error('Failed to initialize data layer');
     }
 
-    const savedTab = lsGet('budget_tracker_active_tab', 'dashboard') as string;
+    const savedTab = lsGet('harbor_active_tab', 'dashboard') as string;
     await initializeShellVisibleControls();
     await initializeShellCriticalSurface(savedTab);
     setShellReadyState(true);
     setStartupProgress('initialize:shell-ready');
 
+    // Preset picker is now integrated into onboarding step 0.
+    // No separate showPresetPicker() call — the unified flow handles it.
+
     const onboardingState = lsGet(SK.ONBOARD, { completed: false, step: 0 }) as { completed: boolean; step: number };
     const hasCompletedOnboarding = onboardingState.completed;
     const hasTransactions = signals.transactions.value.length > 0;
+    const shouldOnboard = !hasCompletedOnboarding && !hasTransactions;
 
     await postOnboardingInit(savedTab, hasTransactions);
     setInteractiveReadyState(true);
@@ -262,12 +342,29 @@ export async function initializeApp(): Promise<InitializationStatus> {
 
     const completeBackgroundTask = createBackgroundTaskTracker(4);
 
-    scheduleTrackedDeferredInteractiveWork(async (isCancelled) => {
-      const { initOnboarding } = await import('../features/personalization/onboarding.js');
-      if (isCancelled()) return;
+    // Start onboarding on the blocking path so the UI appears immediately.
+    // startOnboarding() resumes from the saved step — step 0 (preset picker)
+    // for new users, or a later step for returning users who paused mid-tour.
+    // Mount the reactive renderer here too (don't wait for lazy loader) so
+    // the first frame renders without delay.
+    if (shouldOnboard) {
+      const { initOnboarding, cleanupOnboarding, mountOnboarding } = await import('../features/personalization/onboarding.js');
       initOnboarding();
-      const { cleanupOnboarding } = await import('../features/personalization/onboarding.js');
       registerCleanup(cleanupOnboarding);
+      const cleanupMount = mountOnboarding();
+      registerCleanup(cleanupMount);
+      startOnboarding();
+      setStartupProgress('initialize:onboarding-started');
+    }
+
+    scheduleTrackedDeferredInteractiveWork(async (isCancelled) => {
+      // Only init listeners if we didn't already do it on the blocking path above
+      if (!shouldOnboard) {
+        const { initOnboarding, cleanupOnboarding } = await import('../features/personalization/onboarding.js');
+        if (isCancelled()) return;
+        initOnboarding();
+        registerCleanup(cleanupOnboarding);
+      }
 
       const { initAlerts } = await import('../features/personalization/alerts.js');
       if (isCancelled()) return;
@@ -277,29 +374,48 @@ export async function initializeApp(): Promise<InitializationStatus> {
       if (isCancelled()) return;
       initRollover();
       registerCleanup(cleanupRollover);
-
-      if (!hasCompletedOnboarding && !hasTransactions) {
-        startOnboarding();
-      }
     }, 'Deferred onboarding/alerts init failed', 'deferred:onboarding-alerts-ready', completeBackgroundTask);
 
     scheduleTrackedDeferredInteractiveWork(async (isCancelled) => {
       if (await migrationManager.needsMigration()) {
         if (isCancelled()) return;
+
+        // ROUND 7 FIX: Set migration-in-progress flag BEFORE starting migration.
+        // This prevents user interactions from writing to the data layer while
+        // migration moves data from localStorage to IndexedDB. Without this flag,
+        // concurrent writes can cause data loss or contention.
+        // The flag is a global signal that data-manager checks in its write path.
+        (window as unknown as Record<string, boolean>).__APP_MIGRATION_IN_PROGRESS__ = true;
+
         setStartupProgress('initialize:migration-start');
-        showToast('Upgrading database...', 'info');
+        emit(Events.SHOW_TOAST, { message: 'Upgrading database...', type: 'info' });
         const migrationResult = await migrationManager.migrate((progress) => {
-          if (progress.phase === 'migrating' && import.meta.env.DEV && (window as any).__APP_DEBUG_STARTUP__ === true) {
+          if (progress.phase === 'migrating' && import.meta.env.DEV && window.__APP_DEBUG_STARTUP__ === true) {
             console.log(`Migration progress: ${Math.round(progress.progress)}%`);
           }
         });
 
+        // ROUND 7 FIX: Clear the migration-in-progress flag AFTER migration completes
+        // (or fails). This re-enables writes to the data layer.
+        (window as unknown as Record<string, boolean>).__APP_MIGRATION_IN_PROGRESS__ = false;
+
         if (isCancelled()) return;
         if (migrationResult.isOk) {
-          showToast('Database upgrade complete!', 'success');
+          // Post-migration ledger reload (P1 fix): dataSdk.init() ran at
+          // boot against an empty IDB (line 299), so signals.transactions
+          // currently holds []. The migration just wrote the user's ledger
+          // into IDB but bypassed data-manager's in-memory cache via direct
+          // storageManager.createBatch() calls — so without this reload,
+          // the returning user would see an empty dashboard for the entire
+          // session and only recover on manual page refresh.
+          // REQUEST_RELOAD causes data-manager to re-read transactions,
+          // invalidate caches, and dispatch onDataChanged() so the signal
+          // and every downstream computed derivation refresh in one pass.
+          requestDataReload('migration:complete');
+          emit(Events.SHOW_TOAST, { message: 'Database upgrade complete!', type: 'success' });
         } else {
           if (import.meta.env.DEV) console.error('Migration failed:', migrationResult.error);
-          showToast('Database upgrade deferred', 'warning');
+          emit(Events.SHOW_TOAST, { message: 'Database upgrade deferred', type: 'warning' });
         }
       }
     }, 'Deferred migration init failed', 'initialize:migration-ready', completeBackgroundTask);
@@ -318,7 +434,7 @@ export async function initializeApp(): Promise<InitializationStatus> {
     setBackgroundFailedState(false);
     
     // Show error to user
-    showToast('Failed to initialize application', 'error');
+    emit(Events.SHOW_TOAST, { message: 'Harbor Ledger couldn\u2019t start. Try refreshing the page. If the problem persists, clear your browser cache.', type: 'error' });
     
     return initStatus;
   }
@@ -333,8 +449,10 @@ async function initializeShellCriticalSurface(savedTab: string): Promise<void> {
 
   renderMonthNav();
 
-  const validTabs = ['dashboard', 'budget', 'transactions', 'calendar'];
-  const initialTab = (validTabs.includes(savedTab) ? savedTab : 'dashboard') as any;
+  const validTabs: MainTab[] = ['dashboard', 'budget', 'transactions', 'calendar'];
+  const initialTab: MainTab = (validTabs as string[]).includes(savedTab)
+    ? savedTab as MainTab
+    : 'dashboard';
   switchMainTab(initialTab);
   setStartupProgress('initialize:shell-surface-ready');
 }
@@ -350,11 +468,17 @@ async function initializeShellVisibleControls(): Promise<void> {
 
   const modalEv = await import('../ui/interactions/modal-events.js');
   modalEv.initModalEvents({
-    fmtCur: (v: number) => signals.currency.value.symbol + v.toFixed(2),
     renderSavingsGoals: () => {},
     updateSummary: () => {},
     renderCustomCatsList: () => {
-      import('../ui/core/ui-render.js').then((m) => m.renderCustomCatsList());
+      // M6 (Inline-Behavior-Review rev 12): route the floating dynamic
+      // import through `loadAndCall` so a failed lazy-load surfaces in
+      // telemetry instead of producing an unhandled rejection.
+      loadAndCall(
+        () => import('../ui/core/ui-render.js'),
+        (m) => m.renderCustomCatsList(),
+        { module: 'AppInitDI', action: 'modal_render_custom_cats_list' }
+      );
     },
     refreshAll: () => {
       signals.refreshVersion.value++;
@@ -372,13 +496,18 @@ async function initializeShellVisibleControls(): Promise<void> {
   registerCleanup(modalEv.cleanupModalEvents);
 
   const importExportEv = await import('../features/import-export/import-export-events.js');
-  importExportEv.initImportExportEvents({
-    fmtCur: (v: number) => signals.currency.value.symbol + v.toFixed(2)
-  });
+  importExportEv.initImportExportEvents({});
   registerCleanup(importExportEv.cleanupImportExportEvents);
-  import('../ui/components/async-modal.js').then(({ confirmDataOperation }) => {
-    importExportEv.setImportConfirmFn(confirmDataOperation);
-  });
+  // M6 (rev 12): loader failure now surfaces via trackError instead of
+  // a silent unhandled rejection that would leave the import-confirm
+  // dialog wired to nothing.
+  loadAndCall(
+    () => import('../ui/components/async-modal.js'),
+    ({ confirmDataOperation }) => {
+      importExportEv.setImportConfirmFn(confirmDataOperation);
+    },
+    { module: 'AppInitDI', action: 'wire_import_confirm_fn' }
+  );
 
   setStartupProgress('initialize:modal-surface-ready');
 }
@@ -403,9 +532,14 @@ async function postOnboardingInit(savedTab: string, hasTransactions: boolean): P
   registerCleanup(cleanupMultiTabSync);
   setStartupProgress('initialize:multi-tab-ready');
 
-  import('../ui/components/async-modal.js').then(({ promptTextInput }) => {
-    filterEv.setFilterPromptFn(promptTextInput);
-  });
+  // M6 (rev 12): loader failure now surfaces via trackError.
+  loadAndCall(
+    () => import('../ui/components/async-modal.js'),
+    ({ promptTextInput }) => {
+      filterEv.setFilterPromptFn(promptTextInput);
+    },
+    { module: 'AppInitDI', action: 'wire_filter_prompt_fn' }
+  );
 
   setStartupProgress('post:form-events-imported');
 
@@ -424,7 +558,6 @@ async function postOnboardingInit(savedTab: string, hasTransactions: boolean): P
 
   // Initialize form events (transaction form submission)
   formEv.initFormEvents({
-    fmtCur: (v: number) => signals.currency.value.symbol + v.toFixed(2),
     cancelEditing: async () => {
       const { cancelEditing } = await import('../transactions/edit-mode.js');
       cancelEditing();
@@ -436,16 +569,22 @@ async function postOnboardingInit(savedTab: string, hasTransactions: boolean): P
 
   // Initialize keyboard shortcuts
   registerCleanup(keyboardEv.initKeyboardEvents({
-    switchMainTab: (tab: string) => switchMainTab(tab as any),
+    switchMainTab: (tab: string) => switchMainTab(tab as MainTab),
     switchTab: (type: 'expense' | 'income') => switchTab(type),
     cancelEditing: async () => {
       const { cancelEditing } = await import('../transactions/edit-mode.js');
       cancelEditing();
     },
     openSettingsModal: () => {
-      void import('../ui/interactions/modal-events.js').then(({ openSettingsModal }) => {
-        void openSettingsModal();
-      });
+      // M6 (rev 12): migrated from `void import().then()` — same silent
+      // unhandled-rejection risk applied even with the leading `void`.
+      loadAndCall(
+        () => import('../ui/interactions/modal-events.js'),
+        ({ openSettingsModal }) => {
+          void openSettingsModal();
+        },
+        { module: 'AppInitDI', action: 'open_settings_modal' }
+      );
     },
     renderCategories: () => renderCategories()
   }));
@@ -473,15 +612,23 @@ async function postOnboardingInit(savedTab: string, hasTransactions: boolean): P
   renderQuickShortcuts();
   registerCleanup(mountEditUI());
   registerCleanup(mountInlineAlerts());
-  splitTransactions.setSplitFmtCur((v: number) => signals.currency.value.symbol + v.toFixed(2));
   registerCleanup(splitTransactions.mountSplitModal());
-  void import('../ui/widgets/filters.js').then(({ renderFilterPresets }) => {
-    renderFilterPresets();
-  });
+  // M6 (rev 12): migrated from `void import().then()` — `loadAndCall`
+  // captures loader failures so the filter-presets strip is never left
+  // unrendered without a telemetry signal.
+  loadAndCall(
+    () => import('../ui/widgets/filters.js'),
+    ({ renderFilterPresets }) => {
+      renderFilterPresets();
+    },
+    { module: 'AppInitDI', action: 'initial_render_filter_presets' }
+  );
   setStartupProgress('post:form-ui-ready');
 
-  const validTabs = ['dashboard', 'budget', 'transactions', 'calendar'];
-  const initialTab = (validTabs.includes(savedTab) ? savedTab : 'dashboard') as any;
+  const validTabs: MainTab[] = ['dashboard', 'budget', 'transactions', 'calendar'];
+  const initialTab: MainTab = (validTabs as string[]).includes(savedTab)
+    ? savedTab as MainTab
+    : 'dashboard';
   switchMainTab(initialTab);
 
   await refreshTransactionsSurface();
@@ -490,8 +637,16 @@ async function postOnboardingInit(savedTab: string, hasTransactions: boolean): P
   registerCleanup(await setupWorkerDeltaSync());
   const { syncWorkerDataset, shouldUseWorker, isWorkerReady } = await import('./worker-manager.js');
   if (shouldUseWorker(signals.transactions.value.length) && !isWorkerReady()) {
+    // rev 12 L2 (#32 observability): initial full-sync failure previously DEV-only
+    // warned. Route through trackError so prod worker-init races surface in
+    // telemetry — there's no retry on this path (unlike syncDeltaOrReload),
+    // so a silent failure leaves the worker indeterminate for the rest of the
+    // session.
     void syncWorkerDataset(signals.transactions.value).catch((err: unknown) => {
-      if (import.meta.env.DEV) console.warn('Worker sync failed:', err);
+      trackError(err instanceof Error ? err : new Error(String(err)), {
+        module: 'AppInitDI',
+        action: 'initial_worker_sync',
+      });
     });
   }
 
@@ -506,7 +661,7 @@ function scheduleBackgroundInitialization(
   completeBackgroundTask: (step: string) => void
 ): void {
   scheduleTrackedDeferredInteractiveWork(async (isCancelled) => {
-    const { switchMainTab, switchTab } = await import('../ui/core/ui-navigation.js');
+    const { switchTab } = await import('../ui/core/ui-navigation.js');
     const { renderMonthNav, renderCategories, renderQuickShortcuts, populateCategoryFilter, updateCharts } = await import('../ui/core/ui-render.js');
     const { refreshTransactionsSurface } = await import('../data/transaction-surface-coordinator.js');
     const { initLazyLoading, cleanupLazyLoading } = await import('../core/lazy-loader.js');
@@ -515,13 +670,12 @@ function scheduleBackgroundInitialization(
     registerCleanup(cleanupLazyLoading);
     setStartupProgress('post:lazy-loader-ready');
 
-    const cleanupDashboard = initDashboard();
-    if (isCancelled()) {
-      cleanupDashboard();
-      return;
-    }
-    registerCleanup(cleanupDashboard);
-    setStartupProgress('post:dashboard-ready');
+    // Phase 5g-1: removed `initDashboard()` / `cleanupDashboard` wiring —
+    // the shim was a no-op returning a no-op cleanup. `post:dashboard-ready`
+    // startup-progress beacon had no external consumer (grep-verified) and
+    // was also removed. Early-cancel window between lazy-loader and app-events
+    // is preserved by the next `if (isCancelled()) return;` check below.
+    if (isCancelled()) return;
 
     initAppEvents({
       updateReconcileCount: () => {},
@@ -541,10 +695,10 @@ function scheduleBackgroundInitialization(
       renderRecurringBreakdown: async () => {
         await updateCharts();
       },
-      checkBackupReminder: async () => {
-        const { checkBackupReminder } = await import('../orchestration/backup-reminder.js');
-        checkBackupReminder();
-      },
+      // Phase 5g-1 (Inline-Behavior-Review rev 12, L54): removed
+      // `checkBackupReminder` callback wiring. backup-reminder.ts no
+      // longer exports the no-op shim; mountBackupReminder()'s effect
+      // is the live path.
       renderMonthNav: () => renderMonthNav(),
       populateCategoryFilter: () => populateCategoryFilter(),
       resetCalendarSelection: async () => {
@@ -552,6 +706,8 @@ function scheduleBackgroundInitialization(
         resetCalendarSelection();
       },
       renderCategories: () => renderCategories(),
+      // CR-Apr24-I finding 93: schedule quick-shortcut rerender on category edits
+      renderQuickShortcuts: () => renderQuickShortcuts(),
       refreshAll: () => {
         signals.refreshVersion.value++;
       },
@@ -566,14 +722,12 @@ function scheduleBackgroundInitialization(
     const {
       initTemplateManager,
       cleanupTemplateManager,
-      setTemplateFmtCurFn,
       setTemplateRenderCategoriesFn,
       setTemplateSwitchTabFn,
       renderTemplates
     } = await import('../transactions/template-manager.js');
     if (isCancelled()) return;
     initTemplateManager();
-    setTemplateFmtCurFn((value: number) => signals.currency.value.symbol + value.toFixed(2));
     setTemplateRenderCategoriesFn(() => renderCategories());
     setTemplateSwitchTabFn((type: 'expense' | 'income') => switchTab(type));
     renderTemplates();
@@ -581,10 +735,15 @@ function scheduleBackgroundInitialization(
     setStartupProgress('post:templates-ready');
 
     const { processRecurringTemplates } = await import('../data/recurring-templates.js');
-    const generatedCount = await processRecurringTemplates();
+    // CR-Apr24-B [P2] finding 44: processRecurringTemplates now returns a
+    // structured result. Read `.generated` for the toast count; the other
+    // fields (templatesErrored, capHits) are for telemetry — DEV-only
+    // warnings inside the implementation already surface them.
+    const result = await processRecurringTemplates();
+    const generatedCount = result.generated;
     if (isCancelled()) return;
     if (generatedCount > 0) {
-      showToast(`Generated ${generatedCount} recurring transaction${generatedCount === 1 ? '' : 's'}`, 'info');
+      emit(Events.SHOW_TOAST, { message: `Generated ${generatedCount} recurring transaction${generatedCount === 1 ? '' : 's'}`, type: 'info' });
     }
     setStartupProgress('initialize:recurring-ready');
 
@@ -593,6 +752,17 @@ function scheduleBackgroundInitialization(
     await updateCharts();
     initDashboardTrendRangeSelector();
     renderMonthComparison();
+
+    // Resolve lazy DI services so downstream resolveSync() calls succeed.
+    // Without this, isInitialized() stays false and resolveSync throws.
+    const container = getDefaultContainer();
+    await Promise.all([
+      container.resolve(Services.INSIGHTS_GENERATOR),
+      container.resolve(Services.UPDATE_CHARTS),
+    ]);
+    // Bump refreshVersion to trigger currentInsights recomputation now
+    // that the service is available.
+    signals.refreshVersion.value++;
 
     setupPerformanceMonitoring();
   }, 'Deferred analytics/template init failed', 'post:performance-ready', completeBackgroundTask);
@@ -604,7 +774,6 @@ function scheduleBackgroundInitialization(
       budgetPlannerUi,
       debtPlanner,
       pinHandlers,
-      splitTransactions,
       calculations,
       achievements,
       streakTracker
@@ -614,7 +783,6 @@ function scheduleBackgroundInitialization(
       import('../features/financial/budget-planner-ui.js'),
       import('../features/financial/debt-planner.js'),
       import('../ui/widgets/pin-ui-handlers.js'),
-      import('../features/financial/split-transactions.js'),
       import('../features/financial/calculations.js'),
       import('../features/gamification/achievements.js'),
       import('../features/gamification/streak-tracker.js')
@@ -633,33 +801,52 @@ function scheduleBackgroundInitialization(
     registerCleanup(pinHandlers.cleanupPinHandlers);
     registerCleanup(await setupRemoteTransactionFollowUps());
 
-    splitTransactions.setSplitFmtCur((v: number) => signals.currency.value.symbol + v.toFixed(2));
-
     debtUiHandlers.initDebtHandlers();
     registerCleanup(debtUiHandlers.cleanupDebtHandlers);
-    debtUiHandlers.setDebtFmtCur((v: number) => signals.currency.value.symbol + v.toFixed(2));
     debtUiHandlers.setDebtRefreshAll(() => {
       signals.refreshVersion.value++;
     });
 
     budgetPlannerUi.initBudgetPlannerHandlers();
     registerCleanup(budgetPlannerUi.cleanupBudgetPlannerHandlers);
-    budgetPlannerUi.setBudgetPlannerFmtCur((v: number) => signals.currency.value.symbol + v.toFixed(2));
+    // M6 (rev 12): every loader failure in the budget-planner callback
+    // cluster now routes through trackError. The prior mix of
+    // `void import()` (3 sites) and bare `import()` (1 site) was the
+    // motivating example called out in the finding — both shapes leaked
+    // a floating rejection; unifying through `loadAndCall` closes both.
     budgetPlannerUi.setBudgetPlannerCallbacks({
       renderCategories: () => {
-        void import('../ui/core/ui-render.js').then((m) => m.renderCategories());
+        loadAndCall(
+          () => import('../ui/core/ui-render.js'),
+          (m) => m.renderCategories(),
+          { module: 'AppInitDI', action: 'budget_planner_render_categories' }
+        );
       },
       renderQuickShortcuts: () => {
-        void import('../ui/core/ui-render.js').then((m) => m.renderQuickShortcuts());
+        loadAndCall(
+          () => import('../ui/core/ui-render.js'),
+          (m) => m.renderQuickShortcuts(),
+          { module: 'AppInitDI', action: 'budget_planner_render_quick_shortcuts' }
+        );
       },
       populateCategoryFilter: () => {
-        void import('../ui/core/ui-render.js').then((m) => m.populateCategoryFilter());
+        loadAndCall(
+          () => import('../ui/core/ui-render.js'),
+          (m) => m.populateCategoryFilter(),
+          { module: 'AppInitDI', action: 'budget_planner_populate_category_filter' }
+        );
       },
       renderCustomCatsList: () => {
-        import('../ui/core/ui-render.js').then(m => m.renderCustomCatsList());
+        loadAndCall(
+          () => import('../ui/core/ui-render.js'),
+          (m) => m.renderCustomCatsList(),
+          { module: 'AppInitDI', action: 'budget_planner_render_custom_cats_list' }
+        );
       }
     });
 
+    // M6 (rev 12): storage-event fanout callbacks now route every
+    // dynamic-import failure through trackError.
     storageEv.initStorageEvents({
       refreshAll: () => {
         signals.refreshVersion.value++;
@@ -667,18 +854,44 @@ function scheduleBackgroundInitialization(
       updateSummary: () => {},
       renderSavingsGoals: () => {},
       checkAlerts: () => {
-        import('../features/personalization/alerts.js').then(m => m.checkAlerts());
+        loadAndCall(
+          () => import('../features/personalization/alerts.js'),
+          (m) => m.checkAlerts(),
+          { module: 'AppInitDI', action: 'storage_check_alerts' }
+        );
       },
       updateInsights: () => {},
       renderBadges: () => {
-        import('../features/gamification/achievements.js').then(m => m.checkAchievements());
+        loadAndCall(
+          () => import('../features/gamification/achievements.js'),
+          (m) => m.checkAchievements(),
+          { module: 'AppInitDI', action: 'storage_check_achievements' }
+        );
       },
-      renderStreak: () => {},
+      // CR-Apr24-I finding 136: previously a no-op, leaving the streak
+      // widget stale after cross-tab streak updates. Now dynamically
+      // imports and calls the real renderStreak so the gamification
+      // surface stays in sync across tabs.
+      renderStreak: () => {
+        loadAndCall(
+          () => import('../features/gamification/streak-tracker.js'),
+          (m) => m.renderStreak(),
+          { module: 'AppInitDI', action: 'storage_render_streak' }
+        );
+      },
       renderFilterPresets: () => {
-        import('../ui/widgets/filters.js').then(m => m.renderFilterPresets());
+        loadAndCall(
+          () => import('../ui/widgets/filters.js'),
+          (m) => m.renderFilterPresets(),
+          { module: 'AppInitDI', action: 'storage_render_filter_presets' }
+        );
       },
       renderTemplates: () => {
-        import('../transactions/template-manager.js').then(m => m.renderTemplates());
+        loadAndCall(
+          () => import('../transactions/template-manager.js'),
+          (m) => m.renderTemplates(),
+          { module: 'AppInitDI', action: 'storage_render_templates' }
+        );
       }
     });
     registerCleanup(storageEv.cleanupStorageEvents);
@@ -704,8 +917,15 @@ async function setupWorkerDeltaSync(): Promise<() => void> {
 
   const syncFullDataset = (): void => {
     if (!shouldSyncWorker()) return;
+    // rev 12 L2 (#32 observability): full-dataset sync failure now routes
+    // through trackError instead of DEV-only warn — no retry on this path,
+    // so a silent failure produces a worker that's out-of-sync for the
+    // remainder of the session with zero prod telemetry.
     void syncWorkerDataset(signals.transactions.value).catch((err: unknown) => {
-      if (import.meta.env.DEV) console.warn('Worker full dataset sync failed:', err);
+      trackError(err instanceof Error ? err : new Error(String(err)), {
+        module: 'AppInitDI',
+        action: 'worker_full_dataset_sync',
+      });
     });
   };
 
@@ -715,25 +935,54 @@ async function setupWorkerDeltaSync(): Promise<() => void> {
       syncFullDataset();
       return;
     }
+    // rev 12 L2 (#32 observability): delta-sync failure recovers via a full
+    // resync (which will surface its own failure if it also fails), but the
+    // delta-failure itself is still worth knowing about — repeated delta
+    // failures suggest a worker-protocol regression.
     void syncWorkerDatasetDelta(change).catch((err: unknown) => {
-      if (import.meta.env.DEV) console.warn('Worker delta sync failed, retrying full sync:', err);
+      trackError(err instanceof Error ? err : new Error(String(err)), {
+        module: 'AppInitDI',
+        action: 'worker_delta_sync_retrying_full',
+      });
       syncFullDataset();
     });
   };
 
   const unsubscribers = [
     on(Events.TRANSACTION_ADDED, (tx: unknown) => {
-      syncDeltaOrReload({ type: 'add', item: tx as any });
+      if (!isTransaction(tx)) {
+        if (import.meta.env.DEV) console.warn('[sync] Ignoring TRANSACTION_ADDED with invalid payload:', tx);
+        return;
+      }
+      syncDeltaOrReload({ type: 'add', item: tx });
     }),
     on(Events.TRANSACTION_UPDATED, (tx: unknown) => {
-      syncDeltaOrReload({ type: 'update', item: tx as any });
+      if (!isTransaction(tx)) {
+        if (import.meta.env.DEV) console.warn('[sync] Ignoring TRANSACTION_UPDATED with invalid payload:', tx);
+        return;
+      }
+      syncDeltaOrReload({ type: 'update', item: tx });
     }),
     on(Events.TRANSACTION_DELETED, (tx: unknown) => {
-      syncDeltaOrReload({ type: 'delete', id: (tx as any).__backendId, item: tx as any });
+      if (!isTransaction(tx)) {
+        if (import.meta.env.DEV) console.warn('[sync] Ignoring TRANSACTION_DELETED with invalid payload:', tx);
+        return;
+      }
+      syncDeltaOrReload({ type: 'delete', id: tx.__backendId, item: tx });
     }),
     on(Events.TRANSACTIONS_BATCH_ADDED, (payload: unknown) => {
-      const transactions = (payload as { transactions?: any[] }).transactions || [];
+      const candidate = (payload && typeof payload === 'object')
+        ? (payload as { transactions?: unknown }).transactions
+        : undefined;
+      if (!Array.isArray(candidate)) {
+        if (import.meta.env.DEV) console.warn('[sync] Ignoring TRANSACTIONS_BATCH_ADDED with invalid payload:', payload);
+        return;
+      }
+      const transactions = candidate.filter(isTransaction);
       if (transactions.length === 0) return;
+      if (import.meta.env.DEV && transactions.length !== candidate.length) {
+        console.warn(`[sync] TRANSACTIONS_BATCH_ADDED dropped ${candidate.length - transactions.length} invalid items`);
+      }
       syncDeltaOrReload({ type: 'batch-add', items: transactions });
     }),
     on(Events.TRANSACTIONS_REPLACED, () => {
@@ -750,7 +999,14 @@ async function setupWorkerDeltaSync(): Promise<() => void> {
       ) {
         return;
       }
-      void syncWorkerDataset(payload.transactions);
+      // CR-Apr24-I finding 250: add error handling so cross-tab worker
+      // refresh failures get telemetry, matching every other sync path.
+      void syncWorkerDataset(payload.transactions).catch((err: unknown) => {
+        trackError(err instanceof Error ? err : new Error(String(err)), {
+          module: 'worker-manager',
+          action: 'cross_tab_full_refresh'
+        });
+      });
     }),
     on(DataSyncEvents.TRANSACTION_DELTA_APPLIED, (payload: { source?: string; change?: TransactionDataDelta }) => {
       if (payload.source !== 'multi-tab-sync' || !payload.change || !shouldSyncWorker()) {
@@ -768,17 +1024,26 @@ async function setupWorkerDeltaSync(): Promise<() => void> {
 async function setupRemoteTransactionFollowUps(): Promise<() => void> {
   const { checkAchievements } = await import('../features/gamification/achievements.js');
   const { renderMonthComparison } = await import('../ui/charts/analytics-ui.js');
+  // CR-Apr24-I finding 72: previously only `renderMonthComparison` ran
+  // after a multi-tab sync, leaving the full analytics modal (trend
+  // charts, YoY, seasonal, category breakdown) stale. Now also call
+  // `refreshAnalyticsIfOpen` which re-populates the entire modal if it
+  // is currently visible. Lazy-import keeps the module off the critical
+  // path when the modal is closed (the common case).
+  const { refreshAnalyticsIfOpen } = await import('../features/analytics/analytics-ui.js');
 
   const unsubscribers = [
     on(DataSyncEvents.TRANSACTION_UPDATED, (payload: { source?: string }) => {
       if (payload.source !== 'multi-tab-sync') return;
       checkAchievements();
       renderMonthComparison();
+      refreshAnalyticsIfOpen();
     }),
     on(DataSyncEvents.TRANSACTION_DELTA_APPLIED, (payload: { source?: string }) => {
       if (payload.source !== 'multi-tab-sync') return;
       checkAchievements();
       renderMonthComparison();
+      refreshAnalyticsIfOpen();
     })
   ];
 
@@ -822,8 +1087,8 @@ function scheduleDeferredInteractiveWork(
 
   const cancelTask = (): void => {
     cancelled = true;
-    if (idleId !== null && typeof (window as any).cancelIdleCallback === 'function') {
-      (window as any).cancelIdleCallback(idleId);
+    if (idleId !== null && typeof window.cancelIdleCallback === 'function') {
+      window.cancelIdleCallback(idleId);
       idleId = null;
     }
     if (animationFrameId !== null) {
@@ -841,7 +1106,7 @@ function scheduleDeferredInteractiveWork(
 
   registerDeferredTaskCleanup(cancelTask);
 
-  const idleCallback = (window as any).requestIdleCallback as ((callback: () => void, options?: { timeout: number }) => number) | undefined;
+  const idleCallback = typeof window.requestIdleCallback === 'function' ? window.requestIdleCallback : undefined;
   if (idleCallback) {
     idleId = idleCallback(() => {
       idleId = null;
@@ -872,14 +1137,6 @@ function setupAutoSave(): void {
   // Auto-save functionality moved to signal effects for better performance
 }
 
-/**
- * @deprecated Auto-save is now handled by signal effects
- */
-function saveAllState(): void {
-  // No-op: Signals automatically persist via effects
-  // Keeping this function to avoid breaking existing calls
-}
-
 // ==========================================
 // PERFORMANCE MONITORING
 // ==========================================
@@ -887,10 +1144,16 @@ function saveAllState(): void {
 function setupPerformanceMonitoring(): void {
   // Only setup in development
   if (import.meta.env.DEV) {
-    // Import performance monitor
-    import('../core/performance-integration.js').then(({ setupPerformanceMonitoring }) => {
-      setupPerformanceMonitoring();
-    });
+    // M6 (rev 12): DEV-only dynamic import still benefits from the
+    // loadAndCall wrapper — a failing import during dev surfaces in the
+    // error console via trackError instead of a silent rejection.
+    loadAndCall(
+      () => import('../core/performance-integration.js'),
+      ({ setupPerformanceMonitoring }) => {
+        setupPerformanceMonitoring();
+      },
+      { module: 'AppInitDI', action: 'setup_performance_monitoring' }
+    );
   }
 }
 
@@ -908,6 +1171,11 @@ export function cleanupApp(): void {
   cleanupDeferredInteractiveWork();
   cleanupAllComponents();
   cleanupAppEvents();
+
+  // Tear down the module-level midnight-refresh timer in signals.ts. Without
+  // this call the setTimeout chain survives HMR, app reset, and test-harness
+  // reuse, scheduling duplicate todayStr updates against stale app state.
+  signals.cancelMidnightTimer();
 
   // Clear container
   if (initStatus.container) {

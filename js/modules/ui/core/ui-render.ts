@@ -9,39 +9,59 @@
 'use strict';
 
 import { SK, persist } from '../../core/state.js';
-import { dataSdk } from '../../data/data-manager.js';
+import { allExpenseCategories, allIncomeCategories, deleteCategoryWithCleanup } from '../../core/category-store.js';
 import * as signals from '../../core/signals.js';
-import { filters, form, data } from '../../core/state-actions.js';
+import { getMonthAlloc } from '../../core/month-alloc.js';
+// CR-Apr22-B slice 1: `data` dropped — only the delete-custom-cat path used
+// `data.setMonthlyAllocations`, and that flow now routes through
+// `deleteCategoryWithCleanup` which owns the allocation sweep.
+import { filters, form } from '../../core/state-actions.js';
 import { DOM } from '../../core/dom-cache.js';
 import { getAllCats, getCatInfo, DEFAULT_CATEGORY_COLOR } from '../../core/categories.js';
 import { showToast, openModal } from './ui.js';
 import { asyncConfirm } from '../components/async-modal.js';
-import { emit, Events } from '../../core/event-bus.js';
-import { monthLabel, parseLocalDate, toCents, toDollars } from '../../core/utils.js';
+import { monthLabel, formatCategoryChartLabel } from '../../core/utils-pure.js';
 import { renderTrendChart, renderDonutChart, renderBarChart, getTrendChartMonths, setTrendChartMonths } from '../charts/chart-renderers.js';
-import { calculateMonthlyTotalsWithCacheSync } from '../../core/monthly-totals-cache.js';
+// M33 (Phase 5f): `...Sync` suffix dropped — monthly-totals-cache is now sync-only.
+import { calculateMonthlyTotalsWithCache } from '../../core/monthly-totals-cache.js';
 import { calculateCategoryTrends } from '../../features/analytics/trend-analysis.js';
+// 7a (Inline-Behavior-Review, Period/scope coherence + baseline helper):
+// route category-trend month-over-month math through `computeBaselineDelta`
+// so `updateCategoryBreakdownChart` stops fabricating `change: 100` for
+// new baselines and `change: 0` for no-data baselines. The helper's
+// three-case discriminated return ('comparable' | 'new' | 'no-data')
+// maps 1:1 onto the direction/change pair the UI already consumed.
+import { computeBaselineDelta } from '../../core/baseline.js';
 import { getMonthBadge } from '../widgets/calendar.js';
 import { revealTransactionsForm, switchMainTab } from './ui-navigation.js';
-import { html, render } from '../../core/lit-helpers.js';
+import { html, render, repeat } from '../../core/lit-helpers.js';
 import { applyTransactionFilters } from '../../data/transaction-surface-coordinator.js';
-import type { Transaction, CustomCategory, TransactionType, CategoryTrendChange } from '../../../types/index.js';
+// CR-Apr22-B slice 1: category-delete orchestration migrated to
+// `deleteCategoryWithCleanup`; `dataSdk`, `emit`, `Events`, and the
+// `Transaction` type are no longer referenced from this module.
+import type { UserCategory, CategoryTrendChange } from '../../../types/index.js';
 
 // ==========================================
 // TYPE DEFINITIONS
 // ==========================================
 
+// Phase 6 Slice 1j (rev 12 L6): widened for `exactOptionalPropertyTypes`
+// — insights.ts:69 passes `{ category: typeof data === 'string' ? data : undefined }`.
 interface InsightActionData {
-  category?: string;
+  category?: string | undefined;
 }
 
 function revealAfterTabSwitch(sectionId: string, focusId?: string): void {
+  // CR-Apr24-I finding 124: capture the current tab so we can bail if
+  // the user navigated away before the timer fires.
+  const capturedTab = signals.activeMainTab.value;
   window.setTimeout(() => {
-    const section = DOM.get(sectionId) as HTMLElement | null;
+    if (signals.activeMainTab.value !== capturedTab) return;
+    const section = DOM.get(sectionId);
     section?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
     if (focusId) {
-      const focusTarget = DOM.get(focusId) as HTMLElement | null;
+      const focusTarget = DOM.get(focusId);
       focusTarget?.focus();
       if (focusTarget instanceof HTMLInputElement) focusTarget.select();
     }
@@ -120,12 +140,12 @@ export function renderQuickShortcuts(): void {
   }
 
   const template = html`
-    ${cats.map(cat => html`
-      <button type="button" 
-              class="quick-add-shortcut quick-shortcut p-3 rounded-lg text-center transition-all hover:opacity-80"
-              data-category="${cat.id}" 
+    ${repeat(cats, cat => cat.id, cat => html`
+      <button type="button"
+              class="quick-add-shortcut quick-shortcut p-3 rounded-lg text-center transition-all hover:opacity-80 chip-category"
+              data-category="${cat.id}"
               data-type="${currentType}"
-              style="background: ${cat.color}20; border: 2px solid ${cat.color}; color: ${cat.color}; font-weight: 600;">
+              style="--cat-color: ${cat.color};">
         <div class="text-2xl mb-1">${cat.emoji}</div>
         <div class="text-xs">${cat.name}</div>
       </button>
@@ -164,7 +184,7 @@ export function renderCategories(): void {
   }
 
   const template = html`
-    ${cats.map(cat => html`
+    ${repeat(cats, cat => cat.id, cat => html`
       <button type="button" 
               data-category="${cat.id}"
               data-color="${cat.color}"
@@ -173,10 +193,9 @@ export function renderCategories(): void {
         <span class="text-lg">${cat.emoji}</span>
         <span>${cat.name}</span>
       </button>
-    `)}
+     `)}
     <button type="button" id="inline-add-cat"
-            class="px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all"
-            style="background: transparent; color: var(--text-tertiary); border: 1px dashed var(--border-input);">
+            class="px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all btn-ghost-outline">
       <span class="text-lg">+</span>
       <span>Custom</span>
     </button>
@@ -203,16 +222,17 @@ export function updateTrendChart(): void {
   
   if (trendContainer) {
     if (signals.transactionCount.value === 0) {
-      render(html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">Add transactions to explain how income and spending are shaping the month.</p>`, trendContainer);
+      render(html`<p class="text-xs text-center py-8 text-tertiary">Add transactions to explain how income and spending are shaping the month.</p>`, trendContainer);
     } else if (trackedMonths.length < 2) {
       render(
-        html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">
+        html`<p class="text-xs text-center py-8 text-tertiary">
           Need at least two months of history to show the ${getTrendChartMonths()}-month trend.
         </p>`,
         trendContainer
       );
     } else {
-      renderTrendChart('trend-chart-container');
+      // REND-04: catch async errors from trend chart render
+      void renderTrendChart('trend-chart-container').catch((e) => { if (import.meta.env.DEV) console.error('[ui-render] trend chart render failed:', e); });
     }
   }
 }
@@ -225,6 +245,16 @@ function openInlineCategoryModal(): void {
   if (catColor) catColor.value = DEFAULT_CATEGORY_COLOR;
   if (catType) catType.value = signals.currentType.value;
   if (window.resetEmojiPicker) window.resetEmojiPicker();
+  // Design-Review-Apr21 P2: parallel entrypoint to the budget-planner
+  // opener (`openCustomCategoryModal` in `budget-planner-ui.ts`), which
+  // clears `#custom-cat-name-error` + `aria-invalid` on each open. This
+  // path was missing the same cleanup, so a failed save from the
+  // transaction form would leave the modal decorated with error state
+  // that persisted across dismiss → reopen. Mirroring the cleanup here
+  // keeps both entrypoints into the same modal behaviorally identical.
+  const nameErr = document.getElementById('custom-cat-name-error');
+  if (nameErr) nameErr.classList.add('hidden');
+  if (catName) catName.removeAttribute('aria-invalid');
   openModal('category-modal');
 }
 
@@ -292,12 +322,23 @@ function bindQuickShortcutHandlers(container: HTMLElement): void {
   });
 }
 
+// REND-06: memoize the category breakdown chart so it only recomputes
+// when the month or the underlying category totals actually change.
+let _lastBreakdownKey = '';
+
 /**
  * Update the dashboard category breakdown without touching other charts.
  */
 export function updateCategoryBreakdownChart(): void {
-  const currentMonth = signals.currentMonth.value;
   const donutContainer = DOM.get('donut-chart-container');
+
+  // REND-06: build a cheap fingerprint from month + category totals so we
+  // skip the expensive calculateCategoryTrends() call when nothing changed.
+  const catTotals = signals.currentMonthSummary.value.categoryTotals;
+  const breakdownKey = signals.currentMonth.value + '|' + JSON.stringify(catTotals);
+  if (breakdownKey === _lastBreakdownKey) return;
+  _lastBreakdownKey = breakdownKey;
+
   const categoryTrends = calculateCategoryTrends(2);
   const donutTrends: Record<string, CategoryTrendChange> = {};
 
@@ -305,20 +346,33 @@ export function updateCategoryBreakdownChart(): void {
     const previousAmount = trend.monthlyData.at(-2)?.amount || 0;
     const currentAmount = trend.monthlyData.at(-1)?.amount || 0;
 
-    if (currentAmount > 0 && previousAmount <= 0) {
-      donutTrends[trend.category.id] = { change: 100, direction: 'new' };
+    // 7a (Inline-Behavior-Review, Period/scope coherence + baseline
+    // helper): the prior inline branching fabricated `change: 100` for
+    // the new-baseline case (previous zero, current positive) and
+    // `change: 0` for the no-data case (both zero). Consumers ignored
+    // both fabrications via direction-branch guards in chart-renderers,
+    // but the type shape `change: number` lied about the semantics and
+    // the test suite actively locked in `change: 100` for new. Routing
+    // through `computeBaselineDelta` and surfacing `change: null` when
+    // no baseline exists aligns the type, the producer, and the test
+    // contract with `core/baseline.ts`'s three-case discriminated union.
+    const baseline = computeBaselineDelta(currentAmount, previousAmount);
+
+    if (baseline.status === 'new') {
+      donutTrends[trend.category.id] = { change: null, direction: 'new' };
       return;
     }
 
-    if (previousAmount <= 0) {
-      donutTrends[trend.category.id] = { change: 0, direction: 'flat' };
+    if (baseline.status === 'no-data') {
+      donutTrends[trend.category.id] = { change: null, direction: 'flat' };
       return;
     }
 
-    const percentChange = ((currentAmount - previousAmount) / Math.abs(previousAmount)) * 100;
+    // status === 'comparable' — `baseline.percent` is a signed number.
+    const percent = baseline.percent ?? 0;
     donutTrends[trend.category.id] = {
-      change: Math.round(Math.abs(percentChange)),
-      direction: percentChange > 0 ? 'up' : percentChange < 0 ? 'down' : 'flat'
+      change: Math.round(Math.abs(percent)),
+      direction: percent > 0 ? 'up' : percent < 0 ? 'down' : 'flat'
     };
   });
 
@@ -331,7 +385,7 @@ export function updateCategoryBreakdownChart(): void {
   
   if (donutContainer) {
     if (donutData.length === 0) {
-      render(html`<p class="text-xs text-center py-8" style="color: var(--text-tertiary);">Add expense activity to see which categories are creating the most pressure.</p>`, donutContainer);
+      render(html`<p class="text-xs text-center py-8" class="text-tertiary">Add expense activity to see which categories are creating the most pressure.</p>`, donutContainer);
     } else {
       renderDonutChart('donut-chart-container', donutData, donutTrends);
     }
@@ -348,19 +402,37 @@ export function updateCategoryBreakdownChart(): void {
  */
 export function updateBudgetVsActualChart(): void {
   const currentMonth = signals.currentMonth.value;
-  const totals = calculateMonthlyTotalsWithCacheSync(currentMonth);
+  const totals = calculateMonthlyTotalsWithCache(currentMonth);
   const bvaSec = DOM.get('budget-vs-actual-section');
-  const alloc = signals.monthlyAlloc.value[currentMonth] || {};
+  // Rev 12 / #39 M4 (Inline-Behavior-Review): getMonthAlloc replaces the
+  // legacy `signals.monthlyAlloc.value[mk] || {}` pattern — emits a
+  // once-per-session trackError on a genuine miss (map non-empty but the
+  // requested month is missing), which is the data-loss signal the review
+  // targets. Shape is identical on the hit path.
+  const alloc = getMonthAlloc(currentMonth, signals.monthlyAlloc.value);
   const allocCats = Object.keys(alloc);
 
   if (bvaSec) {
     if (allocCats.length) {
       bvaSec.classList.remove('hidden');
-      const labels = allocCats.map(c => { 
-        const info = getCatInfo('expense', c); 
-        return info.emoji + ' ' + info.name.split(' ')[0]; 
+      // CR-Apr22-D slice 5 (finding 63): the legacy
+      // `info.name.split(' ')[0]` pattern collapsed multi-word category
+      // names that shared a first token ("Car Insurance" / "Car Payment"
+      // / "Car Loan") into the single label "Car" on the budget-vs-actual
+      // x-axis — making adjacent bars indistinguishable by label.
+      // `formatCategoryChartLabel` keeps the full name when it fits
+      // (default budget of 14 visible chars covers every default preset
+      // and most custom names) and otherwise truncates with a trailing
+      // ellipsis at a position that preserves inter-category uniqueness.
+      const labels = allocCats.map(c => {
+        const info = getCatInfo('expense', c);
+        return formatCategoryChartLabel(info);
       });
-      const budgetVals = allocCats.map(c => alloc[c]);
+      // Phase 6 Slice 1i (rev 12 L6): `alloc[c]` is `number | undefined`
+      // under `noUncheckedIndexedAccess`; `allocCats` was derived from
+      // `Object.keys(alloc)` so presence is guaranteed — `?? 0` keeps the
+      // chart-data array well-typed.
+      const budgetVals = allocCats.map(c => alloc[c] ?? 0);
       const actualVals = allocCats.map(c => (totals.categoryTotals || {})[c] || 0);
       
       renderBarChart('budget-actual-chart', labels, [
@@ -441,13 +513,13 @@ export function populateCategoryFilter(): void {
   if (!container) return;
 
   const current = (container as HTMLSelectElement).value;
-  const allCats = [...getAllCats('expense', true), ...getAllCats('income', true)];
+  const allCats = [...getAllCats('expense'), ...getAllCats('income')];
 
   const template = html`
     <option value="">All Categories</option>
     ${allCats.map(c => html`
       <option value="${c.id}">
-        ${c.parent ? html`&nbsp;&nbsp;↳ ` : ''}${c.emoji} ${c.name}
+        ${c.emoji} ${c.name}
       </option>
     `)}
   `;
@@ -463,25 +535,24 @@ export function renderCustomCatsList(): void {
   const container = DOM.get('custom-categories-list');
   if (!container) return;
 
-  const customCats = signals.customCats.value;
-  
-  if (!customCats.length) {
-    render(html`<p class="text-xs" style="color: var(--text-tertiary);">No custom categories</p>`, container);
+  const allCats: UserCategory[] = [...allExpenseCategories.value, ...allIncomeCategories.value];
+
+  if (!allCats.length) {
+    render(html`<p class="text-xs text-tertiary">No custom categories</p>`, container);
     return;
   }
 
   const template = html`
-    ${customCats.map((c, i) => html`
-      <div class="flex items-center justify-between p-2 rounded" style="background: var(--bg-input);">
+    ${allCats.map((c) => html`
+      <div class="flex items-center justify-between p-2 rounded bg-input">
         <div class="flex items-center gap-2">
           <span>${c.emoji}</span>
-          <span class="text-sm font-bold" style="color: var(--text-primary);">${c.name}</span>
-          <span class="text-xs px-1 rounded" style="color: var(--text-tertiary);">${c.type}</span>
+          <span class="text-sm font-bold text-primary">${c.name}</span>
+          <span class="text-xs px-1 rounded text-tertiary">${c.type}</span>
         </div>
-        <button class="del-custom-cat text-xs"
-                @click=${() => handleDeleteCustomCat(c.id)}
-                aria-label="Delete custom category ${c.name}"
-                style="color: var(--color-expense);">✕</button>
+        <button class="del-custom-cat text-xs text-expense"
+                @click=${() => handleDeleteCustomCat(c.id, c.type, c.name)}
+                aria-label=${`Delete custom category ${c.name}`}>✕</button>
       </div>
     `)}
   `;
@@ -490,63 +561,66 @@ export function renderCustomCatsList(): void {
 }
 
 /**
- * Internal handler for custom category deletion
+ * Internal handler for custom category deletion.
+ *
+ * CR-Apr22-B slice 1: routed through `deleteCategoryWithCleanup` so this
+ * path gets the same atomic sweep as the settings UI — previously this
+ * function was the "partially correct" cleanup reference (it handled
+ * allocations + transactions) while the settings path `category-manager`
+ * did zero cleanup. Consolidation eliminates the behavior fork and fixes
+ * two latent bugs flagged in CR-Apr22-D:
+ *   (a) the hardcoded `'other' / 'other_income'` fallback that only
+ *       exists on the Personal preset — deleting under Household /
+ *       Freelancer / Business would migrate transactions to a phantom id;
+ *   (b) the non-atomic ordering (category + allocations committed
+ *       before the fallible `replaceAllTransactions`) which left a
+ *       half-deleted state on tx-write failure.
+ * The centralized helper picks a runtime fallback via
+ * `pickFallbackCategoryId` and rewrites transactions FIRST so nothing
+ * else is touched if that step fails.
  */
-async function handleDeleteCustomCat(catId: string): Promise<void> {
-  const cats = signals.customCats.value;
-  const cat = cats.find(c => c.id === catId);
-  if (!cat) return;
-
+async function handleDeleteCustomCat(catId: string, _catType: 'expense' | 'income', catName: string): Promise<void> {
   const confirmed = await asyncConfirm({
     title: 'Delete Custom Category',
-    message: `Delete custom category "${cat.name}"?`,
-    details: 'This will remove its budget allocations, show older transactions as "Unknown", and cannot be undone.',
+    message: `Delete custom category "${catName}"?`,
+    details: 'Transactions, templates, and budget allocations referencing this category will be reassigned to a fallback "Other" category. This cannot be undone.',
     type: 'danger',
     confirmText: 'Delete Category',
     cancelText: 'Cancel'
   });
   if (!confirmed) return;
 
-  // 1. Remove from signals (by ID, not index — safe against stale closures)
-  data.setCustomCategories(cats.filter(c => c.id !== catId));
-  persist(SK.CUSTOM_CAT, signals.customCats.value);
-  
-  // 2. Clean orphaned allocations
-  const monthlyAlloc = { ...signals.monthlyAlloc.value };
-  Object.keys(monthlyAlloc).forEach(mk => {
-    if (catId in monthlyAlloc[mk]) {
-      monthlyAlloc[mk] = { ...monthlyAlloc[mk] };
-      delete monthlyAlloc[mk][catId];
-    }
-  });
-  data.setMonthlyAllocations(monthlyAlloc);
-  persist(SK.ALLOC, signals.monthlyAlloc.value);
+  const outcome = await deleteCategoryWithCleanup(catId);
 
-  // 3. Migrate transactions to fallback category in a single batch operation
-  const fallbackCat = cat.type === 'expense' ? 'other' : 'other_income';
-  let txModified = false;
-  const updatedTransactions = signals.transactions.value.map((t: Transaction) => {
-    if (t.category === catId) {
-      txModified = true;
-      return {
-        ...t,
-        category: fallbackCat,
-        notes: t.notes ? `${t.notes}\n[Original Category: ${cat.name}]` : `[Original Category: ${cat.name}]`
-      };
-    }
-    return t;
-  });
-
-  if (txModified) {
-    const replaceResult = await dataSdk.replaceAllTransactions(updatedTransactions);
-    if (!replaceResult.isOk) {
-      showToast('Failed to update transactions for deleted category', 'error');
+  if (!outcome.ok) {
+    if (outcome.error === 'last_category_of_type') {
+      showToast(outcome.message, 'warning');
       return;
     }
-    emit(Events.TRANSACTIONS_REPLACED);
+    if (outcome.error === 'tx_persist_failed') {
+      showToast(outcome.message, 'error');
+      return;
+    }
+    // 'not_found' — already gone; silently refresh.
+    renderCustomCatsList();
+    renderCategories();
+    populateCategoryFilter();
+    return;
   }
 
-  // 4. Update UI
+  // Summary toast — mirror the copy used by the settings-side handler so
+  // both delete paths behave identically to the user.
+  const reassignments: string[] = [];
+  if (outcome.txMigrated > 0) reassignments.push(`${outcome.txMigrated} transaction${outcome.txMigrated === 1 ? '' : 's'}`);
+  if (outcome.templatesMigrated > 0) reassignments.push(`${outcome.templatesMigrated} template${outcome.templatesMigrated === 1 ? '' : 's'}`);
+  if (outcome.recurringMigrated > 0) reassignments.push(`${outcome.recurringMigrated} recurring`);
+  if (outcome.allocationMonthsStripped > 0) reassignments.push(`${outcome.allocationMonthsStripped} allocation${outcome.allocationMonthsStripped === 1 ? '' : 's'}`);
+  if (reassignments.length > 0) {
+    showToast(`Reassigned ${reassignments.join(', ')} to "${outcome.fallbackCatName}".`, 'success');
+  } else {
+    showToast(`Category "${outcome.deletedCatName}" deleted.`, 'success');
+  }
+
   renderCustomCatsList();
   renderCategories();
   populateCategoryFilter();

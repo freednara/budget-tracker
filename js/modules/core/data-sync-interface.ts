@@ -7,7 +7,7 @@
  * @module data-sync-interface
  */
 
-import { emit, Events } from './event-bus.js';
+import { emit } from './event-bus.js';
 import type { Transaction, TransactionDataChange } from '../../types/index.js';
 
 // ==========================================
@@ -45,11 +45,26 @@ export interface DataSyncResponse {
 }
 
 /**
+ * Sync-request metadata envelope.
+ *
+ * Every field widened to `field?: T | undefined` so callers can pass
+ * explicit `undefined` values (propagated from
+ * `BroadcastMessage.revision` / `.tabId` / `.timestamp`, which are
+ * frequently absent in a valid payload) without tripping
+ * `exactOptionalPropertyTypes`. Shipped Phase 6 Slice 1j (rev 12 L6).
+ */
+export interface DataSyncMetadata {
+  revision?: number | undefined;
+  tabId?: string | undefined;
+  timestamp?: number | undefined;
+}
+
+/**
  * Request data layer to reload transactions
  */
 export function requestDataReload(
   source: string = 'unknown',
-  metadata: { revision?: number; tabId?: string; timestamp?: number } = {}
+  metadata: DataSyncMetadata = {}
 ): void {
   emit(DataSyncEvents.REQUEST_RELOAD, { source, ...metadata });
 }
@@ -60,7 +75,7 @@ export function requestDataReload(
 export function requestDataApplyDelta(
   change: TransactionDataDelta,
   source: string = 'unknown',
-  metadata: { revision?: number; tabId?: string; timestamp?: number } = {}
+  metadata: DataSyncMetadata = {}
 ): void {
   emit(DataSyncEvents.REQUEST_APPLY_DELTA, { change, source, ...metadata });
 }

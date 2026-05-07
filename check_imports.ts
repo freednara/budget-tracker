@@ -23,8 +23,13 @@ for (const fileRelativePath of filesToCheck) {
   let match;
 
   while ((match = importRegex.exec(content)) !== null) {
-    const importPath = match[2];
-    const fullImportPath = match[1] + importPath;
+    // Phase 6 Slice 1i (rev 12 L6): regex capture groups are
+    // `string | undefined` under `noUncheckedIndexedAccess`; the regex
+    // has two required groups so both are defined on a match, but we
+    // fall back to '' to keep the concatenation well-typed.
+    const importPath = match[2] ?? '';
+    const prefix = match[1] ?? '';
+    const fullImportPath = prefix + importPath;
 
     // Check extension
     if (!fullImportPath.endsWith('.js')) {

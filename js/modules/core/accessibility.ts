@@ -12,37 +12,41 @@ import { html, LitTemplate } from './lit-helpers.js';
 // TYPE DEFINITIONS
 // ==========================================
 
+// Phase 6 Slice 1j (rev 12 L6): optional fields widened for
+// `exactOptionalPropertyTypes` — `ariaField()` spreads a
+// `Partial<AriaConfig>` where `describedBy` carries `config?.errorId`
+// (string | undefined) straight into the payload.
 interface AriaConfig {
-  role?: string;
-  label?: string;
-  describedBy?: string;
-  labelledBy?: string;
-  expanded?: boolean;
-  selected?: boolean;
-  checked?: boolean;
-  disabled?: boolean;
-  hidden?: boolean;
-  live?: 'polite' | 'assertive' | 'off';
-  atomic?: boolean;
-  relevant?: string;
-  busy?: boolean;
-  invalid?: boolean | 'grammar' | 'spelling';
-  required?: boolean;
-  readonly?: boolean;
-  multiselectable?: boolean;
-  orientation?: 'horizontal' | 'vertical';
-  valueMin?: number;
-  valueMax?: number;
-  valueNow?: number;
-  valueText?: string;
-  level?: number;
-  setSize?: number;
-  posInSet?: number;
-  colspan?: number;
-  rowspan?: number;
-  controls?: string;
-  flowTo?: string;
-  owns?: string;
+  role?: string | undefined;
+  label?: string | undefined;
+  describedBy?: string | undefined;
+  labelledBy?: string | undefined;
+  expanded?: boolean | undefined;
+  selected?: boolean | undefined;
+  checked?: boolean | undefined;
+  disabled?: boolean | undefined;
+  hidden?: boolean | undefined;
+  live?: 'polite' | 'assertive' | 'off' | undefined;
+  atomic?: boolean | undefined;
+  relevant?: string | undefined;
+  busy?: boolean | undefined;
+  invalid?: boolean | 'grammar' | 'spelling' | undefined;
+  required?: boolean | undefined;
+  readonly?: boolean | undefined;
+  multiselectable?: boolean | undefined;
+  orientation?: 'horizontal' | 'vertical' | undefined;
+  valueMin?: number | undefined;
+  valueMax?: number | undefined;
+  valueNow?: number | undefined;
+  valueText?: string | undefined;
+  level?: number | undefined;
+  setSize?: number | undefined;
+  posInSet?: number | undefined;
+  colspan?: number | undefined;
+  rowspan?: number | undefined;
+  controls?: string | undefined;
+  flowTo?: string | undefined;
+  owns?: string | undefined;
 }
 
 interface KeyboardConfig {
@@ -60,8 +64,8 @@ interface KeyboardConfig {
 /**
  * Generate ARIA attributes object for lit-html
  */
-export function aria(config: AriaConfig): Record<string, any> {
-  const attrs: Record<string, any> = {};
+export function aria(config: AriaConfig): Record<string, string> {
+  const attrs: Record<string, string> = {};
   
   if (config.role) attrs.role = config.role;
   if (config.label) attrs['aria-label'] = config.label;
@@ -100,7 +104,7 @@ export function aria(config: AriaConfig): Record<string, any> {
 /**
  * Create accessible button attributes
  */
-export function ariaButton(label: string, config?: Partial<AriaConfig>): Record<string, any> {
+export function ariaButton(label: string, config?: Partial<AriaConfig>): Record<string, string> {
   return aria({
     role: 'button',
     label,
@@ -111,7 +115,7 @@ export function ariaButton(label: string, config?: Partial<AriaConfig>): Record<
 /**
  * Create accessible link attributes
  */
-export function ariaLink(label: string, config?: Partial<AriaConfig>): Record<string, any> {
+export function ariaLink(label: string, config?: Partial<AriaConfig>): Record<string, string> {
   return aria({
     role: 'link',
     label,
@@ -125,7 +129,7 @@ export function ariaLink(label: string, config?: Partial<AriaConfig>): Record<st
 export function ariaField(
   label: string,
   config?: Partial<AriaConfig> & { errorId?: string }
-): Record<string, any> {
+): Record<string, string> {
   const attrs = aria({
     label,
     invalid: config?.invalid,
@@ -144,6 +148,13 @@ export function ariaField(
 class ScreenReaderAnnouncer {
   private assertiveRegion: HTMLElement | null = null;
   private politeRegion: HTMLElement | null = null;
+  private regionTimers = new WeakMap<
+    HTMLElement,
+    {
+      announceId: number | null;
+      clearId: number | null;
+    }
+  >();
 
   constructor() {
     this.initRegions();
@@ -174,22 +185,49 @@ class ScreenReaderAnnouncer {
    * Announce message to screen readers
    */
   announce(message: string, priority: 'polite' | 'assertive' = 'polite'): void {
+    // CR-Apr24-I finding 283: re-resolve cached live-region references
+    // if they've been detached from the DOM since module init.
+    if (this.assertiveRegion && !this.assertiveRegion.isConnected) {
+      this.assertiveRegion = document.getElementById('sr-announcer');
+    }
+    if (this.politeRegion && !this.politeRegion.isConnected) {
+      this.politeRegion = document.querySelector('[aria-live="polite"].sr-only');
+    }
+
     const region = priority === 'assertive'
       ? (this.assertiveRegion || this.politeRegion)
       : this.politeRegion;
 
     if (!region) return;
 
+    const timers = this.regionTimers.get(region) || {
+      announceId: null,
+      clearId: null
+    };
+
+    // This prevents the first's clear timer from clearing the second announcement
+    // Round 7 fix: Clear any pending timers before starting a new announcement sequence
+    if (timers.announceId !== null) {
+      window.clearTimeout(timers.announceId);
+    }
+    if (timers.clearId !== null) {
+      window.clearTimeout(timers.clearId);
+    }
+
     // Clear and set new message (delay ensures screen reader picks up change)
     region.textContent = '';
-    setTimeout(() => {
+    timers.announceId = window.setTimeout(() => {
       region.textContent = message;
+      timers.announceId = null;
+      timers.clearId = window.setTimeout(() => {
+        if (region.textContent === message) {
+          region.textContent = '';
+        }
+        timers.clearId = null;
+      }, 1000);
     }, 100);
 
-    // Clear after announcement
-    setTimeout(() => {
-      region.textContent = '';
-    }, 1000);
+    this.regionTimers.set(region, timers);
   }
 }
 
@@ -221,12 +259,17 @@ export function setupKeyboardNav(
     const focusHandler = (e: KeyboardEvent) => {
       if (e.key !== 'Tab') return;
       
-      const focusables = Array.from(container.querySelectorAll(focusableSelector)) as HTMLElement[];
+      const focusables = Array.from(container.querySelectorAll<HTMLElement>(focusableSelector));
       if (focusables.length === 0) return;
-      
+
+      // Phase 6 Slice 1i (rev 12 L6): length>0 check above guarantees
+      // both ends exist, but `focusables[i]` is `HTMLElement | undefined`
+      // under `noUncheckedIndexedAccess` — guard explicitly so the
+      // `.focus()` calls stay typed.
       const firstFocusable = focusables[0];
       const lastFocusable = focusables[focusables.length - 1];
-      
+      if (!firstFocusable || !lastFocusable) return;
+
       if (e.shiftKey && document.activeElement === firstFocusable) {
         e.preventDefault();
         lastFocusable.focus();
@@ -258,6 +301,9 @@ export function setupKeyboardNav(
       if (e.key === 'Enter' && !e.shiftKey) {
         const target = e.target as HTMLElement;
         if (target.tagName !== 'TEXTAREA') {
+          // CR-Apr24-I finding 334: prevent native form submission so
+          // we don't double-submit when attached to a real <form>.
+          e.preventDefault();
           container.dispatchEvent(new CustomEvent('submit'));
         }
       }
@@ -271,7 +317,7 @@ export function setupKeyboardNav(
   if (arrowNavigation) {
     const arrowHandler = (e: KeyboardEvent) => {
       const navigableSelector = '[role="option"], [role="menuitem"], [role="tab"]';
-      const navigables = Array.from(container.querySelectorAll(navigableSelector)) as HTMLElement[];
+      const navigables = Array.from(container.querySelectorAll<HTMLElement>(navigableSelector));
       
       if (navigables.length === 0) return;
       
@@ -302,7 +348,10 @@ export function setupKeyboardNav(
           return;
       }
       
-      navigables[nextIndex].focus();
+      // Phase 6 Slice 1i (rev 12 L6): index access returns
+      // `HTMLElement | undefined` under `noUncheckedIndexedAccess`;
+      // guard before calling `.focus()`.
+      navigables[nextIndex]?.focus();
     };
     
     container.addEventListener('keydown', arrowHandler as EventListener);
@@ -433,7 +482,15 @@ export function accessibleModal(
         <button
           class="modal-close"
           ...${ariaButton(closeLabel)}
-          @click=${() => focusManager.pop()}
+          @click=${(e: Event) => {
+            // CR-Apr24-I finding 332: dispatch a 'close' custom event
+            // so consumers can dismiss the modal, not just pop focus.
+            const modal = (e.target as HTMLElement).closest('.modal');
+            if (modal) {
+              modal.dispatchEvent(new CustomEvent('close', { bubbles: true }));
+            }
+            focusManager.pop();
+          }}
         >
           ×
         </button>
@@ -449,7 +506,9 @@ export function accessibleModal(
 /**
  * Create skip navigation link
  */
-export function skipNavigation(targetId: string = 'main'): LitTemplate {
+// CR-Apr24-I finding 333: default changed from 'main' to 'main-content'
+// to match the live app shell's <main id="main-content">.
+export function skipNavigation(targetId: string = 'main-content'): LitTemplate {
   return html`
     <a
       href="#${targetId}"
@@ -458,6 +517,11 @@ export function skipNavigation(targetId: string = 'main'): LitTemplate {
         e.preventDefault();
         const target = document.getElementById(targetId);
         if (target) {
+          // CR-Apr24-I finding 341: ensure the target is programmatically
+          // focusable — non-interactive elements like <main> need tabindex.
+          if (!target.hasAttribute('tabindex')) {
+            target.setAttribute('tabindex', '-1');
+          }
           target.focus();
           target.scrollIntoView();
         }
@@ -486,9 +550,14 @@ export function checkContrast(
   largeAAA: boolean;
 } {
   // Convert colors to RGB
+  // CR-Apr24-I finding 335: return NaN-based ratio for unsupported formats
+  // so callers can detect the failure instead of getting misleading results.
   const fg = hexToRgb(foreground);
   const bg = hexToRgb(background);
-  
+  if (!fg || !bg) {
+    return { ratio: NaN, aa: false, aaa: false, largeAA: false, largeAAA: false };
+  }
+
   // Calculate relative luminance
   const fgLum = relativeLuminance(fg);
   const bgLum = relativeLuminance(bg);
@@ -505,13 +574,26 @@ export function checkContrast(
   };
 }
 
-function hexToRgb(hex: string): { r: number; g: number; b: number } {
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  // CR-Apr24-I finding 335: support 3-digit hex (#fff) and return null
+  // for unsupported formats instead of silently treating them as black.
+  const short = /^#?([a-f\d])([a-f\d])([a-f\d])$/i.exec(hex);
+  if (short) {
+    return {
+      r: parseInt((short[1] ?? '0') + (short[1] ?? '0'), 16),
+      g: parseInt((short[2] ?? '0') + (short[2] ?? '0'), 16),
+      b: parseInt((short[3] ?? '0') + (short[3] ?? '0'), 16)
+    };
+  }
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  return result ? {
-    r: parseInt(result[1], 16),
-    g: parseInt(result[2], 16),
-    b: parseInt(result[3], 16)
-  } : { r: 0, g: 0, b: 0 };
+  if (result) {
+    return {
+      r: parseInt(result[1] ?? '0', 16),
+      g: parseInt(result[2] ?? '0', 16),
+      b: parseInt(result[3] ?? '0', 16)
+    };
+  }
+  return null;
 }
 
 function relativeLuminance(rgb: { r: number; g: number; b: number }): number {

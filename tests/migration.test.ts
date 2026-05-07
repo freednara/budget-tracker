@@ -33,34 +33,30 @@ vi.mock('../js/modules/data/storage-manager.js', () => ({
   }
 }));
 
-vi.mock('../js/modules/core/state.js', () => ({
-  SK: {
-    TX: 'budget_tracker_transactions',
-    SAVINGS: 'budget_tracker_savings',
-    SAVINGS_CONTRIB: 'budget_tracker_savings_contrib',
-    ALLOC: 'budget_tracker_alloc',
-    ACHIEVE: 'budget_tracker_achieve',
-    STREAK: 'budget_tracker_streak',
-    CUSTOM_CAT: 'budget_tracker_custom_cat',
-    DEBTS: 'budget_tracker_debts',
-    FILTER_PRESETS: 'budget_tracker_filter_presets',
-    TX_TEMPLATES: 'budget_tracker_tx_templates',
-    ROLLOVER_SETTINGS: 'budget_tracker_rollover_settings',
-    CURRENCY: 'budget_tracker_currency',
-    THEME: 'budget_tracker_theme',
-    PIN: 'budget_tracker_pin',
-    SECTIONS: 'budget_tracker_sections',
-    INSIGHT_PERS: 'budget_tracker_insight_pers',
-    ALERTS: 'budget_tracker_alerts'
-  },
-  lsGet: mockLsGet
-}));
+// NOTE: We deliberately do NOT hardcode SK values here. The previous version
+// of this mock duplicated the SK object inline with 7 values that had drifted
+// away from production (e.g. CUSTOM_CAT='harbor_custom_cat' vs real
+// 'harbor_custom_categories'), so the suite was exercising neither the
+// previous keys nor the current ones — it couldn't catch custom-category
+// rename regressions. Spreading `actual` keeps SK, STORAGE_DEFAULTS, and any
+// future exports in lock-step with production; we only override `lsGet` to
+// route reads through `mockLsGet`.
+vi.mock('../js/modules/core/state.js', async () => {
+  const actual = await vi.importActual<typeof import('../js/modules/core/state.js')>(
+    '../js/modules/core/state.js'
+  );
+  return {
+    ...actual,
+    lsGet: mockLsGet
+  };
+});
 
-vi.mock('../js/modules/core/utils.js', () => ({
+vi.mock('../js/modules/core/utils-pure.js', () => ({
   generateId: vi.fn(() => 'generated-id')
 }));
 
 import { MigrationManager } from '../js/modules/data/migration.js';
+import { SK } from '../js/modules/core/state.js';
 
 const localData = {
   transactions: [{
@@ -100,29 +96,41 @@ const localData = {
   pin: '1234',
   sections: { envelope: true },
   insightPers: 'serious',
-  alerts: { budgetThreshold: 0.8, browserNotificationsEnabled: false, lastNotifiedAlertKeys: [] }
+  alerts: { budgetThreshold: 0.8, browserNotificationsEnabled: false, lastNotifiedAlertKeys: [] },
+  onboarding: { active: false, step: 0, completed: false },
+  filterExpanded: false,
+  lastBackupTxCount: 0,
+  recurring: {},
+  hasOnboarded: false
 };
 
 function installLocalDataMocks(): void {
+  // Keys are sourced from the real SK (via vi.importActual above) so this
+  // mapping automatically tracks any future rename in state.ts.
   mockLsGet.mockImplementation((key: string, fallback: unknown) => {
     const mapping: Record<string, unknown> = {
-      budget_tracker_transactions: localData.transactions,
-      budget_tracker_savings: localData.savingsGoals,
-      budget_tracker_savings_contrib: localData.savingsContribs,
-      budget_tracker_alloc: localData.monthlyAlloc,
-      budget_tracker_achieve: localData.achievements,
-      budget_tracker_streak: localData.streak,
-      budget_tracker_custom_cat: localData.customCats,
-      budget_tracker_debts: localData.debts,
-      budget_tracker_filter_presets: localData.filterPresets,
-      budget_tracker_tx_templates: localData.txTemplates,
-      budget_tracker_rollover_settings: localData.rolloverSettings,
-      budget_tracker_currency: localData.currency,
-      budget_tracker_theme: localData.theme,
-      budget_tracker_pin: localData.pin,
-      budget_tracker_sections: localData.sections,
-      budget_tracker_insight_pers: localData.insightPers,
-      budget_tracker_alerts: localData.alerts
+      [SK.TX]: localData.transactions,
+      [SK.SAVINGS]: localData.savingsGoals,
+      [SK.SAVINGS_CONTRIB]: localData.savingsContribs,
+      [SK.ALLOC]: localData.monthlyAlloc,
+      [SK.ACHIEVE]: localData.achievements,
+      [SK.STREAK]: localData.streak,
+      [SK.CUSTOM_CAT]: localData.customCats,
+      [SK.DEBTS]: localData.debts,
+      [SK.FILTER_PRESETS]: localData.filterPresets,
+      [SK.TX_TEMPLATES]: localData.txTemplates,
+      [SK.ROLLOVER_SETTINGS]: localData.rolloverSettings,
+      [SK.CURRENCY]: localData.currency,
+      [SK.THEME]: localData.theme,
+      [SK.PIN]: localData.pin,
+      [SK.SECTIONS]: localData.sections,
+      [SK.INSIGHT_PERS]: localData.insightPers,
+      [SK.ALERTS]: localData.alerts,
+      [SK.ONBOARD]: localData.onboarding,
+      [SK.FILTER_EXPANDED]: localData.filterExpanded,
+      backup_reminder_last_tx_count: localData.lastBackupTxCount,
+      [SK.RECURRING]: localData.recurring,
+      [SK.HAS_ONBOARDED]: localData.hasOnboarded
     };
     return key in mapping ? mapping[key] : fallback;
   });
@@ -204,22 +212,123 @@ describe('MigrationManager public migration safety', () => {
     const result = await manager.migrate();
 
     expect(result.isOk).toBe(false);
-    const marker = JSON.parse(localStorage.getItem('budget_tracker_storage_rollback_failed') || '{}') as {
+    // migration.ts now writes the unified marker that storage-manager
+    // reads on next boot to force a safe localStorage fallback.
+    const marker = JSON.parse(localStorage.getItem('harbor_storage_rollback_failed') || '{}') as {
       reason?: string;
     };
     expect(marker.reason).toBe('migration_indexeddb_restore_failed');
   });
 
-  it('does not persist the PIN bundle inside durable migration backup snapshots', async () => {
+  it('persists the PIN inside migration backup snapshots so rollback can restore it', async () => {
+    // H9 (Inline-Behavior-Review rev 12): the prior contract omitted PIN
+    // from the snapshot on disk-leak grounds, but that left rollback with
+    // no way to restore the user's only auth credential after a mid-
+    // migration failure — silently wiping it. The PIN already lives in
+    // localStorage durably under SK.PIN (duplicating it in the backup
+    // keyspace adds no new leak surface), so H9 promotes data-integrity
+    // over a no-op security concern.
     const manager = new MigrationManager();
     const result = await manager.migrate();
 
     expect(result.isOk).toBe(false);
 
+    // migration.ts creates backup keys under the legacy prefix (not renamed)
     const backupKey = Object.keys(localStorage).find((key) => key.startsWith('budget_tracker_backup_'));
     expect(backupKey).toBeTruthy();
 
     const backupSnapshot = JSON.parse(localStorage.getItem(backupKey!) || '{}') as Record<string, unknown>;
-    expect(backupSnapshot.pin).toBeUndefined();
+    expect(backupSnapshot.pin).toBe(localData.pin);
+  });
+
+  it('restores falsy persisted settings during rollback instead of leaving stale truthy values behind', () => {
+    localStorage.setItem(SK.FILTER_EXPANDED, JSON.stringify(true));
+    localStorage.setItem('backup_reminder_last_tx_count', JSON.stringify(9));
+    localStorage.setItem(SK.HAS_ONBOARDED, JSON.stringify(true));
+    localStorage.setItem(SK.RECURRING, JSON.stringify({ stale: true }));
+
+    const manager = new MigrationManager() as unknown as {
+      _restoreFromBackup: (backup: Record<string, unknown>) => boolean;
+    };
+
+    const restored = manager._restoreFromBackup({
+      ...localData,
+      filterExpanded: false,
+      lastBackupTxCount: 0,
+      recurring: {},
+      hasOnboarded: false
+    });
+
+    expect(restored).toBe(true);
+    expect(JSON.parse(localStorage.getItem(SK.FILTER_EXPANDED) || 'null')).toBe(false);
+    expect(JSON.parse(localStorage.getItem('backup_reminder_last_tx_count') || 'null')).toBe(0);
+    expect(JSON.parse(localStorage.getItem(SK.HAS_ONBOARDED) || 'null')).toBe(false);
+    expect(JSON.parse(localStorage.getItem(SK.RECURRING) || 'null')).toEqual({});
+  });
+
+  // New-batch P2: `needsMigration()` previously short-circuited on
+  // `lsGet(SK.TX, []).length > 0` only, so users with populated
+  // settings/debts/goals/etc. but no transactions were reported as
+  // "nothing to migrate" and their data never moved to IndexedDB.
+  it('reports needsMigration=true when only non-transaction data is present in localStorage', async () => {
+    // Override the mock to return data only for non-TX keys.
+    mockLsGet.mockImplementation((key: string, fallback: unknown) => {
+      const mapping: Record<string, unknown> = {
+        [SK.TX]: [], // explicitly empty
+        [SK.DEBTS]: localData.debts,
+        [SK.CURRENCY]: localData.currency,
+        [SK.THEME]: localData.theme,
+        [SK.PIN]: localData.pin
+      };
+      return key in mapping ? mapping[key] : fallback;
+    });
+
+    // Force IDB-in-use path; needsMigration short-circuits to false
+    // otherwise.
+    const { storageManager: sm } = await import('../js/modules/data/storage-manager.js');
+    (sm as unknown as { isUsingIndexedDB: () => boolean }).isUsingIndexedDB = () => true;
+
+    const manager = new MigrationManager();
+    const needs = await manager.needsMigration();
+    expect(needs).toBe(true);
+  });
+
+  it('reports needsMigration=false when localStorage is truly empty across all migration slots', async () => {
+    mockLsGet.mockImplementation((_key: string, fallback: unknown) => fallback);
+
+    const { storageManager: sm } = await import('../js/modules/data/storage-manager.js');
+    (sm as unknown as { isUsingIndexedDB: () => boolean }).isUsingIndexedDB = () => true;
+
+    const manager = new MigrationManager();
+    const needs = await manager.needsMigration();
+    expect(needs).toBe(false);
+  });
+
+  // New-batch P2: `migrate()` with a settings-only localStorage
+  // previously hit `totalItems === 0`, marked the migration as
+  // complete, and returned without ever calling `_migrateSettings`.
+  // Pinned here so the count helper must include settings slots.
+  it('runs the real migration path when only settings are present (no empty-complete short-circuit)', async () => {
+    mockLsGet.mockImplementation((key: string, fallback: unknown) => {
+      const mapping: Record<string, unknown> = {
+        [SK.TX]: [],
+        [SK.CURRENCY]: localData.currency,
+        [SK.THEME]: localData.theme,
+        [SK.PIN]: localData.pin
+      };
+      return key in mapping ? mapping[key] : fallback;
+    });
+
+    // Capture settings writes so we can assert at least one happened.
+    mockStorageManager.set.mockResolvedValue(true);
+    mockStorageManager.getAll.mockResolvedValue([]);
+
+    const manager = new MigrationManager();
+    await manager.migrate();
+
+    // The `_migrateSettings()` helper calls `storageManager.set` for
+    // each populated settings key. If the short-circuit triggered
+    // incorrectly, `set` would never have been invoked.
+    expect(mockStorageManager.set).toHaveBeenCalled();
   });
 });

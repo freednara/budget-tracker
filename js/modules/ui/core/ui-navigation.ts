@@ -14,10 +14,23 @@ import { effect } from '@preact/signals-core';
 import { lsSet } from '../../core/state.js';
 import * as signals from '../../core/signals.js';
 import { getAllCats } from '../../core/categories.js';
+// CR-Apr22-E slice 2 (finding 59, [P2]): the transaction-entry sync
+// effect below reads `getAllCats(currentType)` to validate the current
+// category selection, which transitively reads `userCategoryConfig` via
+// the `expenseCategories` / `incomeCategories` computeds. That read is
+// only reached on the `!editingId && selectedCategory` branch, so the
+// dep-track edge to the config was incidental — if the user deleted or
+// hid the currently-selected category without also flipping type or
+// editing state, the effect never woke and the form kept the stale
+// selection visible. Importing `userCategoryConfig` and reading its
+// value unconditionally inside the effect body (see `bindTransactionTypeUi`
+// below) establishes a permanent subscription so any category mutation
+// re-syncs the form's selection.
+import { userCategoryConfig } from '../../core/category-store.js';
 import { navigation, form } from '../../core/state-actions.js';
-import { emit, Events } from '../../core/event-bus.js';
 import DOM from '../../core/dom-cache.js';
 import { CONFIG } from '../../core/config.js';
+import { trackError } from '../../core/error-tracker.js';
 import { replaceTransactionFilters } from '../../data/transaction-surface-coordinator.js';
 import type { Transaction, MainTab } from '../../../types/index.js';
 
@@ -40,7 +53,11 @@ import { getDefaultContainer, Services } from '../../core/di-container.js';
 function getUpdateCharts(): () => void {
   try {
     return getDefaultContainer().resolveSync<() => void>(Services.UPDATE_CHARTS);
-  } catch {
+  } catch (err) {
+    trackError(err instanceof Error ? err : new Error('Failed to resolve UPDATE_CHARTS service'), {
+      module: 'UINavigation',
+      action: 'getUpdateCharts'
+    });
     return () => {};
   }
 }
@@ -76,6 +93,11 @@ function bindTransactionTypeUi(): void {
     signals.currentType.value;
     signals.selectedCategory.value;
     signals.editingId.value;
+    // CR-Apr22-E slice 2: explicit subscription to the category config
+    // so a delete/hide/rename/preset-switch always re-runs this effect,
+    // not just when type/selection/editing happen to change. Matches
+    // the pattern CR-Apr22-D slice 1 established for the chart effects.
+    userCategoryConfig.value;
     syncTransactionEntryUi();
   });
 }
@@ -135,7 +157,7 @@ function cleanupNavigationListeners(): void {
 }
 
 function resetTransactionsEntryViewport(): void {
-  const entryBody = document.querySelector('.transactions-entry-body');
+  const entryBody = DOM.query('.transactions-entry-body');
   if (entryBody instanceof HTMLElement) {
     entryBody.scrollTop = 0;
   }
@@ -153,7 +175,7 @@ function scheduleTransactionsEntryLayoutSync(): void {
 
 function syncTransactionsEntryLayout(): void {
   const formSection = DOM.get('form-section');
-  const entryBody = document.querySelector('.transactions-entry-body');
+  const entryBody = DOM.query('.transactions-entry-body');
   if (!(formSection instanceof HTMLElement) || !(entryBody instanceof HTMLElement)) return;
 
   const isDesktop = window.matchMedia('(min-width: 1280px)').matches;
@@ -179,7 +201,7 @@ function syncTransactionsEntryLayout(): void {
 
 function syncAppShellMetrics(): void {
   const root = document.documentElement;
-  const appShell = document.querySelector('header.app-shell');
+  const appShell = DOM.query('header.app-shell');
   if (!(appShell instanceof HTMLElement)) return;
 
   const shellHeight = Math.ceil(appShell.getBoundingClientRect().height);
@@ -197,7 +219,7 @@ function bindAppShellMetrics(): void {
   _shellResizeHandler = () => syncAppShellMetrics();
   addNavigationListener(window, 'resize', _shellResizeHandler, { passive: true });
 
-  const appShell = document.querySelector('header.app-shell');
+  const appShell = DOM.query('header.app-shell');
   if (appShell instanceof HTMLElement && typeof ResizeObserver !== 'undefined') {
     _shellResizeObserver = new ResizeObserver(() => syncAppShellMetrics());
     _shellResizeObserver.observe(appShell);
@@ -241,10 +263,6 @@ function bindTransactionsEntryLayout(): void {
   scheduleTransactionsEntryLayoutSync();
 }
 
-function alignTransactionsViewport(): void {
-  revealTransactionsForm();
-}
-
 export function revealTransactionsForm(focusId?: string, selectInput = false): void {
   syncAppShellMetrics();
 
@@ -268,7 +286,10 @@ export function revealTransactionsForm(focusId?: string, selectInput = false): v
   });
 
   if (focusId) {
+    // CR-Apr24-I finding 128: guard deferred focus — bail if the user
+    // navigated away from the transactions tab before the rAF fires.
     requestAnimationFrame(() => {
+      if (signals.activeMainTab.value !== 'transactions') return;
       const focusTarget = DOM.get(focusId);
       if (!(focusTarget instanceof HTMLElement)) return;
       focusTarget.focus();
@@ -290,8 +311,11 @@ export async function openTransactionsForMonthType(type: DashboardTransactionTyp
     showAllMonths: false
   }, { resetPage: true });
 
+  // CR-Apr24-I finding 129: guard deferred scroll/focus — bail if the user
+  // navigated away from the transactions tab before the rAF fires.
   requestAnimationFrame(() => {
-    const ledgerCard = document.querySelector('.transactions-ledger-card');
+    if (signals.activeMainTab.value !== 'transactions') return;
+    const ledgerCard = DOM.query('.transactions-ledger-card');
     if (!(ledgerCard instanceof HTMLElement)) return;
 
     const shellHeight = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--app-shell-stack-height')) || 0;
@@ -311,6 +335,11 @@ export async function openTransactionsForDate(date: string): Promise<void> {
     import('../../transactions/edit-mode.js')
   ]);
 
+  // CR-Apr24-I finding 130: if the user started an edit or left the
+  // transactions tab while we were awaiting module imports, bail out
+  // rather than overwriting their newer in-progress state.
+  if (signals.editingId.value || signals.activeMainTab.value !== 'transactions') return;
+
   cancelEditing();
   resetForm();
   formDate.value = date;
@@ -324,7 +353,16 @@ export async function openTransactionsForDate(date: string): Promise<void> {
 export async function openTransactionsEdit(tx: Transaction): Promise<void> {
   switchMainTab('transactions');
   const { startEditing } = await import('../../transactions/edit-mode.js');
-  startEditing(tx);
+
+  // CR-Apr24-I finding 131: if the user started a different edit while
+  // we were awaiting the module import, don't overwrite their in-progress
+  // edit with our stale snapshot.
+  if (signals.editingId.value) return;
+
+  // Re-read the transaction from live state so we start editing the
+  // freshest version, not the snapshot captured before the import.
+  const fresh = signals.transactions.value.find(t => t.__backendId === tx.__backendId);
+  startEditing(fresh ?? tx);
 }
 
 // ==========================================
@@ -342,6 +380,18 @@ function syncTransactionTabDOM(type: TransactionType): void {
     te.classList.toggle('btn-secondary', type !== 'expense');
     ti.classList.toggle('btn-success', type === 'income');
     ti.classList.toggle('btn-secondary', type !== 'income');
+    // A11y (Design-Review-Apr21 P2): toggle-button pattern. The markup
+    // dropped `role="tab"` / `aria-selected` / roving `tabindex` — this
+    // control is a mode switch inside one form, not a tablist. Sync
+    // `aria-pressed` on both buttons instead. Both remain in the natural
+    // tab order (no `tabindex` manipulation).
+    te.setAttribute('aria-pressed', type === 'expense' ? 'true' : 'false');
+    ti.setAttribute('aria-pressed', type === 'income' ? 'true' : 'false');
+  }
+  const submitBtn = DOM.get('submit-btn');
+  if (submitBtn) {
+    submitBtn.classList.toggle('tx-submit-btn--expense', type === 'expense');
+    submitBtn.classList.toggle('tx-submit-btn--income', type === 'income');
   }
 }
 
@@ -362,7 +412,7 @@ export function switchTab(type: TransactionType): void {
 export function switchMainTab(tabName: MainTab): void {
   // Signal is the source of truth - set it first
   navigation.setActiveMainTab(tabName);
-  lsSet('budget_tracker_active_tab', tabName);
+  lsSet('harbor_active_tab', tabName);
 
   // Sync DOM to match signal state
   syncMainTabDOM(tabName);
@@ -388,18 +438,27 @@ function syncMainTabDOM(tabName: MainTab): void {
     const el = DOM.get('tab-' + t);
     if (el) {
       const isVisible = t === tabName;
-      el.style.display = isVisible ? 'block' : 'none';
-      el.setAttribute('aria-hidden', isVisible ? 'false' : 'true');
-      if (isVisible) el.setAttribute('tabindex', '0');
-      else el.removeAttribute('tabindex');
+      // Class-based visibility for CSS cross-fade transition
+      el.classList.toggle('tab-panel-active', isVisible);
+      // Remove any legacy inline display style
+      el.style.removeProperty('display');
+      if (isVisible) {
+        el.removeAttribute('aria-hidden');
+        el.setAttribute('tabindex', '0');
+      } else {
+        el.setAttribute('aria-hidden', 'true');
+        el.removeAttribute('tabindex');
+      }
     }
   }
 
-  document.querySelectorAll('.main-tab').forEach(btn => {
+  DOM.queryAll<HTMLElement>('.main-tab').forEach(btn => {
     const isActive = btn.getAttribute('data-tab') === tabName;
     btn.classList.toggle('btn-primary', isActive);
     btn.classList.toggle('btn-secondary', !isActive);
     btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    // Roving tabindex: only the active tab is in the tab order
+    btn.setAttribute('tabindex', isActive ? '0' : '-1');
   });
 }
 
@@ -445,7 +504,7 @@ export function setupSwipeGestures(): void {
   let touchStartX = 0;
   let touchStartY = 0;
 
-  const mainContent = document.querySelector('main');
+  const mainContent = DOM.query('main');
   if (!mainContent) return;
 
   _swipeListenersAttached = true;
@@ -454,8 +513,13 @@ export function setupSwipeGestures(): void {
   let touchStartTarget: EventTarget | null = null;
 
   _swipeTouchStartHandler = (e: TouchEvent) => {
-    touchStartX = e.touches[0].clientX;
-    touchStartY = e.touches[0].clientY;
+    // Phase 6 Slice 1i (rev 12 L6): `TouchList[0]` is `Touch | undefined`
+    // under `noUncheckedIndexedAccess`. Bail on empty-touch events
+    // rather than crash — the gesture was never started.
+    const t0 = e.touches[0];
+    if (!t0) return;
+    touchStartX = t0.clientX;
+    touchStartY = t0.clientY;
     touchStartTarget = e.target;
   };
 
@@ -466,8 +530,10 @@ export function setupSwipeGestures(): void {
       return;
     }
 
-    const touchEndX = e.changedTouches[0].clientX;
-    const touchEndY = e.changedTouches[0].clientY;
+    const end0 = e.changedTouches[0];
+    if (!end0) return;
+    const touchEndX = end0.clientX;
+    const touchEndY = end0.clientY;
     const diffX = touchEndX - touchStartX;
     const diffY = Math.abs(touchEndY - touchStartY);
 
@@ -499,13 +565,46 @@ export function cleanupSwipeGestures(): void {
 // ==========================================
 
 /**
- * Set up main tab button listeners
+ * Set up main tab button listeners with arrow key navigation (WCAG roving tabindex)
  */
 export function setupMainTabListeners(): void {
-  document.querySelectorAll('.main-tab').forEach(btn => {
+  const tabButtons = Array.from(DOM.queryAll<HTMLElement>('.main-tab'));
+  const tabNames: MainTab[] = ['dashboard', 'budget', 'transactions', 'calendar'];
+
+  tabButtons.forEach((btn, idx) => {
     addNavigationListener(btn, 'click', () => {
       const tab = btn.getAttribute('data-tab') as MainTab | null;
       if (tab) switchMainTab(tab);
+    });
+
+    btn.addEventListener('keydown', (e: KeyboardEvent) => {
+      let nextIdx = -1;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        nextIdx = (idx + 1) % tabButtons.length;
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        nextIdx = (idx - 1 + tabButtons.length) % tabButtons.length;
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        nextIdx = 0;
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        nextIdx = tabButtons.length - 1;
+      }
+
+      if (nextIdx >= 0) {
+        // Phase 6 Slice 1i (rev 12 L6): index access returns
+        // `T | undefined` under `noUncheckedIndexedAccess`. Resolve
+        // both lookups behind a single guard so the tab switch only
+        // fires when both the tab name and the button are present.
+        const nextTab = tabNames[nextIdx];
+        const nextBtn = tabButtons[nextIdx];
+        if (nextTab && nextBtn) {
+          switchMainTab(nextTab);
+          nextBtn.focus();
+        }
+      }
     });
   });
 }
@@ -523,6 +622,36 @@ export function setupExpenseIncomeTabs(): void {
 
   if (tabExpense) addNavigationListener(tabExpense, 'click', () => switchTab('expense'));
   if (tabIncome) addNavigationListener(tabIncome, 'click', () => switchTab('income'));
+
+  // A11y (Design-Review-Apr21 P2): the control is now a toggle-button
+  // segmented pair (see `syncTransactionTabDOM`), not a tablist. Arrow-
+  // key activation isn't required by the WAI-ARIA APG "Button (Mode
+  // Switch)" pattern — each button is independently tab-focusable — but
+  // the keyboard affordance is still nice-to-have, so we keep it:
+  // left/up moves and activates the previous mode, right/down the next.
+  // No `tabindex` roving; both buttons stay in the natural tab order.
+  const typeTabs = [tabExpense, tabIncome].filter(Boolean) as HTMLElement[];
+  const typeNames: TransactionType[] = ['expense', 'income'];
+  typeTabs.forEach((btn, idx) => {
+    btn.addEventListener('keydown', (e: KeyboardEvent) => {
+      let nextIdx = -1;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        nextIdx = (idx + 1) % typeTabs.length;
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        nextIdx = (idx - 1 + typeTabs.length) % typeTabs.length;
+      }
+      if (nextIdx >= 0) {
+        const nextType = typeNames[nextIdx];
+        const nextBtn = typeTabs[nextIdx];
+        if (nextType && nextBtn) {
+          switchTab(nextType);
+          nextBtn.focus();
+        }
+      }
+    });
+  });
 }
 
 /**

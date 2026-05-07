@@ -1,9 +1,13 @@
-# Budget Tracker Improvements - Completed ✅
+# Harbor Ledger — Modernization Completion Report
+
+> **Historical snapshot.** This document records the state of the architectural modernization effort as of March 11, 2026, when the initial TypeScript migration and modular refactor were declared complete. Counts and claims in this file reflect that snapshot — they are intentionally frozen. For current metrics, see [TECHNICAL_REVIEW.md](TECHNICAL_REVIEW.md) and [js/modules/README.md](../js/modules/README.md). For ongoing work, see [IMPROVEMENT_ROADMAP.md](IMPROVEMENT_ROADMAP.md).
+>
+> *The project was rebranded from "Budget Tracker Elite" to "Harbor Ledger" in early April 2026; some legacy naming may remain in the body of this historical record.*
 
 ## Date: March 11, 2026
 
 ## Summary
-Successfully completed a major architectural modernization of the Budget Tracker application. The project has been fully migrated to TypeScript, refactored into a modular service-oriented architecture, and upgraded with modern state management and persistence strategies.
+Successfully completed a major architectural modernization of the (then-named Budget Tracker, now Harbor Ledger) application. The project has been fully migrated to TypeScript, refactored into a modular service-oriented architecture, and upgraded with modern state management and persistence strategies.
 
 ---
 

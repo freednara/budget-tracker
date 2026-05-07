@@ -12,12 +12,6 @@ import type { Transaction } from '../js/types/index.js';
 // This tests the concept of bulk transaction validation with __backendId checks
 // ==========================================
 
-const CONFIG = {
-  MAX_ID_LENGTH: 128,
-  MAX_AMOUNT: 999999999.99,
-  MIN_AMOUNT: 0.01
-};
-
 interface LoadValidationError {
   index: number;
   transaction: unknown;
@@ -99,7 +93,7 @@ describe('validateTransactionsOnLoad (local utility)', () => {
     const result = validateTransactionsOnLoad(transactions);
     expect(result.valid.length).toBe(0);
     expect(result.invalid.length).toBe(1);
-    expect(result.invalid[0].errors).toContain('Invalid type: transfer');
+    expect(result.invalid[0]?.errors).toContain('Invalid type: transfer');
   });
 
   it('rejects negative amount', () => {
@@ -109,7 +103,7 @@ describe('validateTransactionsOnLoad (local utility)', () => {
 
     const result = validateTransactionsOnLoad(transactions);
     expect(result.valid.length).toBe(0);
-    expect(result.invalid[0].errors.some(e => e.includes('Invalid amount'))).toBe(true);
+    expect(result.invalid[0]?.errors.some(e => e.includes('Invalid amount'))).toBe(true);
   });
 
   it('rejects invalid date format', () => {
@@ -119,7 +113,7 @@ describe('validateTransactionsOnLoad (local utility)', () => {
 
     const result = validateTransactionsOnLoad(transactions);
     expect(result.valid.length).toBe(0);
-    expect(result.invalid[0].errors.some(e => e.includes('Invalid date'))).toBe(true);
+    expect(result.invalid[0]?.errors.some(e => e.includes('Invalid date'))).toBe(true);
   });
 
   it('rejects missing backendId', () => {
@@ -129,7 +123,7 @@ describe('validateTransactionsOnLoad (local utility)', () => {
 
     const result = validateTransactionsOnLoad(transactions);
     expect(result.valid.length).toBe(0);
-    expect(result.invalid[0].errors).toContain('Missing __backendId');
+    expect(result.invalid[0]?.errors).toContain('Missing __backendId');
   });
 
   it('handles non-array input', () => {
@@ -165,7 +159,7 @@ describe('validateAmount (module)', () => {
     const result = validateAmount('');
     expect(result.valid).toBe(false);
     if (!result.valid) {
-      expect(result.error).toBe('Amount is required');
+      expect(result.error).toBe('Amount is required — enter how much was spent or received.');
     }
   });
 
@@ -199,6 +193,39 @@ describe('validateAmount (module)', () => {
       expect(result.value).toBe(1234.56);
     }
   });
+
+  // M9 (Inline-Behavior-Review rev 12): validator now routes through
+  // localeService.parseNumber. These assertions lock in the locale-aware
+  // contract — the prior pattern regex rejected every non-en-US format.
+  it('accepts numeric values passed in directly without locale parsing', () => {
+    const result = validateAmount(42.5);
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.value).toBe(42.5);
+    }
+  });
+
+  it('rejects NaN / Infinity numeric inputs', () => {
+    expect(validateAmount(NaN).valid).toBe(false);
+    expect(validateAmount(Infinity).valid).toBe(false);
+    expect(validateAmount(-Infinity).valid).toBe(false);
+  });
+
+  it('rejects whitespace-only strings', () => {
+    const result = validateAmount('   ');
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.error).toBe('Amount is required — enter how much was spent or received.');
+    }
+  });
+
+  it('rejects input that strips to empty (pure currency symbol)', () => {
+    const result = validateAmount('$');
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.error).toBe('Amount must be a valid number — remove any letters or extra symbols.');
+    }
+  });
 });
 
 // ==========================================
@@ -217,7 +244,7 @@ describe('validateDate (module)', () => {
     const result = validateDate('');
     expect(result.valid).toBe(false);
     if (!result.valid) {
-      expect(result.error).toBe('Date is required');
+      expect(result.error).toBe('Date is required — pick when this transaction happened.');
     }
   });
 
@@ -227,18 +254,21 @@ describe('validateDate (module)', () => {
     expect(validateDate('15-06-2024').valid).toBe(false);
   });
 
-  it('accepts dates with JS Date rollover (Feb 30 becomes Mar 2)', () => {
-    // Note: The real validator doesn't check calendar validity
-    // JavaScript Date rolls Feb 30 to March 2, which is valid
-    const result = validateDate('2024-02-30');
-    expect(result.valid).toBe(true);
+  it('rejects impossible calendar dates (C12 round-trip check, rev 12)', () => {
+    // Previous behavior accepted Feb 30 because JS Date silently overflowed it
+    // to Mar 2. The rev-12 round-trip YMD comparison rejects it, and any
+    // overflow date corruption is caught at the input boundary instead of
+    // being persisted verbatim and reinterpreted on every downstream read.
+    expect(validateDate('2024-02-30').valid).toBe(false);
+    expect(validateDate('2026-04-31').valid).toBe(false);
+    expect(validateDate('2026-09-31').valid).toBe(false);
   });
 
-  it('accepts leap year dates', () => {
-    // Note: The real validator doesn't check calendar validity
-    // JavaScript Date handles these internally
-    expect(validateDate('2024-02-29').valid).toBe(true); // 2024 is leap year
-    expect(validateDate('2023-02-29').valid).toBe(true); // JS rolls to Mar 1
+  it('accepts Feb 29 in leap years and rejects in non-leap years', () => {
+    expect(validateDate('2024-02-29').valid).toBe(true); // 2024 is a leap year
+    expect(validateDate('2000-02-29').valid).toBe(true); // year-2000 leap year
+    expect(validateDate('2023-02-29').valid).toBe(false); // C12: rejected (was rolling to Mar 1)
+    expect(validateDate('2100-02-29').valid).toBe(false); // year-2100 is NOT a leap year
   });
 
   it('returns date string for valid dates (not Date object)', () => {

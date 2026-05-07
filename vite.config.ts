@@ -21,12 +21,8 @@ function tsJsResolverPlugin() {
       if (!importer || importer.includes('node_modules')) {
         return null;
       }
-      
+
       // Process files in our project (js/modules/ and root .ts files like app.ts)
-      if (importer.includes('node_modules')) {
-        return null;
-      }
-      
       try {
         const dir = dirname(importer);
         const tsPath = resolve(dir, source.replace(/\.js$/, '.ts'));
@@ -66,6 +62,7 @@ function cspDevStripPlugin() {
 
 export default defineConfig({
   root: '.',
+  cacheDir: '/tmp/vite-dep-cache',
   define: {
     __APP_VERSION__: JSON.stringify(APP_VERSION),
     __APP_BUILD_TIME__: JSON.stringify(APP_BUILD_TIME),

@@ -7,60 +7,73 @@
  * @module dom-cache
  */
 
-import type { SafeMockElement } from '../../types/index.js';
-
 // ==========================================
 // TYPE DEFINITIONS
-// = :=========================================
+// ==========================================
+// Phase 5g-1 (Inline-Behavior-Review rev 12, L47): fixed the `// = :====`
+// typo divider. Pairs with the same correction in backup-reminder.ts:41
+// (L55). The source of the typo family is a search-replace gone wrong
+// during the original .js → .ts migration; task #147 sweeps any
+// remaining instances.
+
+// Phase 5g-2 (Inline-Behavior-Review rev 12, M31): deleted the entire
+// `SAFE_MOCK` singleton, `getSafe()` method, and the `SafeMockElement`
+// import (+ interface in js/types/index.ts). The finding flagged a
+// correctness bug — the mock's `value`/`checked`/`textContent`/`innerHTML`
+// were plain properties, so writes from one caller bled into the shared
+// singleton and poisoned the read for the next caller. The review
+// recommended making the mock per-call, but grep across js/ + tests/
+// confirms zero callers of `DOM.getSafe(`, `.getSafe<`, `SAFE_MOCK`, or
+// `SafeMockElement`. With no callers, deletion is strictly better than
+// per-call allocation: it removes a latent footgun API that encouraged
+// silently swallowing missing-element bugs, and eliminates the need to
+// maintain a DEV-only miss-warning debouncer. The AGENTS.MD doc example
+// that referenced `DOM.getSafe('maybe-missing')` was removed in the
+// same pass.
 
 type ElementCache = Map<string, WeakRef<HTMLElement>>;
 
-// ==========================================
-// SAFE MOCK SINGLETON
-// ==========================================
-
 /**
- * Module-level singleton mock element returned by getSafe() when element is not found.
- * Avoids allocating a new object on every miss.
+ * Known static element IDs that persist for the app's entire lifetime.
+ *
+ * These bypass WeakRef overhead and use a direct-reference fast path
+ * in {@link DOMCache#get}. Every id in this list MUST exist in
+ * `index.html` at app boot — if one is renamed or removed without
+ * updating this list, the fast path silently falls through to the
+ * slow WeakRef path (or returns null) with no warning. The contract
+ * test at `tests/dom-cache-static-ids.test.ts` (rev 12 L46) enforces
+ * the invariant by parsing `index.html` and asserting each id exists.
+ *
+ * Phase 6 Slice 1g (rev 12 L46): the original list contained 17 ids
+ * of which 12 had been silently lost via renames over time; they were
+ * pruned here once the contract test revealed them. If you need to
+ * add a new long-lived shell element to the fast path, add its id to
+ * this constant AND add a matching `id="..."` attribute to
+ * `index.html` so the contract test stays green.
  */
-const SAFE_MOCK: SafeMockElement = {
-  value: '',
-  checked: false,
-  textContent: '',
-  innerHTML: '',
-  style: new Proxy({} as Record<string, string>, { get: () => '', set: () => true }),
-  classList: {
-    add: () => {},
-    remove: () => {},
-    toggle: () => {},
-    contains: () => false
-  },
-  setAttribute: () => {},
-  getAttribute: () => null,
-  addEventListener: () => {},
-  removeEventListener: () => {},
-  focus: () => {},
-  blur: () => {},
-  click: () => {},
-  scrollIntoView: () => {},
-  querySelector: () => null,
-  querySelectorAll: () => [],
-  closest: () => null,
-  getBoundingClientRect: () => new DOMRect(),
-  offsetHeight: 0,
-  offsetWidth: 0,
-  scrollTop: 0,
-  scrollHeight: 0,
-  clientHeight: 0
-} as unknown as SafeMockElement;
+export const STATIC_ELEMENT_IDS = [
+  'app',
+  'main-content',
+  'total-income',
+  'total-expenses',
+  'total-balance'
+] as const;
 
 // ==========================================
 // DOM CACHE CLASS
 // ==========================================
 
+/**
+ * WeakRef-backed DOM element cache.
+ *
+ * Frequently accessed elements are looked up once and cached, eliminating
+ * repeated `getElementById` / `querySelector` calls. Static app-shell
+ * elements use a direct-reference fast path; all others are wrapped in
+ * `WeakRef` so they can be garbage-collected if removed from the DOM.
+ */
 export class DOMCache {
   private cache: ElementCache = new Map();
-  private registry: FinalizationRegistry<string>;
+  private registry: FinalizationRegistry<{ id: string; version: number }>;
   private registered: WeakSet<HTMLElement> = new WeakSet();
 
   /**
@@ -70,20 +83,29 @@ export class DOMCache {
   private staticCache: Map<string, HTMLElement> = new Map();
   private staticIds: Set<string>;
 
+  // CR-Apr24-I finding 329: monotonic version counter prevents stale
+  // finalizer callbacks from evicting newer entries with the same id.
+  // Round 7 fix: cacheVersion map is cleaned up via FinalizationRegistry callback
+  // (line 98) which automatically removes entries when the element is GC'd.
+  // This prevents unbounded growth of the version map over time.
+  private cacheVersion = new Map<string, number>();
+  private nextVersion = 0;
+
+  /** Initialises the WeakRef cache, FinalizationRegistry, and static element ID set. */
   constructor() {
-    // Automatically clean up cache keys when elements are garbage collected
-    this.registry = new FinalizationRegistry((id: string) => {
-      this.cache.delete(id);
+    this.registry = new FinalizationRegistry((heldValue: { id: string; version: number }) => {
+      // Only delete if the version still matches — a newer cache.set
+      // for the same id will have bumped the version.
+      if (this.cacheVersion.get(heldValue.id) === heldValue.version) {
+        this.cache.delete(heldValue.id);
+        this.cacheVersion.delete(heldValue.id);
+      }
     });
 
-    // Known static element IDs that persist for the app lifetime
-    this.staticIds = new Set([
-      'app', 'main-content', 'dashboard-view', 'transactions-view',
-      'budget-view', 'nav-dashboard', 'nav-transactions', 'nav-budget',
-      'month-display', 'summary-cards', 'transaction-list',
-      'total-income', 'total-expenses', 'total-balance',
-      'budget-gauge', 'daily-allowance', 'spending-pace'
-    ]);
+    // Known static element IDs that persist for the app lifetime.
+    // See the STATIC_ELEMENT_IDS module-level constant above for the
+    // rationale, invariants, and the contract test that enforces them.
+    this.staticIds = new Set(STATIC_ELEMENT_IDS);
   }
 
   /**
@@ -117,10 +139,13 @@ export class DOMCache {
     // Not in cache or stale, query and store
     const element = document.getElementById(id);
     if (element) {
+      const version = ++this.nextVersion;
       this.cache.set(id, new WeakRef(element));
-      // Only register once per element to avoid stale finalization callbacks
+      this.cacheVersion.set(id, version);
+      // CR-Apr24-I finding 329: register with versioned held value so
+      // stale finalizer for a replaced element won't evict the new entry.
       if (!this.registered.has(element)) {
-        this.registry.register(element, id);
+        this.registry.register(element, { id, version });
         this.registered.add(element);
       }
       return element as T;
@@ -129,17 +154,12 @@ export class DOMCache {
     return null;
   }
 
-  /**
-   * Get cached element with null safety (returns mock element if not found)
-   * Prevents runtime crashes in non-critical rendering paths.
-   */
-  getSafe<T extends HTMLElement = HTMLElement>(id: string): T | SafeMockElement {
-    const element = this.get<T>(id);
-    if (element) return element;
-
-    // Return the module-level singleton mock to avoid allocating a new object each time
-    return SAFE_MOCK;
-  }
+  // Phase 5g-2 (Inline-Behavior-Review rev 12, M31): deleted the
+  // `getSafe()` method (see the file-level deletion note at the top
+  // of this module for rationale). Callers that need null-safe lookup
+  // should use `DOM.get(id)` and guard with `if (!el) return;` — the
+  // explicit guard surfaces missing-element bugs instead of silently
+  // routing writes into a shared stub.
 
   /**
    * Direct wrapper for querySelector (uncached)
@@ -169,21 +189,24 @@ export class DOMCache {
   clearAll(): void {
     this.cache.clear();
     this.staticCache.clear();
+    // CR-Apr24-I finding 330: clear version map so pending finalizer
+    // callbacks from pre-clear entries can no longer match any version
+    // and thus cannot evict freshly recached entries post-clear.
+    this.cacheVersion.clear();
   }
 
-  /**
-   * Legacy support - No-op in new implementation
-   */
-  init(): void {}
-  refresh(): void {}
-  refreshAll(): void {
-    this.clearAll();
-  }
+  // Phase 5g-1 (Inline-Behavior-Review rev 12, L47): deleted three
+  // `@deprecated` no-op/alias methods (`init()`, `refresh()`,
+  // `refreshAll()`). Grep across js/ + tests/ confirms zero callers of
+  // `DOM.init(`, `DOM.refresh(`, `DOM.refreshAll(` or any `DOMCache.`
+  // equivalents. `clearAll()` is the sole cache-reset entry point and
+  // remains in place.
 }
 
 // ==========================================
 // SINGLETON INSTANCE
 // ==========================================
 
+/** Application-wide singleton DOM cache instance. Import this, not the class. */
 export const DOM = new DOMCache();
 export default DOM;

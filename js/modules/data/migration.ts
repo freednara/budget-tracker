@@ -8,11 +8,11 @@
  */
 
 import { storageManager, STORES } from './storage-manager.js';
-import { SK, lsGet } from '../core/state.js';
-import { generateId } from '../core/utils.js';
+import { SK, lsGet, BACKUP_REMINDER_TX_COUNT_KEY } from '../core/state.js';
+import { generateId } from '../core/utils-pure.js';
+import { trackError } from '../core/error-tracker.js';
 import type {
   MigrationStatus,
-  MigrationProgress,
   MigrationProgressCallback,
   Transaction,
   SavingsGoal,
@@ -29,6 +29,7 @@ import type {
   AlertPrefs,
   InsightPersonality
 } from '../../types/index.js';
+import type { OnboardingState } from '../core/signals.js';
 
 // ==========================================
 // TYPE DEFINITIONS
@@ -52,9 +53,22 @@ interface LocalStorageData {
   sections: SectionsConfig | null;
   insightPers: InsightPersonality | null;
   alerts: AlertPrefs | null;
+  // CR-Apr24-I finding 170: previously omitted persisted settings
+  onboarding: OnboardingState | null;
+  filterExpanded: boolean;
+  lastBackupTxCount: number;
+  recurring: Record<string, unknown>;
+  hasOnboarded: boolean;
 }
 
-type LocalStorageBackupSnapshot = Omit<LocalStorageData, 'pin'>;
+// Fixes H9 (Inline-Behavior-Review rev 12): the snapshot must cover every
+// localStorage key that _readLocalStorage migrates out, including PIN. The
+// previous Omit<'pin'> made rollback silently lose the user's PIN — the
+// only auth credential — on any mid-migration failure. Keep this alias
+// equal to LocalStorageData; if a new key is added to one, it MUST appear
+// in the other, and the matching _createBackupSnapshot / _restoreFromBackup
+// changes below are the other half of the contract.
+type LocalStorageBackupSnapshot = LocalStorageData;
 
 interface MigrationResult {
   isOk: boolean;
@@ -71,8 +85,22 @@ interface StorageSnapshot extends Record<string, unknown> {
 // MIGRATION STATUS
 // ==========================================
 
+// PRESERVED ACROSS HARBOR LEDGER RENAME (ADR-001 §9.4): renaming this key
+// would cause existing users to re-run the IDB migration on their already-
+// migrated data. Do NOT include in the budget_tracker_* → harbor_* sweep.
+// A contract test in tests/migration-key-preservation.test.ts enforces this.
 const MIGRATION_KEY = 'budget_tracker_idb_migration';
-const ROLLBACK_FAILURE_KEY = 'budget_tracker_storage_rollback_failed';
+
+// Unified with storage-manager's rollback-failure marker. The runtime path
+// (storage-manager._recordRollbackFailure) and the migration-time rollback
+// path now both write this single key, and storage-manager.init() reads it
+// to force a safe localStorage fallback on the next boot. Previously this
+// was the legacy budget_tracker_* variant — which had no production reader
+// after the harbor_* rename, so migration-time rollback failures silently
+// lost their "force fallback" signal. Legacy markers still in a returning
+// user's localStorage get renamed to this key automatically by
+// key-migration.ts on next boot (intentionally NOT in its PRESERVE set).
+const ROLLBACK_FAILURE_KEY = 'harbor_storage_rollback_failed';
 
 // ==========================================
 // MIGRATION MANAGER CLASS
@@ -100,9 +128,14 @@ export class MigrationManager {
       return false;
     }
 
-    // Check if there's data in localStorage to migrate
-    const transactions = lsGet(SK.TX, []) as Transaction[];
-    return transactions.length > 0;
+    // New-batch P2: previously this short-circuited on
+    // `lsGet(SK.TX, [])` only, so a user with no transactions but
+    // populated settings / debts / goals / achievements was reported
+    // as "nothing to migrate" and their existing data never moved to
+    // IndexedDB. Consult the same read+count helpers `migrate()` uses
+    // so the needs-check and the actual migration agree.
+    const localData = this._readLocalStorage();
+    return this._countItems(localData) > 0;
   }
 
   /**
@@ -144,7 +177,7 @@ export class MigrationManager {
       // Save backup before proceeding — abort migration if backup fails
       try {
         localStorage.setItem(backupKey, JSON.stringify(migrationBackup));
-      } catch (e) {
+      } catch (_e) {
         if (import.meta.env.DEV) console.error('Could not create migration backup, aborting migration');
         return { isOk: false, error: 'Failed to create backup before migration' };
       }
@@ -327,6 +360,7 @@ export class MigrationManager {
 
       // Keep localStorage data as backup (don't delete)
       // Just mark that migration happened
+      // PRESERVED ACROSS HARBOR LEDGER RENAME (ADR-001 §9.4) — see MIGRATION_KEY comment.
       localStorage.setItem('budget_tracker_migrated_to_idb', Date.now().toString());
 
       // Clean up old backup keys, keeping only the most recent one
@@ -366,7 +400,25 @@ export class MigrationManager {
             if (import.meta.env.DEV) console.log('Migration rollback: restored from localStorage backup');
           }
         } catch (localRestoreErr) {
+          // Fixes H10 (Inline-Behavior-Review rev 12): this is the single
+          // worst failure mode in the data layer — the user has lost data
+          // AND we can't restore it. Previously DEV-only, now logged
+          // unconditionally AND stamped into ROLLBACK_FAILURE_KEY so the
+          // next boot can surface a recovery prompt.
           if (import.meta.env.DEV) console.error('Migration rollback also failed:', localRestoreErr);
+          trackError(localRestoreErr instanceof Error ? localRestoreErr : new Error(String(localRestoreErr)), {
+            module: 'migration',
+            action: 'rollback.localStorageRestore.FAILED'
+          });
+          try {
+            localStorage.setItem(ROLLBACK_FAILURE_KEY, JSON.stringify({
+              reason: 'migration_rollback_total_failure',
+              timestamp: Date.now(),
+              error: localRestoreErr instanceof Error ? localRestoreErr.message : String(localRestoreErr)
+            }));
+          } catch {
+            // localStorage itself is broken — nothing more we can do here.
+          }
         }
       }
 
@@ -396,7 +448,16 @@ export class MigrationManager {
       pin: lsGet(SK.PIN, null) as string | null,
       sections: lsGet(SK.SECTIONS, null) as SectionsConfig | null,
       insightPers: lsGet(SK.INSIGHT_PERS, null) as InsightPersonality | null,
-      alerts: lsGet(SK.ALERTS, null) as AlertPrefs | null
+      alerts: lsGet(SK.ALERTS, null) as AlertPrefs | null,
+      // CR-Apr24-I finding 170: these persisted settings were previously
+      // omitted from the migration pipeline, meaning a user who only had
+      // onboarding state, filter prefs, recurring templates, or a backup-
+      // reminder tx count would silently lose them on IDB migration.
+      onboarding: lsGet(SK.ONBOARD, null) as OnboardingState | null,
+      filterExpanded: lsGet(SK.FILTER_EXPANDED, false) as boolean,
+      lastBackupTxCount: lsGet(BACKUP_REMINDER_TX_COUNT_KEY, 0) as number,
+      recurring: lsGet(SK.RECURRING, {}) as Record<string, unknown>,
+      hasOnboarded: lsGet(SK.HAS_ONBOARDED, false) as boolean
     };
   }
 
@@ -417,6 +478,26 @@ export class MigrationManager {
     count += (data.filterPresets || []).length;
     count += (data.txTemplates || []).length;
 
+    // New-batch P2: settings-only cold-starts were previously miscounted
+    // as empty, causing `migrate()` to mark the migration complete
+    // without ever moving the user's theme, currency, PIN, etc. into
+    // IndexedDB. Count each populated settings slot so a settings-only
+    // localStorage gets a non-zero count and flows through the real
+    // migration path.
+    if (data.rolloverSettings) count += 1;
+    if (data.currency) count += 1;
+    if (data.theme) count += 1;
+    if (data.pin) count += 1;
+    if (data.sections) count += 1;
+    if (data.insightPers) count += 1;
+    if (data.alerts) count += 1;
+    // CR-Apr24-I finding 170: count the previously omitted settings
+    if (data.onboarding) count += 1;
+    if (data.filterExpanded) count += 1;
+    if (data.lastBackupTxCount > 0) count += 1;
+    if (Object.keys(data.recurring || {}).length > 0) count += 1;
+    if (data.hasOnboarded) count += 1;
+
     return count;
   }
 
@@ -431,7 +512,13 @@ export class MigrationManager {
       ['pin', localData.pin],
       ['sections', localData.sections],
       ['insightPersonality', localData.insightPers],
-      ['alerts', localData.alerts]
+      ['alerts', localData.alerts],
+      // CR-Apr24-I finding 170: migrate the previously omitted settings
+      ['onboarding', localData.onboarding],
+      ['filterExpanded', localData.filterExpanded],
+      ['lastBackupTxCount', localData.lastBackupTxCount],
+      ['recurring', localData.recurring],
+      ['hasOnboarded', localData.hasOnboarded]
     ];
 
     for (const [key, value] of settings) {
@@ -460,6 +547,26 @@ export class MigrationManager {
 
   private _valuesEqual(left: unknown, right: unknown): boolean {
     return JSON.stringify(this._normalizeForComparison(left)) === JSON.stringify(this._normalizeForComparison(right));
+  }
+
+  /**
+   * Extract the logical value from an IDB settings record.
+   * The IndexedDB adapter wraps settings: primitives become { key, value }
+   * and objects become { key, ...originalObj }. This strips the keyPath
+   * field so verification can compare against the original unwrapped value.
+   */
+  private _extractSettingValue(idbRecord: unknown): unknown {
+    if (idbRecord && typeof idbRecord === 'object' && !Array.isArray(idbRecord)) {
+      const record = { ...(idbRecord as Record<string, unknown>) };
+      delete record.key; // Remove IDB keyPath field
+      const keys = Object.keys(record);
+      // If only 'value' remains, this was a wrapped primitive
+      if (keys.length === 1 && keys[0] === 'value') {
+        return record.value;
+      }
+      return record;
+    }
+    return idbRecord;
   }
 
   /**
@@ -495,19 +602,29 @@ export class MigrationManager {
         ['pin', originalData.pin],
         ['sections', originalData.sections],
         ['insightPersonality', originalData.insightPers],
-        ['alerts', originalData.alerts]
+        ['alerts', originalData.alerts],
+        // CR-Apr24-I finding 171: verify the previously omitted settings
+        // so verification can't falsely report success after skipping them.
+        ['onboarding', originalData.onboarding],
+        ['filterExpanded', originalData.filterExpanded],
+        ['lastBackupTxCount', originalData.lastBackupTxCount],
+        ['recurring', originalData.recurring],
+        ['hasOnboarded', originalData.hasOnboarded]
       ];
 
       for (const [key, expected] of expectedSettings) {
-        const actual = await storageManager.get(STORES.SETTINGS, key);
+        const raw = await storageManager.get(STORES.SETTINGS, key);
         if (expected === null || expected === undefined) {
-          if (actual !== undefined) {
+          if (raw !== undefined) {
             if (import.meta.env.DEV) console.error(`Migration verification mismatch for setting ${key}`);
             return false;
           }
           continue;
         }
 
+        // The IDB adapter wraps settings with a keyPath field ('key').
+        // Strip it so we compare against the original unwrapped value.
+        const actual = this._extractSettingValue(raw);
         if (!this._valuesEqual(actual, expected)) {
           if (import.meta.env.DEV) console.error(`Migration verification mismatch for setting ${key}`);
           return false;
@@ -540,9 +657,22 @@ export class MigrationManager {
       rolloverSettings: lsGet(SK.ROLLOVER_SETTINGS, null) as RolloverSettings | null,
       currency: lsGet(SK.CURRENCY, null) as CurrencySettings | null,
       theme: lsGet(SK.THEME, null) as string | null,
+      // Fixes H9 (Inline-Behavior-Review rev 12): snapshot the PIN so rollback
+      // can restore it. Omitting it silently erased the user's only auth
+      // credential on any mid-migration failure.
+      pin: lsGet(SK.PIN, null) as string | null,
       sections: lsGet(SK.SECTIONS, null) as SectionsConfig | null,
       insightPers: lsGet(SK.INSIGHT_PERS, null) as InsightPersonality | null,
-      alerts: lsGet(SK.ALERTS, null) as AlertPrefs | null
+      alerts: lsGet(SK.ALERTS, null) as AlertPrefs | null,
+      // CR-Apr24-I finding 172: snapshot the previously omitted settings
+      // so rollback can restore them. Without these, a mid-migration
+      // failure would silently lose onboarding progress, filter state,
+      // backup-reminder counters, and recurring templates.
+      onboarding: lsGet(SK.ONBOARD, null) as OnboardingState | null,
+      filterExpanded: lsGet(SK.FILTER_EXPANDED, false) as boolean,
+      lastBackupTxCount: lsGet(BACKUP_REMINDER_TX_COUNT_KEY, 0) as number,
+      recurring: lsGet(SK.RECURRING, {}) as Record<string, unknown>,
+      hasOnboarded: lsGet(SK.HAS_ONBOARDED, false) as boolean
     };
   }
 
@@ -561,9 +691,14 @@ export class MigrationManager {
         return bTime - aTime;
       });
 
-      // Remove all but the most recent backup
+      // Remove all but the most recent backup.
+      // Phase 6 Slice 1i (rev 12 L6): `backupKeys[i]` is
+      // `string | undefined` under `noUncheckedIndexedAccess`; the
+      // `i < backupKeys.length` bound guarantees presence, but a local
+      // pull keeps `removeItem` argument typed without an assertion.
       for (let i = 1; i < backupKeys.length; i++) {
-        localStorage.removeItem(backupKeys[i]);
+        const key = backupKeys[i];
+        if (key) localStorage.removeItem(key);
       }
     } catch (err) {
       if (import.meta.env.DEV) console.warn('Failed to clean up old backups:', err);
@@ -576,24 +711,42 @@ export class MigrationManager {
    */
   private _restoreFromBackup(backup: LocalStorageBackupSnapshot): boolean {
     try {
+      const setOptionalJson = (key: string, value: unknown): void => {
+        if (value === null || value === undefined) {
+          localStorage.removeItem(key);
+          return;
+        }
+        localStorage.setItem(key, JSON.stringify(value));
+      };
+
       // Restore all localStorage data
       localStorage.setItem(SK.TX, JSON.stringify(backup.transactions));
       localStorage.setItem(SK.SAVINGS, JSON.stringify(backup.savingsGoals));
       localStorage.setItem(SK.SAVINGS_CONTRIB, JSON.stringify(backup.savingsContribs));
       localStorage.setItem(SK.ALLOC, JSON.stringify(backup.monthlyAlloc));
       localStorage.setItem(SK.ACHIEVE, JSON.stringify(backup.achievements));
-      if (backup.streak) localStorage.setItem(SK.STREAK, JSON.stringify(backup.streak));
+      setOptionalJson(SK.STREAK, backup.streak);
       localStorage.setItem(SK.CUSTOM_CAT, JSON.stringify(backup.customCats));
       localStorage.setItem(SK.DEBTS, JSON.stringify(backup.debts));
       localStorage.setItem(SK.FILTER_PRESETS, JSON.stringify(backup.filterPresets));
       localStorage.setItem(SK.TX_TEMPLATES, JSON.stringify(backup.txTemplates));
-      if (backup.rolloverSettings) localStorage.setItem(SK.ROLLOVER_SETTINGS, JSON.stringify(backup.rolloverSettings));
-      if (backup.currency) localStorage.setItem(SK.CURRENCY, JSON.stringify(backup.currency));
-      if (backup.theme) localStorage.setItem(SK.THEME, JSON.stringify(backup.theme));
-      if (backup.sections) localStorage.setItem(SK.SECTIONS, JSON.stringify(backup.sections));
-      if (backup.insightPers) localStorage.setItem(SK.INSIGHT_PERS, JSON.stringify(backup.insightPers));
-      if (backup.alerts) localStorage.setItem(SK.ALERTS, JSON.stringify(backup.alerts));
-      
+      setOptionalJson(SK.ROLLOVER_SETTINGS, backup.rolloverSettings);
+      setOptionalJson(SK.CURRENCY, backup.currency);
+      setOptionalJson(SK.THEME, backup.theme);
+      // Fixes H9 (Inline-Behavior-Review rev 12): restore the PIN too. The
+      // snapshot now captures it (see _createBackupSnapshot); without this
+      // line rollback would still silently wipe it.
+      setOptionalJson(SK.PIN, backup.pin);
+      setOptionalJson(SK.SECTIONS, backup.sections);
+      setOptionalJson(SK.INSIGHT_PERS, backup.insightPers);
+      setOptionalJson(SK.ALERTS, backup.alerts);
+      // CR-Apr24-I finding 172: restore the previously omitted settings
+      setOptionalJson(SK.ONBOARD, backup.onboarding);
+      localStorage.setItem(SK.FILTER_EXPANDED, JSON.stringify(backup.filterExpanded));
+      localStorage.setItem(BACKUP_REMINDER_TX_COUNT_KEY, JSON.stringify(backup.lastBackupTxCount));
+      localStorage.setItem(SK.RECURRING, JSON.stringify(backup.recurring));
+      localStorage.setItem(SK.HAS_ONBOARDED, JSON.stringify(backup.hasOnboarded));
+
       return true;
     } catch (err) {
       if (import.meta.env.DEV) console.error('Failed to restore backup:', err);
@@ -618,17 +771,36 @@ export class MigrationManager {
           return bTime - aTime;
         });
         
-        // Restore from the most recent backup
-        const backupData = localStorage.getItem(backupKeys[0]);
-        if (backupData) {
-          const backup = JSON.parse(backupData) as LocalStorageData;
-          this._restoreFromBackup(backup);
-          if (import.meta.env.DEV) console.log('Restored from backup:', backupKeys[0]);
+        // Restore from the most recent backup.
+        // Phase 6 Slice 1i (rev 12 L6): `backupKeys[0]` is
+        // `string | undefined` under `noUncheckedIndexedAccess`; pull
+        // into a local and guard before calling `localStorage.getItem`.
+        const topKey = backupKeys[0];
+        if (topKey) {
+          const backupData = localStorage.getItem(topKey);
+          if (backupData) {
+            const backup = JSON.parse(backupData) as LocalStorageData;
+            // CR-Apr24-I finding 173: check the return value instead of
+            // ignoring it. A false return means at least one setItem threw
+            // (e.g. quota exceeded), so the user's data is only partially
+            // restored — propagate as a failed rollback.
+            const restored = this._restoreFromBackup(backup);
+            if (!restored) {
+              if (import.meta.env.DEV) console.error('Rollback: _restoreFromBackup returned false for:', topKey);
+              trackError(new Error('Migration rollback: backup restore failed'), {
+                module: 'migration',
+                action: 'rollback.restoreFromBackup.FAILED'
+              });
+              return false;
+            }
+            if (import.meta.env.DEV) console.log('Restored from backup:', topKey);
+          }
         }
       }
-      
+
       // Clear migration status
       localStorage.removeItem(MIGRATION_KEY);
+      // PRESERVED ACROSS HARBOR LEDGER RENAME (ADR-001 §9.4) — see MIGRATION_KEY comment.
       localStorage.removeItem('budget_tracker_migrated_to_idb');
 
       // Storage manager will use localStorage on next init

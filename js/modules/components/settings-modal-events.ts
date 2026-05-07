@@ -6,7 +6,7 @@
  */
 'use strict';
 
-import { announcer, aria } from '../core/accessibility.js';
+import { announcer } from '../core/accessibility.js';
 
 // ==========================================
 // EVENT HANDLER ENHANCEMENTS
@@ -29,7 +29,7 @@ export function announceThemeChange(themeName: string): void {
 /**
  * Announce currency change to screen readers
  */
-export function announceCurrencyChange(currency: string, symbol: string): void {
+export function announceCurrencyChange(currency: string, _symbol: string): void {
   announcer.announce(`Currency changed to ${currency}`, 'polite');
 }
 

@@ -9,7 +9,7 @@
  */
 'use strict';
 
-import { toCents, toDollars, sumByType } from '../core/utils-pure.js';
+import { toCents, toDollars, monthKeyParts } from '../core/utils-pure.js';
 import { isTrackedExpenseTransaction } from '../core/transaction-classification.js';
 
 // ==========================================
@@ -144,6 +144,7 @@ export function calculateTotals(
  */
 export function calculateDailyAllowance(
   monthlyIncome: number,
+  // Round 7 fix: monthlyIncome parameter is unused (not referenced in function body)
   monthlyExpenses: number,
   totalAllocated: number,
   daysRemaining: number,
@@ -196,9 +197,7 @@ export function calculateVelocity(
   currentMonth: string,
   referenceDate: Date
 ): VelocityResult {
-  const [yearStr, monthStr] = currentMonth.split('-');
-  const year = parseInt(yearStr, 10);
-  const month = parseInt(monthStr, 10);
+  const [year, month] = monthKeyParts(currentMonth);
 
   const isCurrentMonth =
     referenceDate.getFullYear() === year &&
@@ -302,7 +301,9 @@ export function calculateYearStats(
     const amtCents = toCents(tx.amount);
     if (tx.type === 'income') {
       incomeCents += amtCents;
-    } else if (tx.type === 'expense') {
+    // CR-Apr24-I finding 234: route through isTrackedExpenseTransaction
+    // so savings-transfers are excluded, matching the rest of the app.
+    } else if (isTrackedExpenseTransaction(tx as TransactionInput & { tags?: string; notes?: string; description?: string })) {
       expensesCents += amtCents;
       catTotalsCents[tx.category] = (catTotalsCents[tx.category] || 0) + amtCents;
     }
@@ -343,8 +344,12 @@ export function calculateAllTimeStats(
   if (!allTx.length) return null;
 
   const sorted = [...allTx].sort((a, b) => a.date.localeCompare(b.date));
-  const firstDate = sorted[0].date;
-  const lastDate = sorted[sorted.length - 1].date;
+  // Phase 6 Slice 1i (rev 12 L6): `sorted[i]` is `T | undefined`
+  // under `noUncheckedIndexedAccess`. The `!allTx.length` guard
+  // above guarantees presence; `?.date ?? ''` keeps the types
+  // narrow for the downstream return shape.
+  const firstDate = sorted[0]?.date ?? '';
+  const lastDate = sorted[sorted.length - 1]?.date ?? '';
 
   let totalIncomeCents = 0;
   let totalExpensesCents = 0;
@@ -352,7 +357,9 @@ export function calculateAllTimeStats(
   for (const tx of allTx) {
     const amtCents = toCents(tx.amount);
     if (tx.type === 'income') totalIncomeCents += amtCents;
-    else if (tx.type === 'expense') totalExpensesCents += amtCents;
+    // CR-Apr24-I finding 235: route through isTrackedExpenseTransaction
+    // so savings-transfers are excluded, matching the rest of the app.
+    else if (isTrackedExpenseTransaction(tx as TransactionInput & { tags?: string; notes?: string; description?: string })) totalExpensesCents += amtCents;
   }
 
   const totalIncome = toDollars(totalIncomeCents);
@@ -371,14 +378,16 @@ export function calculateAllTimeStats(
   };
 }
 
-// ==========================================
-// PERCENTAGE UTILITIES
-// ==========================================
-
-/**
- * Calculate percentage change between two values.
- */
-export function calculatePercentChange(current: number, previous: number): number {
-  if (previous === 0) return current > 0 ? 100 : 0;
-  return ((current - previous) / previous) * 100;
-}
+// 7a (Inline-Behavior-Review, Period/scope coherence + baseline helper):
+// `calculatePercentChange` was the pure-domain mirror of the retired
+// `features/financial/calculations.ts::calcPercentChange`. Same fabrication
+// shape (`prev === 0 ? (cur > 0 ? 100 : 0) : pct`), and zero production
+// callers — only the `tests/transaction-service.test.ts` suite, which
+// actively locked in the fabrication (expected `100` from
+// `calculatePercentChange(100, 0)`). Retired alongside the live-layer
+// counterpart per the 7l live-/domain-layer parity pattern: when a defect
+// is fixed in the live layer, audit the domain layer for the same shape
+// before closing. Both layers now route percentage-change semantics
+// through `core/baseline.ts::computeBaselineDelta`, which classifies the
+// three cases ('comparable' | 'new' | 'no-data') instead of collapsing
+// them to a numeric fabrication.

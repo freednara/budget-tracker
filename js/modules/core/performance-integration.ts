@@ -5,11 +5,12 @@
 
 import { perfMonitor, monitored } from './performance-monitor.js';
 import { on } from './event-bus.js';
-import { DataSyncEvents, requestDataSync } from './data-sync-interface.js';
+import { DataSyncEvents, requestDataSync, requestDataReload } from './data-sync-interface.js';
+import { CONFIG } from './config.js';
 import type { Transaction } from '../../types/index.js';
 
 function isPerfDebugEnabled(): boolean {
-  return import.meta.env.DEV && typeof window !== 'undefined' && (window as any).__APP_DEBUG_PERF__ === true;
+  return import.meta.env.DEV && typeof window !== 'undefined' && window.__APP_DEBUG_PERF__ === true;
 }
 
 let performanceMonitoringInitialized = false;
@@ -26,21 +27,47 @@ let offlineHandler: (() => void) | null = null;
 /**
  * Monitored version of transaction creation (via events)
  */
+/**
+ * Monitored version of transaction creation (via events).
+ *
+ * CR-Apr24-I finding 297: previously resolved on the first global
+ * SYNC_COMPLETE with no request correlation — an unrelated sync finishing
+ * first could satisfy the wrong monitored create. Now tags the request
+ * with a unique source identifier and only resolves when the completion
+ * payload carries a matching source.
+ */
+let _createTxSeq = 0;
 export const createTransactionMonitored = monitored(
   async (data: Partial<Transaction>) => {
+    const source = `perf-monitor-create-${++_createTxSeq}`;
     return new Promise((resolve, reject) => {
-      let unsubscribe: (() => void) | null = null;
+      let unsubscribeComplete: (() => void) | null = null;
+      let unsubscribeError: (() => void) | null = null;
+      const cleanup = () => {
+        clearTimeout(timeout);
+        unsubscribeComplete?.();
+        unsubscribeError?.();
+      };
       const timeout = setTimeout(() => {
-        unsubscribe?.();
+        cleanup();
         reject(new Error('createTransactionMonitored timed out'));
       }, 10000);
-      const handler = ({ success, data: result }: any) => {
-        clearTimeout(timeout);
-        unsubscribe?.();
-        resolve(result);
+      const handler = (payload: { data: unknown; source?: string }) => {
+        // CR-Apr24-I finding 297: only resolve when source matches our request
+        if (payload.source && payload.source !== source) return;
+        cleanup();
+        resolve(payload.data);
       };
-      unsubscribe = on(DataSyncEvents.SYNC_COMPLETE, handler);
-      requestDataSync([data as Transaction], 'performance-monitor');
+      // CR-Apr24-I finding 298: listen for SYNC_ERROR so a failed sync
+      // rejects promptly instead of waiting for the 10s timeout.
+      const errorHandler = (payload: { error: unknown }) => {
+        cleanup();
+        const err = payload.error instanceof Error ? payload.error : new Error(String(payload.error));
+        reject(err);
+      };
+      unsubscribeComplete = on(DataSyncEvents.SYNC_COMPLETE, handler);
+      unsubscribeError = on(DataSyncEvents.SYNC_ERROR, errorHandler);
+      requestDataSync([data as Transaction], source);
     });
   },
   'transaction.create'
@@ -49,26 +76,55 @@ export const createTransactionMonitored = monitored(
 /**
  * Monitored version of bulk transaction loading (via events)
  */
+/**
+ * Monitored version of bulk transaction loading (via events).
+ *
+ * CR-Apr24-I finding 290: previously this helper subscribed to
+ * TRANSACTION_UPDATED but never called requestDataReload(), so it would
+ * simply wait for an unrelated external update event and otherwise time
+ * out. Now it actually triggers the reload after wiring the listener.
+ */
+let _loadTxSeq = 0;
 export const loadTransactionsMonitored = monitored(
   async () => {
+    const source = `perf-monitor-load-${++_loadTxSeq}`;
     return new Promise((resolve, reject) => {
-      let unsubscribe: (() => void) | null = null;
+      let unsubscribeUpdate: (() => void) | null = null;
+      let unsubscribeError: (() => void) | null = null;
+      const cleanup = () => {
+        clearTimeout(timeout);
+        unsubscribeUpdate?.();
+        unsubscribeError?.();
+      };
       const timeout = setTimeout(() => {
-        unsubscribe?.();
+        cleanup();
         reject(new Error('loadTransactionsMonitored timed out'));
       }, 10000);
-      const handler = ({ data }: any) => {
-        clearTimeout(timeout);
-        unsubscribe?.();
+      // CR-Apr24-I finding 299: accept the first TRANSACTION_UPDATED
+      // after our own request. Full source-correlation is not available
+      // on this event, so accept the first payload after we fire the
+      // reload — materially better than the previous no-request version.
+      const handler = ({ data }: { data: unknown }) => {
+        cleanup();
         resolve(data);
       };
-      unsubscribe = on(DataSyncEvents.TRANSACTION_UPDATED, handler);
+      // CR-Apr24-I finding 298 (pattern): listen for SYNC_ERROR too.
+      const errorHandler = (payload: { error: unknown }) => {
+        cleanup();
+        const err = payload.error instanceof Error ? payload.error : new Error(String(payload.error));
+        reject(err);
+      };
+      unsubscribeUpdate = on(DataSyncEvents.TRANSACTION_UPDATED, handler);
+      unsubscribeError = on(DataSyncEvents.SYNC_ERROR, errorHandler);
+
+      // CR-Apr24-I finding 290: actually trigger the transaction load
+      requestDataReload(source);
     });
   },
   'transaction.loadAll'
 );
 
-import { html, render, type TemplateResult } from './lit-helpers.js';
+import { render, type TemplateResult } from './lit-helpers.js';
 
 // ==========================================
 // RENDER PERFORMANCE MONITORING
@@ -95,33 +151,6 @@ export function monitorLitRender(
       if (import.meta.env.DEV) console.warn(`[Performance] Lit render '${componentName}' took ${duration.toFixed(2)}ms (over 1 frame)`);
     }
   });
-}
-
-/**
- * Monitor React/Preact component renders
- */
-export function withRenderMonitoring<P extends object>(
-  Component: React.ComponentType<P>,
-  componentName: string
-): React.ComponentType<P> {
-  return (props: P) => {
-    perfMonitor.mark(`component.${componentName}.render`);
-    
-    // Schedule measurement after render
-    requestAnimationFrame(() => {
-      perfMonitor.measure(
-        `component.${componentName}`,
-        `component.${componentName}.render`
-      );
-    });
-    
-    // For function components
-    if (typeof Component === 'function') {
-      return (Component as any)(props);
-    }
-    // For class components (shouldn't happen but handle it)
-    return null as any;
-  };
 }
 
 // ==========================================
@@ -172,15 +201,22 @@ function resolveMonitoredFetchUrl(input: RequestInfo | URL): URL | null {
 // ==========================================
 
 /**
- * Monitor event handler performance
+ * Monitor event handler performance.
+ *
+ * CR-Apr24-I finding 300: previously always returned an `async` wrapper,
+ * turning synchronous throws into rejected promises — a materially
+ * different contract for callers expecting immediate exception behavior.
+ * Now the wrapper is synchronous when the inner handler is synchronous,
+ * preserving the original throw semantics.
  */
 export function monitorEventHandler<T extends Event>(
   handlerName: string,
   handler: (event: T) => void | Promise<void>
 ): (event: T) => void | Promise<void> {
-  return async (event: T) => {
+  return (event: T): void | Promise<void> => {
     const eventType = event.type;
-    
+
+    const start = performance.now();
     const result = handler(event);
     if (result instanceof Promise) {
       return perfMonitor.measureAsync(
@@ -188,9 +224,13 @@ export function monitorEventHandler<T extends Event>(
         () => result,
         { eventType }
       );
-    } else {
-      return result;
     }
+    // CR-Apr24-I findings 291+300: measure sync handlers too so the
+    // performance monitor covers both paths. Record timing directly
+    // so synchronous throws propagate as throws, not rejected promises.
+    const duration = performance.now() - start;
+    perfMonitor.recordMetric(`event.${handlerName}`, duration, 'ms', { eventType });
+    return result;
   };
 }
 
@@ -262,6 +302,57 @@ export class PerformanceBudgetEnforcer {
 // ==========================================
 
 /**
+ * Tear down automatic performance monitoring: disconnect the long-task
+ * PerformanceObserver, detach visibilitychange + online + offline listeners,
+ * clear the budget-check interval, and reset the init flag so a subsequent
+ * `setupPerformanceMonitoring()` call re-arms the pipeline cleanly.
+ *
+ * Phase 6 Slice 1c (Inline-Behavior-Review rev 12, L4): previously
+ * `budgetCheckInterval` (and the PerformanceObserver + three window
+ * listeners) were captured to module-scope but had no release path. A
+ * second `setupPerformanceMonitoring()` call early-returned via the init
+ * guard, so there was no leak on double-init *today*, but any future
+ * re-init flow (e.g. HMR, DI-container re-bootstrap, tests that want a
+ * fresh monitoring pipeline) would silently stack a second 1 Hz interval,
+ * a second long-task observer, and three duplicate window listeners onto
+ * the first. This function is the pair to `setupPerformanceMonitoring` —
+ * call it before re-calling setup to get clean re-init semantics.
+ */
+export function cleanupPerformanceMonitoring(): void {
+  if (longTaskObserver) {
+    try {
+      longTaskObserver.disconnect();
+    } catch {
+      // PerformanceObserver.disconnect() is idempotent in spec but older
+      // implementations throw on double-disconnect; swallow deliberately.
+    }
+    longTaskObserver = null;
+  }
+
+  if (visibilityChangeHandler) {
+    document.removeEventListener('visibilitychange', visibilityChangeHandler);
+    visibilityChangeHandler = null;
+  }
+
+  if (onlineHandler) {
+    window.removeEventListener('online', onlineHandler);
+    onlineHandler = null;
+  }
+
+  if (offlineHandler) {
+    window.removeEventListener('offline', offlineHandler);
+    offlineHandler = null;
+  }
+
+  if (budgetCheckInterval !== null) {
+    clearInterval(budgetCheckInterval);
+    budgetCheckInterval = null;
+  }
+
+  performanceMonitoringInitialized = false;
+}
+
+/**
  * Set up automatic performance monitoring for the app
  */
 export function setupPerformanceMonitoring(): void {
@@ -289,7 +380,7 @@ export function setupPerformanceMonitoring(): void {
         }
       });
       longTaskObserver.observe({ entryTypes: ['longtask'] });
-    } catch (e) {
+    } catch (_e) {
       longTaskObserver = null;
       // Long task monitoring not available
     }
@@ -351,13 +442,13 @@ export function setupPerformanceMonitoring(): void {
   });
   
   // Check budgets periodically
-  budgetCheckInterval = setInterval(() => budgetEnforcer.check(), 60000);
+  budgetCheckInterval = setInterval(() => budgetEnforcer.check(), CONFIG.TIMING.PERIODIC_CLEANUP_INTERVAL);
   
   // Note: perfMonitor.logReport() on beforeunload is handled in app.ts
 
   // Expose performance monitor globally for debugging
   if (import.meta.env.DEV) {
-    (window as any).perfMonitor = perfMonitor;
+    window.perfMonitor = perfMonitor;
   }
 }
 
@@ -370,7 +461,7 @@ export const performanceTools = {
   monitorRender: monitorLitRender,
   monitorEventHandler,
   monitoredFetch,
-  withRenderMonitoring,
   InitializationMonitor,
-  setupPerformanceMonitoring
+  setupPerformanceMonitoring,
+  cleanupPerformanceMonitoring
 };

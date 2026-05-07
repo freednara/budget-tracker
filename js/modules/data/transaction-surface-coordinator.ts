@@ -8,9 +8,10 @@
 
 import { on, Events, type UnsubscribeFn } from '../core/event-bus.js';
 import { DataSyncEvents } from '../core/data-sync-interface.js';
+import { effect } from '@preact/signals-core';
+import * as signals from '../core/signals.js';
 import { filters, pagination } from '../core/state-actions.js';
 import { renderTransactionsList } from './transaction-renderer.js';
-import type * as signals from '../core/signals.js';
 
 let coordinatorUnsubscribers: UnsubscribeFn[] = [];
 
@@ -61,8 +62,18 @@ export function initTransactionSurfaceCoordinator(): () => void {
     })
   ];
 
+  // Re-render transaction rows when currency changes so amounts show the new symbol/format.
+  // Skip the first run (initial mount) — the list is already rendered with the current currency.
+  let isFirstRun = true;
+  const disposeCurrencyEffect = effect(() => {
+    const _cur = signals.currency.value;  // subscribe to currency changes
+    if (isFirstRun) { isFirstRun = false; return; }
+    void refreshTransactionsSurface();
+  });
+
   return () => {
     coordinatorUnsubscribers.forEach((unsubscribe) => unsubscribe());
     coordinatorUnsubscribers = [];
+    disposeCurrencyEffect();
   };
 }
