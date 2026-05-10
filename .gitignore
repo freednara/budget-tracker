@@ -27,3 +27,22 @@ npm-debug.log*
 .env.local
 .env.*.local
 .vercel
+
+# Test artifacts
+test-results/
+playwright-report/
+vitest.config.ts.timestamp-*.mjs
+
+# Backup / editor / OS artifacts
+*.bak
+.fuse_hidden*
+
+# Local review documents (not committed)
+*.docx
+Code-Review-*.md
+DESIGN-SYSTEM-*.md
+Inline-Behavior-*.md
+QA-REPORT-*.md
+UX-Copy-*.md
+WCAG-*.md
+harbor-ledger-*.md
